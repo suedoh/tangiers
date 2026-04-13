@@ -26,10 +26,11 @@ const { execFileSync } = require('child_process');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const ROOT       = path.resolve(__dirname, '..');
-const ENV_FILE   = path.join(ROOT, '.env');
-const NOTIFY     = path.join(ROOT, 'scripts', 'discord-notify.sh');
-const STATE_FILE = path.join(ROOT, '.trigger-state.json');
+const ROOT        = path.resolve(__dirname, '..');
+const ENV_FILE    = path.join(ROOT, '.env');
+const NOTIFY      = path.join(ROOT, 'scripts', 'discord-notify.sh');
+const STATE_FILE  = path.join(ROOT, '.trigger-state.json');
+const TRADES_FILE = path.join(ROOT, 'trades.json');
 
 const CDP_PORT         = 9222;
 const COOLDOWN_MS      = 2 * 60 * 60 * 1000; // 2 hours between alerts per zone
@@ -641,6 +642,21 @@ function checkInvalidations(currentZones, price, indicators) {
 
     log(`Zone ${key} mitigated | CVD confirms break: ${cvdConfirmsBreak} | OI expanding: ${oiExpanding} | verdict: ${isRealBreak ? 'REAL BREAK' : 'AMBIGUOUS'}`);
 
+    // Mark any open trade for this zone as invalidated in the trade log
+    if (isRealBreak) {
+      const trades = readTrades();
+      for (const t of trades) {
+        if (t.outcome !== null) continue;
+        if (Math.abs(t.zone.high - high) < 10 && Math.abs(t.zone.low - low) < 10) {
+          t.outcome  = 'invalidated';
+          t.closedAt = new Date().toISOString();
+          t.pnlR     = -1.0; // treated as a loss — stop thesis failed
+          log(`Trade for zone ${key} marked invalidated`);
+        }
+      }
+      writeTrades(trades);
+    }
+
     messages.push(formatInvalidationMessage(price, direction, { high, low }, isRealBreak, cvd, cvdConfirmsBreak, oiTrend, oiExpanding, currentZones));
 
     // Remove the alerted zone entry.
@@ -791,6 +807,121 @@ function checkReclaimWatch(currentZones, price, indicators) {
   return messages;
 }
 
+// ─── Trade Log ───────────────────────────────────────────────────────────────
+//
+// trades.json schema (array of trade objects):
+// {
+//   id:        "1744000000000-70823-70470"   unique: ts + zone
+//   firedAt:   ISO timestamp
+//   direction: "long" | "short"
+//   setupType: "A — Trend Continuation" etc.
+//   price:     70775                          price when alert fired
+//   zone:      { high: 70823, low: 70470 }
+//   entry:     70717
+//   stop:      70329
+//   tp1:       71580,  tp2: 73400,  tp3: 71881
+//   rr1:       "2.2",  rr2: "6.9",  rr3: "3.0"
+//   criteria:  [ { label, pass, auto } ... ]  snapshot of criteria at signal time
+//   indicators: { cvd, oi, oiTrend, vwap, macd4hBullish, rsi12h }
+//   outcome:   null | "tp1" | "tp2" | "tp3" | "stop" | "invalidated" | "expired"
+//   closedAt:  null | ISO timestamp
+//   pnlR:      null | number   (R-multiple: 1.0 = hit TP1, -1.0 = stopped out, etc.)
+// }
+
+function readTrades() {
+  try { return JSON.parse(fs.readFileSync(TRADES_FILE, 'utf8')); } catch { return []; }
+}
+
+function writeTrades(trades) {
+  fs.writeFileSync(TRADES_FILE, JSON.stringify(trades, null, 2));
+}
+
+function logTrade(price, zone, setup) {
+  const trades = readTrades();
+  const id = `${Date.now()}-${Math.round(zone.high)}-${Math.round(zone.low)}`;
+  trades.push({
+    id,
+    firedAt:    new Date().toISOString(),
+    direction:  setup.direction,
+    setupType:  setup.setupType,
+    probability: setup.probability,
+    price:      Math.round(price),
+    zone:       { high: zone.high, low: zone.low },
+    entry:      setup.entry,
+    stop:       setup.stop,
+    tp1:        setup.tp1Price, tp2: setup.tp2Price, tp3: setup.tp3Price,
+    rr1:        setup.rr1,     rr2: setup.rr2,      rr3: setup.rr3,
+    criteria:   setup.criteria.map(c => ({ label: c.label, pass: c.pass, auto: c.auto })),
+    indicators: {
+      cvd:           setup._cvd     ?? null,
+      oi:            setup._oi      ?? null,
+      oiTrend:       setup._oiTrend ?? null,
+      vwap:          setup._vwap    ?? null,
+      macd4hBullish: setup._macd4h  != null ? setup._macd4h.bullish : null,
+      rsi12h:        setup._rsi12h  != null ? Math.round(setup._rsi12h) : null,
+    },
+    outcome:  null,
+    closedAt: null,
+    pnlR:     null,
+  });
+  writeTrades(trades);
+  log(`Trade logged: ${id}`);
+}
+
+// Check open trades against current price and mark outcomes automatically.
+// Called every poll — only processes trades where outcome is still null.
+// R-multiples: TP1=rr1, TP2=rr2, TP3=rr3, stop=-1.0
+function updateOutcomes(currentPrice) {
+  const trades = readTrades();
+  let changed = false;
+
+  for (const t of trades) {
+    if (t.outcome !== null) continue;
+
+    // Expire trades older than 30 days with no outcome — treat as no-trade
+    const age = Date.now() - new Date(t.firedAt).getTime();
+    if (age > 30 * 24 * 60 * 60 * 1000) {
+      t.outcome  = 'expired';
+      t.closedAt = new Date().toISOString();
+      t.pnlR     = 0;
+      changed    = true;
+      log(`Trade ${t.id} expired (30 days, no outcome)`);
+      continue;
+    }
+
+    const price = currentPrice;
+    if (t.direction === 'long') {
+      if (price <= t.stop) {
+        t.outcome = 'stop'; t.pnlR = -1.0;
+      } else if (price >= t.tp3) {
+        t.outcome = 'tp3'; t.pnlR = parseFloat(t.rr3);
+      } else if (price >= t.tp2) {
+        t.outcome = 'tp2'; t.pnlR = parseFloat(t.rr2);
+      } else if (price >= t.tp1) {
+        t.outcome = 'tp1'; t.pnlR = parseFloat(t.rr1);
+      }
+    } else {
+      if (price >= t.stop) {
+        t.outcome = 'stop'; t.pnlR = -1.0;
+      } else if (price <= t.tp3) {
+        t.outcome = 'tp3'; t.pnlR = parseFloat(t.rr3);
+      } else if (price <= t.tp2) {
+        t.outcome = 'tp2'; t.pnlR = parseFloat(t.rr2);
+      } else if (price <= t.tp1) {
+        t.outcome = 'tp1'; t.pnlR = parseFloat(t.rr1);
+      }
+    }
+
+    if (t.outcome !== null) {
+      t.closedAt = new Date().toISOString();
+      changed    = true;
+      log(`Trade ${t.id} closed: ${t.outcome} | R: ${t.pnlR}`);
+    }
+  }
+
+  if (changed) writeTrades(trades);
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -904,6 +1035,9 @@ async function main() {
   indicators.rsi12h  = studies._rsi12h ?? null;
   log(`CVD: ${indicators.cvd} | OI: ${indicators.oi} (${indicators.oiTrend ?? 'no trend yet'}) | VWAP: ${indicators.vwap}`);
 
+  // Always update outcomes on open trades — runs every poll, no CDP needed
+  updateOutcomes(price);
+
   // 7. Check if any previously alerted zones have been mitigated
   const invalidations = checkInvalidations(zones, price, indicators);
   for (const msg of invalidations) {
@@ -939,12 +1073,21 @@ async function main() {
 
     log(`TRIGGER: Zone ${zoneKey} | ${distStr} | buffer $${Math.round(buffer).toLocaleString()}`);
 
-    // 7. Evaluate setup + format message
+    // Evaluate setup + format message
     const setup = evaluateSetup(price, zone, indicators, zones);
+    // Snapshot indicator values onto setup for trade log
+    setup._cvd    = indicators.cvd;
+    setup._oi     = indicators.oi;
+    setup._oiTrend = indicators.oiTrend;
+    setup._vwap   = indicators.vwap;
+    setup._macd4h = indicators.macd4h;
+    setup._rsi12h = indicators.rsi12h;
+
     const message = formatSetupMessage(price, zone, setup);
 
     notify(setup.direction, message);
     markAlerted(zoneKey, setup.direction, zone);
+    logTrade(price, zone, setup);
 
     triggered = true;
     break; // one alert at a time

@@ -1,5 +1,6 @@
 .env
 .trigger-state.json
+trades.json
 node_modules/
 tradingview-mcp/node_modules/
 tradingview-mcp/screenshots/

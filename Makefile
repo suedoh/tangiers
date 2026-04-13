@@ -54,19 +54,34 @@ mcp: ## Register TradingView MCP server with Claude Desktop
 	  echo "⚠  Could not register MCP — is 'claude' CLI installed? Register manually: claude mcp add tradingview -s user -- node $(TRADING)/tradingview-mcp/src/server.js"; \
 	fi
 
-cron: ## Install the 30-minute cron job (idempotent)
-	@if crontab -l 2>/dev/null | grep -q "trigger-check.js"; then \
-	  echo "✓  Cron job already installed — skipping"; \
+cron: ## Install the 30-minute trigger cron and weekly report cron (idempotent)
+	@NODEDIR=$$(dirname $(NODE)); \
+	ADDED=0; \
+	if crontab -l 2>/dev/null | grep -q "trigger-check.js"; then \
+	  echo "✓  Trigger cron already installed — skipping"; \
 	else \
-	  NODEDIR=$$(dirname $(NODE)); \
 	  CRONLINE="*/30 * * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/trigger-check.js >> $(TRADING)/logs/trigger-check.log 2>&1"; \
 	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — trigger check every 30 minutes"; echo "$$CRONLINE") | crontab -; \
-	  echo "✓  Cron job installed (runs every 30 minutes)"; \
+	  echo "✓  Trigger cron installed (runs every 30 minutes)"; \
+	  ADDED=1; \
+	fi; \
+	if crontab -l 2>/dev/null | grep -q "weekly-report.js"; then \
+	  echo "✓  Weekly report cron already installed — skipping"; \
+	else \
+	  REPORTLINE="0 9 * * 1 PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/weekly-report.js >> $(TRADING)/logs/weekly-report.log 2>&1"; \
+	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — weekly report every Monday 09:00 UTC"; echo "$$REPORTLINE") | crontab -; \
+	  echo "✓  Weekly report cron installed (runs Mondays at 09:00 UTC)"; \
 	fi
 
 test: ## Run trigger-check.js once and show output
 	@echo "→ Running trigger check..."
 	@$(NODE) $(TRADING)/scripts/trigger-check.js
+
+report: ## Run the weekly report now and post to #backtest-btc
+	@$(NODE) $(TRADING)/scripts/weekly-report.js
+
+report-30: ## Run a 30-day report and post to #backtest-btc
+	@$(NODE) $(TRADING)/scripts/weekly-report.js --days 30
 
 test-discord: ## Send a test Discord notification
 	@bash scripts/discord-notify.sh info "Ace system online — test from \`make test-discord\`"
