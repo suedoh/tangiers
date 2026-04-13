@@ -30,7 +30,6 @@ const ROOT       = path.resolve(__dirname, '..');
 const ENV_FILE   = path.join(ROOT, '.env');
 const NOTIFY     = path.join(ROOT, 'scripts', 'discord-notify.sh');
 const STATE_FILE = path.join(ROOT, '.trigger-state.json');
-const LOG_FILE   = path.join(ROOT, 'logs', 'trigger-check.log');
 
 const CDP_PORT         = 9222;
 const COOLDOWN_MS      = 2 * 60 * 60 * 1000; // 2 hours between alerts per zone
@@ -51,12 +50,7 @@ if (fs.existsSync(ENV_FILE)) {
 // ─── Logging ─────────────────────────────────────────────────────────────────
 
 function log(msg) {
-  const line = `[${new Date().toISOString()}] ${msg}`;
-  console.log(line);
-  try {
-    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
-    fs.appendFileSync(LOG_FILE, line + '\n');
-  } catch {}
+  console.log(`[${new Date().toISOString()}] ${msg}`);
 }
 
 // ─── Discord ─────────────────────────────────────────────────────────────────
@@ -310,11 +304,10 @@ function computeRSI(closes, period = 14) {
 
 // Read/write previous OI to detect rising vs falling trend
 function getOITrend(currentOI) {
-  let state = {};
-  try { state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch {}
+  const state = readState();
   const prev = state._previousOI ?? null;
   state._previousOI = currentOI;
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); } catch {}
+  writeState(state);
   if (prev === null || currentOI === null) return null;
   const diff = currentOI - prev;
   if (Math.abs(diff) < 0.05) return 'flat';
@@ -575,24 +568,227 @@ function formatSetupMessage(price, zone, setup) {
     ``,
     `**SET ALERTS**  ${alertLevels}`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-    `\`Ace signal fired: ${direction.toUpperCase()} at $${Math.round(price).toLocaleString()}, ${zoneType} zone $${Math.round(zone.low).toLocaleString()}–$${Math.round(zone.high).toLocaleString()}. Run full MTF analysis and give me your read on whether to take this trade.\``,
+    `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${direction.toUpperCase()} signal just fired at $${Math.round(price).toLocaleString()} in the ${zoneType.toLowerCase()} zone $${Math.round(zone.low).toLocaleString()}–$${Math.round(zone.high).toLocaleString()} (${setupType}, ${probability} win rate). Run the full 12H→4H→1H→30M analysis from strategies/mtf-analysis.md. Evaluate all setup criteria in strategies/smc-setups.md and give me a clear take/skip/wait verdict with your reasoning. Post your verdict to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh ${direction} "your message here".\``,
   ].join('\n');
 }
 
-// ─── Cooldown State ───────────────────────────────────────────────────────────
+// ─── Cooldown / Alert State ───────────────────────────────────────────────────
+//
+// State file format:
+//   { "71750-71580": { ts: 1234567890, direction: "long", high: 71750, low: 71580 },
+//     "_previousOI": 91.38 }
+//
+// Keys prefixed with "_" are internal (OI tracking etc.), not zone entries.
+
+function readState() {
+  try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { return {}; }
+}
+
+function writeState(state) {
+  try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); } catch {}
+}
 
 function isCoolingDown(zoneKey) {
   try {
-    const state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-    return state[zoneKey] && (Date.now() - state[zoneKey]) < COOLDOWN_MS;
+    const entry = readState()[zoneKey];
+    if (!entry) return false;
+    const ts = typeof entry === 'number' ? entry : entry.ts; // handle legacy format
+    return (Date.now() - ts) < COOLDOWN_MS;
   } catch { return false; }
 }
 
-function markAlerted(zoneKey) {
-  let state = {};
-  try { state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch {}
-  state[zoneKey] = Date.now();
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+function markAlerted(zoneKey, direction, zone) {
+  const state = readState();
+  state[zoneKey] = { ts: Date.now(), direction, high: zone.high, low: zone.low };
+  writeState(state);
+}
+
+// ─── Invalidation Check ───────────────────────────────────────────────────────
+//
+// Called every poll. Compares previously alerted zones against current active
+// zones. If a zone has disappeared (LuxAlgo mitigated it), evaluates CVD + OI
+// to determine whether it was a real institutional break or a stop hunt.
+//
+// Verdict logic (based on market microstructure research):
+//   Real break   : CVD confirms break direction AND OI rising → ~68–72% continuation
+//   Ambiguous    : CVD contradicts OR OI flat/falling → ~63% reversal probability
+//
+// In both cases the zone is removed from state (cooldown reset), so if LuxAlgo
+// redraws the zone, a fresh alert can fire. Zones that survive a stop hunt are
+// proven levels — resetting the cooldown is correct.
+
+function checkInvalidations(currentZones, price, indicators) {
+  const { cvd, oiTrend } = indicators;
+  const state = readState();
+  const messages = [];
+
+  for (const [key, entry] of Object.entries(state)) {
+    if (key.startsWith('_')) continue;
+    if (typeof entry !== 'object' || !entry.direction) continue; // legacy entry
+
+    // Is this zone still active?
+    const stillActive = currentZones.some(z =>
+      Math.abs(z.high - entry.high) < 10 && Math.abs(z.low - entry.low) < 10
+    );
+    if (stillActive) continue;
+
+    // Zone is gone — determine verdict
+    const { direction, high, low } = entry;
+    // Real break: CVD moves against the trade AND OI expands (new conviction positions)
+    const cvdConfirmsBreak = direction === 'long' ? (cvd != null && cvd < 0) : (cvd != null && cvd > 0);
+    const oiExpanding      = oiTrend === 'rising';
+    const isRealBreak      = cvdConfirmsBreak && oiExpanding;
+
+    log(`Zone ${key} mitigated | CVD confirms break: ${cvdConfirmsBreak} | OI expanding: ${oiExpanding} | verdict: ${isRealBreak ? 'REAL BREAK' : 'AMBIGUOUS'}`);
+
+    messages.push(formatInvalidationMessage(price, direction, { high, low }, isRealBreak, cvd, cvdConfirmsBreak, oiTrend, oiExpanding, currentZones));
+
+    // Remove the alerted zone entry.
+    // If ambiguous, add to watch list so the next polls can detect a reclaim.
+    // If real break, no watch needed.
+    delete state[key];
+    if (!isRealBreak) {
+      const watchKey = `_watch_${key}`;
+      state[watchKey] = {
+        ts: Date.now(),
+        direction,
+        high,
+        low,
+        expires: Date.now() + 4 * 60 * 60 * 1000, // watch for 4 hours
+      };
+      log(`Zone ${key} added to reclaim watch list (expires in 4h)`);
+    }
+  }
+
+  writeState(state);
+  return messages;
+}
+
+function formatInvalidationMessage(price, direction, zone, isRealBreak, cvd, cvdConfirmsBreak, oiTrend, oiExpanding, allZones) {
+  const zoneStr   = `$${Math.round(zone.low).toLocaleString()}–$${Math.round(zone.high).toLocaleString()}`;
+  const dirLabel  = direction === 'long' ? 'LONG' : 'SHORT';
+
+  const cvdIcon  = cvdConfirmsBreak ? '❌' : '✅';
+  const oiIcon   = oiExpanding      ? '❌' : '✅';
+  const cvdLabel = cvd != null ? `${cvd > 0 ? '+' : ''}${Math.round(cvd)} (${cvd < 0 ? 'bearish' : 'bullish'})` : 'unavailable';
+  const oiLabel  = oiTrend ?? 'unavailable';
+
+  // Find next level in the direction of the break
+  const nextZone = direction === 'long'
+    ? allZones.filter(z => z.high < zone.low - 50).sort((a, b) => b.high - a.high)[0]
+    : allZones.filter(z => z.low  > zone.high + 50).sort((a, b) => a.low  - b.low )[0];
+  const nextLevelStr = nextZone
+    ? `$${Math.round(nextZone.low).toLocaleString()}–$${Math.round(nextZone.high).toLocaleString()} ($${Math.round(Math.min(Math.abs(price - nextZone.high), Math.abs(price - nextZone.low))).toLocaleString()} away)`
+    : 'No next zone found';
+
+  if (isRealBreak) {
+    return [
+      `🚫 SIGNAL INVALIDATED | BINANCE:BTCUSDT.P`,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      `Original ${dirLabel} zone ${zoneStr} has been mitigated.`,
+      ``,
+      `**VERDICT**  Real break — ${dirLabel} thesis is off`,
+      `Price broke through with institutional confirmation. Not a stop hunt.`,
+      ``,
+      `**ORDER FLOW AT BREAK**`,
+      `${cvdIcon} CVD ${cvdLabel}`,
+      `${oiIcon} OI ${oiLabel} — new positions, real conviction`,
+      ``,
+      `**NEXT LEVEL**  ${nextLevelStr}`,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${dirLabel} zone ${zoneStr} was just confirmed broken — rising OI and ${direction === 'long' ? 'bearish' : 'bullish'} CVD both confirmed the move. Run the full 12H→4H→1H→30M analysis from strategies/mtf-analysis.md. Identify the next key ${direction === 'long' ? 'demand' : 'supply'} zone, assess whether a new setup in either direction is forming, and post your verdict to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh info "your message here".\``,
+    ].join('\n');
+  } else {
+    const watchAction = direction === 'long'
+      ? `If price reclaims $${Math.round(zone.low).toLocaleString()} with rising CVD → long still viable`
+      : `If price reclaims $${Math.round(zone.high).toLocaleString()} with falling CVD → short still viable`;
+    return [
+      `⚠️ ZONE REMOVED | BINANCE:BTCUSDT.P`,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      `Original ${dirLabel} zone ${zoneStr} has been mitigated.`,
+      ``,
+      `**VERDICT**  Ambiguous — possible stop hunt (~63% reversal probability)`,
+      `Low conviction on the break. Institutional confirmation absent.`,
+      ``,
+      `**ORDER FLOW AT BREAK**`,
+      `${cvdIcon} CVD ${cvdLabel}`,
+      `${oiIcon} OI ${oiLabel} — ${oiExpanding ? 'new positioning present' : 'no new positioning / liquidation driven'}`,
+      ``,
+      `**WATCH**  ${watchAction}`,
+      `**NEXT LEVEL**  ${nextLevelStr}`,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${dirLabel} zone ${zoneStr} was just mitigated with flat/falling OI and ${cvd != null && cvd > 0 ? 'bullish' : 'bearish'} CVD — this is a probable stop hunt (~63% reversal probability). Run the 30M analysis from strategies/mtf-analysis.md. Check whether price is forming a reclaim above $${Math.round(direction === 'long' ? zone.low : zone.high).toLocaleString()} with rising CVD. If yes, confirm as a long setup. If not, assess downside. Post your verdict to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh info "your message here".\``,
+    ].join('\n');
+  }
+}
+
+// ─── Reclaim Watch ────────────────────────────────────────────────────────────
+//
+// After an ambiguous invalidation, watches for price to reclaim the zone with
+// confirming order flow. Fires a RECLAIM CONFIRMED alert if:
+//   - Price is back inside or within buffer of the original zone
+//   - CVD is aligned with the original trade direction (bullish for long, bearish for short)
+//   - OI is rising (new positioning, not a dead-cat bounce)
+//
+// Watch expires after 4 hours. If not reclaimed, the thesis is abandoned.
+
+function checkReclaimWatch(currentZones, price, indicators) {
+  const { cvd, oiTrend } = indicators;
+  const state = readState();
+  const messages = [];
+
+  for (const [key, watch] of Object.entries(state)) {
+    if (!key.startsWith('_watch_')) continue;
+
+    // Expire old watches
+    if (Date.now() > watch.expires) {
+      log(`Reclaim watch ${key} expired — removing`);
+      delete state[key];
+      continue;
+    }
+
+    const { direction, high, low } = watch;
+    const zone = { high, low };
+    const proximity = checkProximity(price, zone);
+
+    if (!proximity.triggered) continue;
+
+    // Price is back near the zone — check order flow confirms the reclaim
+    const cvdAligned = direction === 'long' ? (cvd != null && cvd > 0) : (cvd != null && cvd < 0);
+    const oiAligned  = oiTrend === 'rising';
+
+    if (cvdAligned && oiAligned) {
+      const zoneStr  = `$${Math.round(low).toLocaleString()}–$${Math.round(high).toLocaleString()}`;
+      const dirLabel = direction === 'long' ? 'LONG' : 'SHORT';
+      const cvdLabel = `${cvd > 0 ? '+' : ''}${Math.round(cvd)} (${cvd < 0 ? 'bearish' : 'bullish'})`;
+      log(`Reclaim confirmed: ${dirLabel} zone ${zoneStr} | CVD ${cvdLabel} | OI ${oiTrend}`);
+
+      messages.push([
+        `🔄 RECLAIM CONFIRMED | BINANCE:BTCUSDT.P`,
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+        `Price has returned to ${dirLabel} zone ${zoneStr} with institutional backing.`,
+        `The earlier break was a stop hunt. Original thesis back in play.`,
+        ``,
+        `**ORDER FLOW AT RECLAIM**`,
+        `✅ CVD ${cvdLabel}`,
+        `✅ OI ${oiTrend} — new positioning confirming the reclaim`,
+        ``,
+        `**ACTION**  Re-evaluate entry. Wait for 30M CHoCH in ${direction} direction.`,
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+        `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${dirLabel} zone ${zoneStr} that was previously swept as a stop hunt has now been reclaimed — price is back in zone with rising OI and ${direction === 'long' ? 'bullish' : 'bearish'} CVD. Run the 30M analysis from strategies/mtf-analysis.md. Check for CHoCH formation. Give me a take/skip verdict and post it to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh ${direction} "your message here".\``,
+      ].join('\n'));
+
+      // Remove watch, set a fresh cooldown so it doesn't immediately re-trigger
+      delete state[key];
+      const zoneKey = key.replace('_watch_', '');
+      state[zoneKey] = { ts: Date.now(), direction, high, low };
+    } else {
+      log(`Reclaim watch ${key}: price near zone but order flow not confirming (CVD aligned: ${cvdAligned}, OI aligned: ${oiAligned})`);
+    }
+  }
+
+  writeState(state);
+  return messages;
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -708,7 +904,22 @@ async function main() {
   indicators.rsi12h  = studies._rsi12h ?? null;
   log(`CVD: ${indicators.cvd} | OI: ${indicators.oi} (${indicators.oiTrend ?? 'no trend yet'}) | VWAP: ${indicators.vwap}`);
 
-  // 7. Check each zone for proximity trigger
+  // 7. Check if any previously alerted zones have been mitigated
+  const invalidations = checkInvalidations(zones, price, indicators);
+  for (const msg of invalidations) {
+    const type = msg.startsWith('🚫') ? 'info' : 'approaching';
+    notify(type, msg);
+  }
+
+  // 8. Check if any watched zones (post-stop-hunt) have been reclaimed
+  const reclaims = checkReclaimWatch(zones, price, indicators);
+  for (const msg of reclaims) {
+    // Direction is embedded in the message — use 'long'/'short' based on content
+    const type = msg.includes('LONG') ? 'long' : 'short';
+    notify(type, msg);
+  }
+
+  // 9. Check each zone for proximity trigger
   let triggered = false;
 
   for (const zone of zones) {
@@ -733,7 +944,7 @@ async function main() {
     const message = formatSetupMessage(price, zone, setup);
 
     notify(setup.direction, message);
-    markAlerted(zoneKey);
+    markAlerted(zoneKey, setup.direction, zone);
 
     triggered = true;
     break; // one alert at a time

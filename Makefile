@@ -72,7 +72,6 @@ test-discord: ## Send a test Discord notification
 	@bash scripts/discord-notify.sh info "Ace system online — test from \`make test-discord\`"
 
 logs: ## Tail the trigger-check log (Ctrl+C to stop)
-	@mkdir -p logs
 	@tail -f logs/trigger-check.log
 
 clean: ## Remove .trigger-state.json and clear logs (resets cooldowns and OI trend)
