@@ -1,0 +1,8 @@
+.env
+.trigger-state.json
+node_modules/
+tradingview-mcp/node_modules/
+tradingview-mcp/screenshots/
+analysis/
+*.log
+.DS_Store
