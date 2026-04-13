@@ -2,7 +2,7 @@
 
 An automated market monitoring and trade setup detection system for **BTC/USDT perpetual futures** on Binance. Built around Smart Money Concepts (SMC) technical analysis.
 
-The system watches your TradingView chart every 30 minutes, detects when price approaches or enters a key supply/demand zone, evaluates a full set of trade criteria automatically, and fires a complete trade plan to Discord — entry, stop loss, three take-profit targets, R:R ratios, and a criteria checklist — with no manual work required. Every signal is logged and outcomes are tracked automatically. A weekly performance report posts to `#btc-backtest` every Monday so you can measure strategy accuracy over time. Every Sunday morning an institutional-grade weekly war report posts to `#btc-weekly-war-report` — reference levels, key supply/demand zones, scenario planning, macro calendar, options expiry data, and a bias score — so you are fully prepared before the week opens.
+The system watches your TradingView chart every 10 minutes, detects when price approaches or enters a key supply/demand zone, evaluates a full set of trade criteria automatically, and fires a complete trade plan to Discord — entry, stop loss, three take-profit targets, R:R ratios, a criteria checklist, and a **probability score** based on SMC structure and order flow — with no manual work required. If the initial alert fires but order flow hasn't confirmed yet (OI flat, CVD not moving), the zone is put into a pending confirmation watch; when OI rises and CVD surges in a subsequent poll, a second TRIGGER CONFIRMED alert fires automatically so you never miss the delayed confirmation. Type `!analyze` in Discord at any time to run a full 12H→4H→1H→30M sweep on demand. Every signal is logged and outcomes are tracked automatically. A weekly performance report posts to `#btc-backtest` every Monday. Every Sunday morning an institutional-grade weekly war report posts to `#btc-weekly-war-report`.
 
 ---
 
@@ -26,19 +26,20 @@ The system watches your TradingView chart every 30 minutes, detects when price a
 
 ## 1. What This System Does
 
-Every 30 minutes, the system automatically:
+Every 10 minutes, the system automatically:
 
 1. Connects to your live TradingView Desktop chart
 2. Reads the current BTC price and all active supply/demand zones from the LuxAlgo SMC indicator
-3. Reads seven indicators: CVD, OI, Session Volume Profile, VWAP, and more
-4. Fetches 4H bars to compute MACD direction
-5. Fetches 12H bars to compute RSI
-6. Evaluates whether price is near or inside a zone using a proximity formula
-7. If a zone is triggered, runs the full trade setup criteria check and calculates entry/stop/targets
+3. Reads all Ace layout indicators: CVD, OI, Session VP, VRVP, Volume, VWAP
+4. Fetches 4H bars to compute MACD direction; fetches 12H bars to compute RSI
+5. Evaluates whether price is near or inside a zone using a proximity formula
+6. If a zone is triggered, runs the full trade setup criteria check and calculates entry/stop/targets
+7. **Calculates a probability score** (28–91%) based on SMC structure and order flow — see [Probability Model](#probability-model)
 8. Posts a complete trade plan to Discord, or stays silent if no setup is present
-9. Logs every signal to `trades.json` and automatically records outcomes as price hits TP/stop levels
-10. Monitors previously alerted zones — if a zone is mitigated, evaluates order flow to determine real break vs stop hunt and posts a follow-up alert
-11. If a stop hunt is detected, watches for price to reclaim the zone and fires a reclaim alert if order flow confirms
+9. If OI was flat at alert time, registers the zone for **pending confirmation watch** — fires a second alert when OI rises and CVD surges in a later poll
+10. Logs every signal to `trades.json` and automatically records outcomes as price hits TP/stop levels
+11. Monitors previously alerted zones — if a zone is mitigated, evaluates order flow to determine real break vs stop hunt and posts a follow-up alert
+12. If a stop hunt is detected, watches for price to reclaim the zone and fires a reclaim alert if order flow confirms
 
 Every Sunday at 09:00 EST, independently of the above:
 
@@ -54,22 +55,29 @@ If TradingView is not running, the chart is on the wrong symbol, or any other er
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  macOS crontab (every 30 minutes)                               │
+│  macOS crontab (every 10 minutes)                               │
 │                                                                 │
 │  node scripts/trigger-check.js                                  │
 │         │                                                       │
 │         │ Chrome DevTools Protocol (CDP) on port 9222          │
 │         ▼                                                       │
 │  TradingView Desktop (Electron app)                             │
-│         │  reads: price, zones, CVD, OI, Session VP, VWAP      │
+│         │  reads: price, zones, CVD, OI, VRVP, Vol, VP, VWAP  │
 │         │  reads: 4H bars → MACD | 12H bars → RSI              │
 │         │                                                       │
 │         ├─ zone triggered?                                      │
 │         │       ▼                                               │
 │         │  Rule-based setup evaluation                          │
 │         │  entry / stop / TP1 / TP2 / TP3                      │
+│         │  probability score (28–91%)                           │
 │         │  → discord-notify.sh → #btc-signals                  │
 │         │  → logTrade() → trades.json                          │
+│         │  → OI flat? markPending() → .trigger-state.json      │
+│         │                                                       │
+│         ├─ pending confirmation watch?                          │
+│         │       ▼                                               │
+│         │  OI rose ≥0.5% AND CVD grew ≥1.5×?                  │
+│         │  → TRIGGER CONFIRMED alert → #btc-signals             │
 │         │                                                       │
 │         ├─ alerted zone mitigated?                              │
 │         │       ▼                                               │
@@ -83,6 +91,19 @@ If TradingView is not running, the chart is on the wrong symbol, or any other er
 │         │  → discord-notify.sh → #btc-signals                  │
 │         │                                                       │
 │         └─ always: updateOutcomes() → trades.json              │
+│                                                                 │
+│  macOS crontab (every 1 minute)                                 │
+│                                                                 │
+│  node scripts/discord-bot.js                                    │
+│         │  polls Discord channel for !analyze / !mtf           │
+│         │  command found?                                       │
+│         │       ▼                                               │
+│         │  node scripts/mtf-analyze.js --print                 │
+│         │       │ CDP: 12H→4H→1H→30M sweep                    │
+│         │       │ reads all Ace indicators                      │
+│         │       │ probability score + EV                        │
+│         │       ▼                                               │
+│         │  → discord-notify.sh → #btc-signals                  │
 │                                                                 │
 │  macOS crontab (every Monday 09:00 UTC)                         │
 │                                                                 │
@@ -108,16 +129,22 @@ If TradingView is not running, the chart is on the wrong symbol, or any other er
 ### Key design decisions
 
 **Why no Claude/AI in the automated pipeline?**
-Using Claude for every 30-minute poll would consume thousands of tokens per day. All setup logic is codified as deterministic rules. Claude is reserved for on-demand deeper analysis when a signal fires and you want a qualitative read.
+Using Claude for every 10-minute poll would consume thousands of tokens per day. All setup logic is codified as deterministic rules. Claude is reserved for on-demand deeper analysis when a signal fires and you want a qualitative read.
 
 **Why TradingView Desktop instead of an API?**
 The indicators used (LuxAlgo SMC, Session Volume Profile, Cumulative Volume Delta, Open Interest) either don't exist in standard market data APIs or require expensive data subscriptions. TradingView Desktop already has everything running — the system reads directly from it via the Chrome DevTools Protocol (CDP), the same protocol browser developer tools use.
 
 **Why CDP instead of the TradingView MCP server?**
-The TradingView MCP server (used by Claude Desktop for manual analysis) runs as a Model Context Protocol server — it requires Claude to orchestrate it. For automated cron jobs with no Claude involvement, `trigger-check.js` calls CDP directly using `chrome-remote-interface`.
+The TradingView MCP server (used by Claude Desktop for manual analysis) runs as a Model Context Protocol server — it requires Claude to orchestrate it. For automated cron jobs with no Claude involvement, `trigger-check.js` and `mtf-analyze.js` call CDP directly using `chrome-remote-interface`.
 
 **What is the TradingView MCP server used for then?**
-Manual analysis sessions in Claude Desktop. When a Discord alert fires and you want a deeper read, you paste the provided prompt into Claude Desktop. Claude uses the MCP server's 78 tools to read every indicator across all four timeframes, synthesize the picture, and give you a qualitative verdict.
+Manual analysis sessions in Claude Desktop. When a Discord alert fires and you want a qualitative read, type `!analyze` in Discord or paste the ready-to-copy prompt from the alert into Claude Desktop. Claude uses the MCP server's 78 tools to read every indicator across all four timeframes, synthesize the picture, and give you a qualitative verdict.
+
+**What is the pending confirmation watch?**
+When a zone trigger fires but OI is flat (no institutional commitment yet), the system records a baseline snapshot of OI and CVD for that zone. On each subsequent poll, it checks whether OI has risen ≥0.5% *and* CVD has grown ≥1.5× (minimum 200 unit delta) relative to the baseline. When both conditions are met — within 90 minutes of the initial alert — a TRIGGER CONFIRMED alert fires automatically. This prevents missing the delayed confirmation that a flat-OI initial alert can produce.
+
+**Why `!analyze` instead of always copy-pasting into Claude Desktop?**
+`mtf-analyze.js` runs the same 12H→4H→1H→30M sweep as the Claude Desktop workflow but in a single CDP connection with zero AI involvement. It is faster (~15 seconds vs 2–3 minutes for a Claude session), available from Discord on any device, and costs nothing. Claude Desktop is reserved for qualitative judgment: "does the structure really look right here?" and cases where you want Claude to reason through ambiguity.
 
 ---
 
@@ -387,6 +414,42 @@ Do not take any setup when:
 - Extreme funding rate in your trade direction (>0.1% per 8h — already over-leveraged)
 - Less than 2 hours before a major macro event (FOMC, CPI, etc.)
 
+### Probability Model
+
+Every trade alert includes a **probability score** (28–91%) and an **expected value (EV)** calculated at TP2. These are based on the same SMC structure and order flow signals already evaluated for setup criteria — no separate model, no external data.
+
+**How it is calculated:**
+
+Starting from the empirical 62% base rate for Setup A, each criterion adds or subtracts a weight depending on whether it passes or fails:
+
+| Criterion | Pass | Fail |
+|---|---|---|
+| 4H CVD aligned with direction | +7% | −11% |
+| OI rising (new conviction) | +6% | −9% |
+| Price in 1H/30M zone | +5% | −8% |
+| 12H + 4H macro aligned | +5% | −8% |
+| 4H MACD bullish/bearish | +4% | −6% |
+| Price above/below VWAP (all TFs) | +4% | −6% |
+| 12H RSI above/below 50 | +3% | −4% |
+
+Failures are weighted ~1.5× harder than confirmations. A trade with multiple failing criteria produces a probability well below 62%; one with all criteria aligned can reach the high 70s–low 80s. Scores are clamped to [28%, 91%] to prevent overconfidence.
+
+**Expected Value formula (at TP2):**
+
+```
+EV = (probability × R:R_at_TP2) − ((1 − probability) × 1.0)
+```
+
+Example: 68% probability, TP2 at 1:3.0 → EV = (0.68 × 3.0) − (0.32 × 1.0) = +1.72R
+
+**What to do with it:**
+
+- EV > +0.5R and probability ≥ 55%: setup has positive expected value — follow your entry trigger
+- EV between 0 and +0.5R: marginal — consider tighter sizing or waiting for better confirmation
+- EV < 0: setup has negative expected value — skip it even if criteria pass
+
+The score does not replace your judgment. It reflects how many of the known-predictive criteria are aligned, but it cannot see chart structure, sweep quality, or macro context that Claude can.
+
 ---
 
 ## 7. Discord Alerts
@@ -463,7 +526,7 @@ The last line (in a code block) is a ready-to-paste prompt for Claude Desktop. S
 
 ### Zone cooldown
 
-Once an alert fires for a zone, that zone is suppressed for **2 hours** to prevent repeat notifications. The cooldown state is stored in `.trigger-state.json`.
+Once an alert fires for a zone, that zone is suppressed for **1 hour** to prevent repeat notifications. The cooldown state is stored in `.trigger-state.json`. Pending confirmation watches are exempt from this cooldown — they fire whenever the OI/CVD thresholds are met regardless of the elapsed time.
 
 ### Error alerts
 
@@ -482,9 +545,21 @@ Common errors and their fixes are covered in the [Troubleshooting](#13-troublesh
 
 ## 8. Deeper Analysis with Claude
 
-The automated system provides a complete trade plan, but it uses only the rules that can be evaluated programmatically. For qualitative judgment — "does the structure really look right here?", "is this CVD divergence meaningful or noise?", "what does the overall picture say?" — Claude Desktop can run a full multi-timeframe analysis using the TradingView MCP server.
+The automated system provides a complete trade plan, but it uses only the rules that can be evaluated programmatically. For qualitative judgment — "does the structure really look right here?", "is this CVD divergence meaningful or noise?", "what does the overall picture say?" — you have two options.
 
-### How to use it
+### Option 1 — `!analyze` in Discord (fastest)
+
+Type `!analyze` (or `!mtf`) in your Discord `#btc-signals` channel. The bot polls every minute and runs a full 12H→4H→1H→30M sweep automatically:
+
+- Connects to TradingView Desktop via CDP — no Claude required
+- Reads all Ace indicators across all four timeframes
+- Scores each Setup A criterion and outputs a criteria grid
+- Calculates a probability score (28–91%) and expected value
+- Posts the full report back to Discord in ~15 seconds
+
+You can trigger this at any time — not just when an alert fires.
+
+### Option 2 — Claude Desktop (deepest analysis)
 
 When a Discord alert fires, the last line of every alert is a ready-to-paste prompt:
 
@@ -503,7 +578,13 @@ Copy that line and paste it into Claude Desktop. Claude will:
 
 This is useful for learning — Claude explains *why* a criterion passes or fails, building your intuition for reading the chart yourself.
 
-### Requirements for Claude analysis
+### Requirements for `!analyze`
+
+- TradingView Desktop must be running on the `🕵Ace` layout (same as trigger-check.js)
+- `DISCORD_BOT_TOKEN` and `DISCORD_CHANNEL_ID` must be set in `.env` (see setup instructions in `scripts/discord-bot.js`)
+- The discord-bot cron must be installed (`make cron`)
+
+### Requirements for Claude Desktop analysis
 
 - Claude Desktop must be installed with your personal subscription
 - The TradingView MCP server must be registered (`claude mcp list` should show `tradingview`)
@@ -643,9 +724,12 @@ Stop trading for the day if account is down 2%. Come back fresh next session.
 ├── .trigger-state.json              ← cooldown state + OI trend tracking (gitignored, auto-created)
 │
 ├── trades.json                      ← trade log with outcomes (gitignored, auto-created)
+├── .discord-bot-state.json          ← last-seen Discord message ID for deduplication (gitignored, auto-created)
 │
 ├── scripts/
-│   ├── trigger-check.js             ← main cron script: zone check + full trade plan
+│   ├── trigger-check.js             ← main cron script: zone check + full trade plan (every 10m)
+│   ├── mtf-analyze.js               ← 4-TF CDP sweep: reads all Ace indicators, scores setup, outputs report
+│   ├── discord-bot.js               ← Discord bot: polls for !analyze, runs mtf-analyze.js, posts report
 │   ├── weekly-report.js             ← Monday performance report → #btc-backtest
 │   ├── weekly-war-report.js         ← Sunday war report → #btc-weekly-war-report
 │   └── discord-notify.sh            ← Discord webhook poster (5 alert types)
@@ -666,7 +750,13 @@ Stop trading for the day if account is down 2%. Come back fresh next session.
 ### Key files explained
 
 **`scripts/trigger-check.js`**
-The core of the system. Runs every 30 minutes via cron. Connects to TradingView via CDP, reads all indicator data, switches to 4H/12H to compute MACD and RSI, evaluates setup criteria, and posts to Discord. Has no dependency on Claude or any external AI service.
+The core of the automated pipeline. Runs every 10 minutes via cron. Connects to TradingView via CDP, reads all indicator data (CVD, OI, VRVP, Volume, Session VP, VWAP), switches to 4H/12H to compute MACD and RSI, evaluates setup criteria, calculates a probability score, and posts to Discord. Manages pending confirmation watches — if OI was flat at alert time, records a baseline and fires a TRIGGER CONFIRMED alert when OI rises and CVD surges in a later poll. Has no dependency on Claude or any external AI service.
+
+**`scripts/mtf-analyze.js`**
+Full 12H→4H→1H→30M CDP sweep in a single connection. Reads all Ace indicators at each timeframe, scores all Setup A criteria, calculates a probability score (28–91%) and expected value (EV at TP2), and assembles a full MTF report. Callable from CLI: `node mtf-analyze.js` (posts to Discord), `--print` (stdout), `--json` (raw JSON). Used by `discord-bot.js` to fulfill `!analyze` requests.
+
+**`scripts/discord-bot.js`**
+Discord command listener. Polls the `#btc-signals` channel every minute via the Discord REST API (no WebSocket process required). When `!analyze` or `!mtf` is detected, runs `mtf-analyze.js --print` and posts the result back to Discord. Requires `DISCORD_BOT_TOKEN` and `DISCORD_CHANNEL_ID` in `.env`. Setup instructions are in the file header.
 
 **`scripts/weekly-report.js`**
 Reads `trades.json`, computes statistics for the past 7 days (or `--days N`), and posts a performance report to `#btc-backtest` via Discord. Run automatically every Monday at 09:00 UTC. Can also be run manually at any time.
@@ -687,18 +777,27 @@ The rulebook. Defines all criteria for Setup A, B, and C including entry trigger
 Auto-created on first signal. Full trade log — entry/stop/targets, all indicator readings at signal time, criteria checklist, and outcome/pnlR fields that are filled in automatically as price moves.
 
 **`.trigger-state.json`**
-Auto-created. Stores three things: per-zone cooldown timestamps (prevents alert spam), the previous OI reading (used to determine if OI is rising or falling), and the active reclaim watch list.
+Auto-created. Stores: per-zone cooldown timestamps (1-hour suppression), the previous OI reading (used to determine if OI is rising or falling), pending confirmation watch entries (baseline OI/CVD snapshots with 90-minute TTL), and the active reclaim watch list.
+
+**`.discord-bot-state.json`**
+Auto-created by `discord-bot.js`. Stores the ID of the last Discord message seen, so each cron invocation only fetches new messages and never re-processes old `!analyze` commands.
 
 ---
 
 ## 12. Crontab Schedule
 
-Three scheduled jobs run via macOS crontab. The PATH is set explicitly in all three because cron runs with a minimal environment and cannot find `node` otherwise.
+Four scheduled jobs run via macOS crontab. The PATH is set explicitly in all entries because cron runs with a minimal environment and cannot find `node` otherwise.
 
-**Zone trigger — every 30 minutes:**
+**Zone trigger — every 10 minutes:**
 
 ```
-*/30 * * * * PATH=/Users/vpm/.nvm/versions/node/v22.22.0/bin:/Users/vpm/.local/bin:/usr/local/bin:/usr/bin:/bin /Users/vpm/.nvm/versions/node/v22.22.0/bin/node /Users/vpm/trading/scripts/trigger-check.js >> /Users/vpm/trading/logs/trigger-check.log 2>&1
+*/10 * * * * PATH=/Users/vpm/.nvm/versions/node/v22.22.0/bin:/Users/vpm/.local/bin:/usr/local/bin:/usr/bin:/bin /Users/vpm/.nvm/versions/node/v22.22.0/bin/node /Users/vpm/trading/scripts/trigger-check.js >> /Users/vpm/trading/logs/trigger-check.log 2>&1
+```
+
+**Discord `!analyze` listener — every 1 minute:**
+
+```
+*/1 * * * * PATH=/Users/vpm/.nvm/versions/node/v22.22.0/bin:/Users/vpm/.local/bin:/usr/local/bin:/usr/bin:/bin /Users/vpm/.nvm/versions/node/v22.22.0/bin/node /Users/vpm/trading/scripts/discord-bot.js >> /Users/vpm/trading/logs/discord-bot.log 2>&1
 ```
 
 **Weekly performance report — every Monday at 09:00 UTC:**
@@ -725,8 +824,18 @@ To install all three entries automatically: `make cron`
 |---|---|---|
 | No zone trigger | ~100ms | Silent (logged only) |
 | Zone trigger fires | ~5 seconds | Discord alert (fetches 4H + 12H bars) |
+| Pending confirmation resolved | ~2 seconds | Discord TRIGGER CONFIRMED alert |
 | TradingView not running | ~2 seconds | Discord error alert |
 | Wrong symbol on chart | ~1 second | Discord error alert |
+
+**Discord bot — what happens each run:**
+
+| Scenario | Duration | Output |
+|---|---|---|
+| No new messages | ~200ms | Silent (logged only) |
+| `!analyze` / `!mtf` found | ~20 seconds | Full MTF report posted to Discord |
+| TradingView not running | ~20 seconds | Discord error alert |
+| Bot token not configured | ~0ms | Exits silently (no cron log spam) |
 
 **War report — what it fetches each Sunday:**
 
@@ -779,7 +888,7 @@ TradingView is loading or the chart has not finished rendering.
 Possible causes:
 
 1. **LuxAlgo SMC indicator is hidden** — the zone data comes from LuxAlgo's box drawings. If the indicator pane is hidden or the indicator is toggled off, no zones are read. Make sure it is visible.
-2. **Cooldown active** — if an alert fired for this zone in the last 2 hours, it is suppressed. Check `.trigger-state.json` to see cooldown timestamps. Delete the file to reset all cooldowns.
+2. **Cooldown active** — if an alert fired for this zone in the last 1 hour, it is suppressed. Check `.trigger-state.json` to see cooldown timestamps. Delete the file to reset all cooldowns.
 3. **Zone distance beyond buffer** — the proximity formula is `max(price × 0.005, zone_width × 1.5)`. If price is further than ~0.5% from the nearest zone edge, no trigger fires.
 
 ---

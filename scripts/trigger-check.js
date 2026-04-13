@@ -33,7 +33,11 @@ const STATE_FILE  = path.join(ROOT, '.trigger-state.json');
 const TRADES_FILE = path.join(ROOT, 'trades.json');
 
 const CDP_PORT         = 9222;
-const COOLDOWN_MS      = 2 * 60 * 60 * 1000; // 2 hours between alerts per zone
+const COOLDOWN_MS      = 1 * 60 * 60 * 1000; // 1 hour between alerts per zone
+const PENDING_TTL_MS   = 90 * 60 * 1000;     // 90-min window to catch confirmation after flat-OI alert
+const OI_CONFIRM_PCT   = 0.005;              // OI must rise ≥ 0.5% from baseline to confirm
+const CVD_CONFIRM_MULT = 1.5;               // CVD must grow ≥ 1.5× from baseline to confirm
+const CVD_CONFIRM_MIN  = 200;               // CVD must also grow by at least this absolute amount
 const EXPECTED_SYMBOL  = 'BINANCE:BTCUSDT.P';
 
 // ─── Env ─────────────────────────────────────────────────────────────────────
@@ -604,6 +608,27 @@ function markAlerted(zoneKey, direction, zone) {
   writeState(state);
 }
 
+// When OI is flat or unknown at alert time, register the zone for automatic
+// confirmation detection. On each subsequent tick, checkPendingConfirmation()
+// compares current OI and CVD against the baseline captured here. When both
+// confirm, it fires a TRIGGER CONFIRMED Discord alert without waiting for the
+// next manual analysis run, bypassing the cooldown gate entirely.
+function markPending(zoneKey, direction, zone, indicators) {
+  const state = readState();
+  const key = `_pending_${zoneKey}`;
+  state[key] = {
+    ts:          Date.now(),
+    direction,
+    high:        zone.high,
+    low:         zone.low,
+    expires:     Date.now() + PENDING_TTL_MS,
+    baselineOI:  indicators.oi,
+    baselineCVD: indicators.cvd,
+  };
+  writeState(state);
+  log(`Zone ${zoneKey} → pending confirmation (baseline OI: ${indicators.oi}, CVD: ${indicators.cvd})`);
+}
+
 // ─── Invalidation Check ───────────────────────────────────────────────────────
 //
 // Called every poll. Compares previously alerted zones against current active
@@ -805,6 +830,96 @@ function checkReclaimWatch(currentZones, price, indicators) {
 
   writeState(state);
   return messages;
+}
+
+// ─── Pending Confirmation Watch ──────────────────────────────────────────────
+//
+// When an initial zone alert fires with flat OI (no conviction yet), the zone
+// is written to state as "_pending_<zoneKey>". Every subsequent tick (now every
+// 10 minutes) this function checks whether OI has risen ≥ 0.5% AND CVD has
+// grown ≥ 1.5× (minimum +200 absolute) from the values saved at alert time.
+//
+// When both conditions are met it means institutional money started moving
+// AFTER the initial alert — exactly the scenario that caused today's missed
+// trade. The function fires a TRIGGER CONFIRMED Discord alert with a Claude
+// prompt embedded, bypasses the normal cooldown gate, and resets the cooldown
+// so the zone does not fire a third time immediately.
+//
+// Pending watch expires after 90 minutes. If not confirmed in that window the
+// zone is removed (the move didn't materialise).
+
+function checkPendingConfirmation(price, indicators) {
+  const { cvd, oi } = indicators;
+  const state = readState();
+  const results = [];
+
+  for (const [key, pending] of Object.entries(state)) {
+    if (!key.startsWith('_pending_')) continue;
+
+    // Expire stale watches
+    if (Date.now() > pending.expires) {
+      log(`Pending confirmation ${key} expired — removing`);
+      delete state[key];
+      continue;
+    }
+
+    const { direction, high, low, baselineOI, baselineCVD } = pending;
+
+    // OI confirmation: must have risen ≥ 0.5% from the baseline snapshot
+    const oiConfirmed = oi != null && baselineOI != null && baselineOI > 0
+      && (oi - baselineOI) / baselineOI >= OI_CONFIRM_PCT;
+
+    // CVD confirmation: must be directionally aligned, grown ≥ 1.5× AND grown
+    // by at least CVD_CONFIRM_MIN absolute units (prevents trivial passes when
+    // baseline CVD is near zero)
+    const cvdAligned  = direction === 'long' ? (cvd != null && cvd > 0) : (cvd != null && cvd < 0);
+    const cvdDelta    = cvd != null && baselineCVD != null ? Math.abs(cvd - baselineCVD) : 0;
+    const cvdGrown    = cvdAligned
+      && cvdDelta >= CVD_CONFIRM_MIN
+      && Math.abs(cvd ?? 0) >= Math.abs(baselineCVD ?? 0) * CVD_CONFIRM_MULT;
+
+    log(`Pending ${key}: OI ${baselineOI}→${oi} confirmed=${oiConfirmed} | CVD ${baselineCVD}→${cvd} delta=${Math.round(cvdDelta)} confirmed=${cvdGrown}`);
+
+    if (!oiConfirmed || !cvdGrown) continue;
+
+    // ── Both confirmed — fire the alert ──────────────────────────────────────
+    const zoneStr  = `$${Math.round(low).toLocaleString()}–$${Math.round(high).toLocaleString()}`;
+    const dirLabel = direction === 'long' ? '🟢 LONG' : '🔴 SHORT';
+    const oiPct    = baselineOI > 0 ? ((oi - baselineOI) / baselineOI * 100).toFixed(2) : '?';
+    const cvdBase  = baselineCVD != null ? (baselineCVD > 0 ? '+' : '') + Math.round(baselineCVD) : 'n/a';
+    const cvdNow   = cvd        != null ? (cvd        > 0 ? '+' : '') + Math.round(cvd)        : 'n/a';
+    const cvdDeltaStr = cvdDelta > 0 ? `+${Math.round(cvdDelta)}` : Math.round(cvdDelta);
+
+    const msg = [
+      `${dirLabel} TRIGGER CONFIRMED | BINANCE:BTCUSDT.P`,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      `Zone ${zoneStr} — flat OI at alert time has now confirmed.`,
+      `Institutional flow entered AFTER the initial alert. This is the real entry.`,
+      ``,
+      `**CONFIRMATION ORDER FLOW**`,
+      `✅ OI: ${baselineOI?.toFixed(2)}K → ${oi?.toFixed(2)}K (+${oiPct}%) — new ${direction} positions opening`,
+      `✅ CVD: ${cvdBase} → ${cvdNow} (Δ ${cvdDeltaStr}) — conviction surge confirmed`,
+      ``,
+      `**PRICE** $${Math.round(price).toLocaleString()} | **ZONE** ${zoneStr}`,
+      ``,
+      `**ENTRY**  Pullback to zone top $${Math.round(high).toLocaleString()} or aggressive at market`,
+      `**STOP**   Below zone low $${Math.round(low * (1 - 0.002)).toLocaleString()}`,
+      `**ACTION** Check 30M for CHoCH — if not fired yet, it is imminent`,
+      `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+      `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${direction.toUpperCase()} zone ${zoneStr} has just received institutional confirmation — OI rose ${oiPct}% and CVD surged from ${cvdBase} to ${cvdNow} since the initial zone alert. This is the delayed confirmation that was missing at first alert. Run the 30M analysis from strategies/mtf-analysis.md focusing on: (1) has 30M CHoCH fired at the zone? (2) is OI still rising? Give a take/late-entry/skip verdict and post to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh ${direction} "your message here".\``,
+    ].join('\n');
+
+    // Remove pending state, refresh the zone's cooldown timestamp
+    delete state[key];
+    const zoneKey = key.replace('_pending_', '');
+    state[zoneKey] = { ts: Date.now(), direction, high, low };
+
+    results.push({ msg, direction });
+    log(`Pending ${key} CONFIRMED — firing ${dirLabel} alert`);
+  }
+
+  writeState(state);
+  return results;
 }
 
 // ─── Trade Log ───────────────────────────────────────────────────────────────
@@ -1053,6 +1168,14 @@ async function main() {
     notify(type, msg);
   }
 
+  // 8.5. Check pending confirmations — zones that fired with flat OI and are
+  // waiting for OI/CVD to move. Bypasses the cooldown gate. Fires at most once
+  // per zone (removes the _pending_ key on match and resets cooldown).
+  const confirmations = checkPendingConfirmation(price, indicators);
+  for (const { msg, direction } of confirmations) {
+    notify(direction, msg);
+  }
+
   // 9. Check each zone for proximity trigger
   let triggered = false;
 
@@ -1088,6 +1211,13 @@ async function main() {
     notify(setup.direction, message);
     markAlerted(zoneKey, setup.direction, zone);
     logTrade(price, zone, setup);
+
+    // If OI was flat or not yet trending at alert time, register a pending
+    // confirmation watch. The next tick(s) will compare OI and CVD against
+    // this baseline and fire a TRIGGER CONFIRMED alert when both move.
+    if (!indicators.oiTrend || indicators.oiTrend === 'flat') {
+      markPending(zoneKey, setup.direction, zone, indicators);
+    }
 
     triggered = true;
     break; // one alert at a time

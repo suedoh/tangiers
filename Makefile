@@ -8,7 +8,7 @@ TRADING := $(shell pwd)
 
 # ─── Targets ─────────────────────────────────────────────────────────────────
 
-.PHONY: help install deps env mcp cron test test-discord report report-30 war-report logs clean
+.PHONY: help install deps env mcp cron test test-discord analyze bot bot-logs report report-30 war-report logs clean
 
 help: ## Show available commands
 	@echo ""
@@ -54,16 +54,23 @@ mcp: ## Register TradingView MCP server with Claude Desktop
 	  echo "⚠  Could not register MCP — is 'claude' CLI installed? Register manually: claude mcp add tradingview -s user -- node $(TRADING)/tradingview-mcp/src/server.js"; \
 	fi
 
-cron: ## Install the 30-minute trigger cron and weekly report cron (idempotent)
+cron: ## Install all cron jobs: trigger-check (10m), discord-bot (1m), weekly-report, war-report (idempotent)
 	@NODEDIR=$$(dirname $(NODE)); \
 	ADDED=0; \
 	if crontab -l 2>/dev/null | grep -q "trigger-check.js"; then \
 	  echo "✓  Trigger cron already installed — skipping"; \
 	else \
-	  CRONLINE="*/30 * * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/trigger-check.js >> $(TRADING)/logs/trigger-check.log 2>&1"; \
-	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — trigger check every 30 minutes"; echo "$$CRONLINE") | crontab -; \
-	  echo "✓  Trigger cron installed (runs every 30 minutes)"; \
+	  CRONLINE="*/10 * * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/trigger-check.js >> $(TRADING)/logs/trigger-check.log 2>&1"; \
+	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — trigger check every 10 minutes"; echo "$$CRONLINE") | crontab -; \
+	  echo "✓  Trigger cron installed (runs every 10 minutes)"; \
 	  ADDED=1; \
+	fi; \
+	if crontab -l 2>/dev/null | grep -q "discord-bot.js"; then \
+	  echo "✓  Discord bot cron already installed — skipping"; \
+	else \
+	  BOTLINE="*/1 * * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/discord-bot.js >> $(TRADING)/logs/discord-bot.log 2>&1"; \
+	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — Discord !analyze listener every minute"; echo "$$BOTLINE") | crontab -; \
+	  echo "✓  Discord bot cron installed (runs every minute)"; \
 	fi; \
 	if crontab -l 2>/dev/null | grep -q "weekly-report.js"; then \
 	  echo "✓  Weekly report cron already installed — skipping"; \
@@ -83,6 +90,17 @@ cron: ## Install the 30-minute trigger cron and weekly report cron (idempotent)
 test: ## Run trigger-check.js once and show output
 	@echo "→ Running trigger check..."
 	@$(NODE) $(TRADING)/scripts/trigger-check.js
+
+analyze: ## Run a full MTF analysis now and post to Discord (same as !analyze in Discord)
+	@echo "→ Running MTF analysis..."
+	@$(NODE) $(TRADING)/scripts/mtf-analyze.js
+
+bot: ## Run discord-bot.js once (polls for !analyze commands and processes any pending)
+	@echo "→ Running Discord bot poll..."
+	@$(NODE) $(TRADING)/scripts/discord-bot.js
+
+bot-logs: ## Tail the Discord bot log (Ctrl+C to stop)
+	@tail -f logs/discord-bot.log
 
 report: ## Run the weekly performance report now and post to #btc-backtest
 	@$(NODE) $(TRADING)/scripts/weekly-report.js
