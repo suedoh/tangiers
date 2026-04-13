@@ -68,19 +68,19 @@ If TradingView is not running, the chart is on the wrong symbol, or any other er
 │         │       ▼                                               │
 │         │  Rule-based setup evaluation                          │
 │         │  entry / stop / TP1 / TP2 / TP3                      │
-│         │  → discord-notify.sh → #ace-signals                  │
+│         │  → discord-notify.sh → #btc-signals                  │
 │         │  → logTrade() → trades.json                          │
 │         │                                                       │
 │         ├─ alerted zone mitigated?                              │
 │         │       ▼                                               │
 │         │  CVD + OI verdict: real break or stop hunt           │
-│         │  → discord-notify.sh → #ace-signals                  │
+│         │  → discord-notify.sh → #btc-signals                  │
 │         │  → stop hunt? add to reclaim watch list              │
 │         │                                                       │
 │         ├─ watched zone reclaimed?                              │
 │         │       ▼                                               │
 │         │  CVD + OI confirm reclaim                            │
-│         │  → discord-notify.sh → #ace-signals                  │
+│         │  → discord-notify.sh → #btc-signals                  │
 │         │                                                       │
 │         └─ always: updateOutcomes() → trades.json              │
 │                                                                 │
@@ -149,7 +149,7 @@ Three channels are required:
 
 | Channel | Purpose | `.env` key |
 |---|---|---|
-| `#ace-signals` (or any name) | Live trade alerts, invalidations, reclaims | `DISCORD_WEBHOOK_URL` |
+| `#btc-signals` | Live trade alerts, invalidations, reclaims | `DISCORD_WEBHOOK_URL` |
 | `#btc-backtest` | Monday performance reports | `DISCORD_BTC_BACKTEST_WEBHOOK_URL` |
 | `#btc-weekly-war-report` | Sunday institutional preview | `DISCORD_BTC_WEEKLY_WAR_REPORT` |
 
@@ -393,7 +393,7 @@ Do not take any setup when:
 
 Seven alert types across two channels:
 
-**`#ace-signals`**
+**`#btc-signals`**
 
 | Type | When it fires |
 |---|---|
