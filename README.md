@@ -2,7 +2,7 @@
 
 An automated market monitoring and trade setup detection system for **BTC/USDT perpetual futures** on Binance. Built around Smart Money Concepts (SMC) technical analysis.
 
-The system watches your TradingView chart every 30 minutes, detects when price approaches or enters a key supply/demand zone, evaluates a full set of trade criteria automatically, and fires a complete trade plan to Discord — entry, stop loss, three take-profit targets, R:R ratios, and a criteria checklist — with no manual work required.
+The system watches your TradingView chart every 30 minutes, detects when price approaches or enters a key supply/demand zone, evaluates a full set of trade criteria automatically, and fires a complete trade plan to Discord — entry, stop loss, three take-profit targets, R:R ratios, and a criteria checklist — with no manual work required. Every signal is logged and outcomes are tracked automatically. A weekly performance report posts to `#btc-backtest` every Monday so you can measure strategy accuracy over time.
 
 ---
 
@@ -16,10 +16,11 @@ The system watches your TradingView chart every 30 minutes, detects when price a
 6. [Trade Setups](#6-trade-setups)
 7. [Discord Alerts](#7-discord-alerts)
 8. [Deeper Analysis with Claude](#8-deeper-analysis-with-claude)
-9. [Risk Management](#9-risk-management)
-10. [File Structure](#10-file-structure)
-11. [Crontab Schedule](#11-crontab-schedule)
-12. [Troubleshooting](#12-troubleshooting)
+9. [Performance Tracking](#9-performance-tracking)
+10. [Risk Management](#10-risk-management)
+11. [File Structure](#11-file-structure)
+12. [Crontab Schedule](#12-crontab-schedule)
+13. [Troubleshooting](#13-troubleshooting)
 
 ---
 
@@ -35,6 +36,9 @@ Every 30 minutes, the system automatically:
 6. Evaluates whether price is near or inside a zone using a proximity formula
 7. If a zone is triggered, runs the full trade setup criteria check and calculates entry/stop/targets
 8. Posts a complete trade plan to Discord, or stays silent if no setup is present
+9. Logs every signal to `trades.json` and automatically records outcomes as price hits TP/stop levels
+10. Monitors previously alerted zones — if a zone is mitigated, evaluates order flow to determine real break vs stop hunt and posts a follow-up alert
+11. If a stop hunt is detected, watches for price to reclaim the zone and fires a reclaim alert if order flow confirms
 
 If TradingView is not running, the chart is on the wrong symbol, or any other error occurs, the system posts a specific error message to Discord with instructions on how to fix it.
 
@@ -56,15 +60,32 @@ If TradingView is not running, the chart is on the wrong symbol, or any other er
 │         │  reads: price, zones, CVD, OI, Session VP, VWAP      │
 │         │  reads: 4H bars → MACD | 12H bars → RSI              │
 │         │                                                       │
-│         │ if zone triggered                                     │
-│         ▼                                                       │
-│  Rule-based setup evaluation                                    │
+│         ├─ zone triggered?                                      │
+│         │       ▼                                               │
+│         │  Rule-based setup evaluation                          │
 │         │  entry / stop / TP1 / TP2 / TP3                      │
-│         │  criteria checklist (✅ ❌ ⚠️)                        │
-│         │  setup type + win rate                                │
+│         │  → discord-notify.sh → #ace-signals                  │
+│         │  → logTrade() → trades.json                          │
 │         │                                                       │
+│         ├─ alerted zone mitigated?                              │
+│         │       ▼                                               │
+│         │  CVD + OI verdict: real break or stop hunt           │
+│         │  → discord-notify.sh → #ace-signals                  │
+│         │  → stop hunt? add to reclaim watch list              │
+│         │                                                       │
+│         ├─ watched zone reclaimed?                              │
+│         │       ▼                                               │
+│         │  CVD + OI confirm reclaim                            │
+│         │  → discord-notify.sh → #ace-signals                  │
+│         │                                                       │
+│         └─ always: updateOutcomes() → trades.json              │
+│                                                                 │
+│  macOS crontab (every Monday 09:00 UTC)                        │
+│                                                                 │
+│  node scripts/weekly-report.js                                  │
+│         │  reads trades.json, computes 7-day stats             │
 │         ▼                                                       │
-│  scripts/discord-notify.sh → Discord webhook                    │
+│  discord-notify → #btc-backtest                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -106,14 +127,20 @@ open -a "TradingView" --args --remote-debugging-port=9222
 
 Or add this flag permanently in the app's launch configuration.
 
-### Discord webhook
+### Discord webhooks
 
-You need a Discord server with a webhook URL. To create one:
+Two channels are required:
 
-1. Open your Discord server → **Settings** → **Integrations** → **Webhooks**
-2. Click **New Webhook**, give it a name (e.g. "Ace"), assign it to a channel
-3. Click **Copy Webhook URL**
-4. Paste it into `.env` (see setup below)
+| Channel | Purpose | `.env` key |
+|---|---|---|
+| `#ace-signals` (or any name) | Live trade alerts, invalidations, reclaims | `DISCORD_WEBHOOK_URL` |
+| `#btc-backtest` | Weekly performance reports | `DISCORD_BTC_BACKTEST_WEBHOOK_URL` |
+
+To create a webhook for each:
+1. Open your Discord server → channel **Settings** → **Integrations** → **Webhooks** → **New Webhook**
+2. Copy the URL and add it to `.env`
+
+The naming convention for backtest webhooks is `DISCORD_{INSTRUMENT}_BACKTEST_WEBHOOK_URL` — add `DISCORD_ETH_BACKTEST_WEBHOOK_URL` etc. when you expand to other instruments.
 
 ---
 
@@ -142,10 +169,11 @@ make deps
 cp .env.example .env
 ```
 
-Edit `.env` and add your Discord webhook URL:
+Edit `.env` and add both Discord webhook URLs:
 
 ```
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
+DISCORD_BTC_BACKTEST_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
 ```
 
 This file is gitignored and never committed.
@@ -345,15 +373,25 @@ Do not take any setup when:
 
 ## 7. Discord Alerts
 
-Five alert types, each with a distinct color:
+Seven alert types across two channels:
 
-| Type | Color | When it fires |
-|---|---|---|
-| 🟢 **Long** | Green | Confirmed long setup with full trade plan |
-| 🔴 **Short** | Red | Confirmed short setup with full trade plan |
-| ⚠️ **Approaching** | Yellow | Price nearing a zone — reserved for future use |
-| 📊 **Info** | Blue | General status, no setup |
-| ❌ **Error** | Dark red | System error with specific fix instructions |
+**`#ace-signals`**
+
+| Type | When it fires |
+|---|---|
+| 🟢 **Long** | Confirmed long setup — full trade plan |
+| 🔴 **Short** | Confirmed short setup — full trade plan |
+| 🚫 **Invalidated** | Alerted zone broken with CVD + OI confirmation — thesis off |
+| ⚠️ **Zone Removed** | Alerted zone mitigated but order flow ambiguous — probable stop hunt |
+| 🔄 **Reclaim Confirmed** | Stop-hunt zone reclaimed with order flow confirmation — thesis back on |
+| 📊 **Info** | General status |
+| ❌ **Error** | System error with specific fix instructions |
+
+**`#btc-backtest`**
+
+| Type | When it fires |
+|---|---|
+| 📊 **Weekly Report** | Every Monday 09:00 UTC — 7-day win rate, R totals, setup breakdown |
 
 ### What a trade alert contains
 
@@ -410,7 +448,7 @@ Where: CDP connection attempt
 Fix: Open TradingView Desktop. If already open, restart it.
 ```
 
-Common errors and their fixes are covered in the [Troubleshooting](#12-troubleshooting) section.
+Common errors and their fixes are covered in the [Troubleshooting](#13-troubleshooting) section.
 
 ---
 
@@ -445,7 +483,83 @@ This is useful for learning — Claude explains *why* a criterion passes or fail
 
 ---
 
-## 9. Risk Management
+## 9. Performance Tracking
+
+Every signal fired by the automated pipeline is logged to `trades.json` (gitignored). Outcomes are updated automatically — no manual entry required.
+
+### How trade logging works
+
+When a Long or Short alert fires, `trigger-check.js` writes a full snapshot to `trades.json`:
+
+- Setup type, direction, entry, stop, all three TP levels and R:R ratios
+- All criteria that were evaluated (auto and manual)
+- Indicator readings at the time of the signal (CVD, OI, OI trend, VWAP, 4H MACD, 12H RSI)
+- Outcome fields set to `null` initially
+
+On every subsequent cron run, `updateOutcomes()` scans all open trades and checks the current price against each trade's levels:
+
+| Price hits | Outcome recorded | P&L |
+|---|---|---|
+| TP1 level | `tp1` | +rr1 R |
+| TP2 level | `tp2` | +rr2 R |
+| TP3 level | `tp3` | +rr3 R |
+| Stop level | `stop` | -1.0 R |
+| Zone disappears from chart | `invalidated` | -1.0 R |
+
+### Weekly performance report
+
+Every Monday at 09:00 UTC, `scripts/weekly-report.js` runs automatically via cron and posts a full 7-day report to `#btc-backtest` on Discord:
+
+```
+📊 WEEKLY PERFORMANCE REPORT | BINANCE:BTCUSDT.P
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+Period  2026-04-06 → 2026-04-13 (7 days)
+
+OVERVIEW
+Signals fired: 12 | Closed: 9 | Open: 3
+Wins: 6 | Losses: 3 | Win Rate: 67%
+Total R: +7.40R | Avg R per trade: +0.82R
+
+BY DIRECTION
+Longs:  4/6 wins (67%)
+Shorts: 2/3 wins (67%)
+
+BY SETUP TYPE
+  A — Trend Continuation: 4/6 wins (67%) | +4.80R total
+  B — Reversal at Major Level: 1/2 wins (50%) | +1.40R total
+  C — Liquidity Grab: 1/1 wins (100%) | +1.20R total
+
+TP DISTRIBUTION (of 6 wins)
+TP1: 3  TP2: 2  TP3: 1
+
+MOST PREDICTIVE CRITERIA
+  80% win rate when ✅ — OI rising (5 samples)
+  75% win rate when ✅ — 4H MACD bullish (4 samples)
+  75% win rate when ✅ — CVD aligned (4 samples)
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+### Running a report manually
+
+```bash
+# 7-day report (default)
+node scripts/weekly-report.js
+
+# Custom lookback period
+node scripts/weekly-report.js --days 30
+```
+
+### What the report tells you
+
+After a few weeks of signals you can see:
+- Which setup types are performing best in the current market regime
+- Whether longs or shorts have better odds right now
+- Which criteria are most predictive — criteria with high "aligned win rate" are the ones actually discriminating good setups from bad ones
+- How the TP distribution is skewing — if most wins are TP1 only, the R:R is worse than the raw win rate suggests
+
+---
+
+## 10. Risk Management
 
 ### Position sizing
 
@@ -489,7 +603,7 @@ Stop trading for the day if account is down 2%. Come back fresh next session.
 
 ---
 
-## 10. File Structure
+## 11. File Structure
 
 ```
 /trading/
@@ -500,8 +614,11 @@ Stop trading for the day if account is down 2%. Come back fresh next session.
 ├── .gitignore
 ├── .trigger-state.json              ← cooldown state + OI trend tracking (gitignored, auto-created)
 │
+├── trades.json                      ← trade log with outcomes (gitignored, auto-created)
+│
 ├── scripts/
 │   ├── trigger-check.js             ← main cron script: zone check + full trade plan
+│   ├── weekly-report.js             ← weekly performance report → #btc-backtest
 │   └── discord-notify.sh            ← Discord webhook poster (5 alert types)
 │
 ├── strategies/
@@ -522,6 +639,9 @@ Stop trading for the day if account is down 2%. Come back fresh next session.
 **`scripts/trigger-check.js`**
 The core of the system. Runs every 30 minutes via cron. Connects to TradingView via CDP, reads all indicator data, switches to 4H/12H to compute MACD and RSI, evaluates setup criteria, and posts to Discord. Has no dependency on Claude or any external AI service.
 
+**`scripts/weekly-report.js`**
+Reads `trades.json`, computes statistics for the past 7 days (or `--days N`), and posts a performance report to `#btc-backtest` via Discord. Run automatically every Monday at 09:00 UTC. Can also be run manually at any time.
+
 **`scripts/discord-notify.sh`**
 Thin wrapper around a Discord webhook HTTP POST. Takes a type (`long`, `short`, `info`, `approaching`, `error`) and a message. Called by `trigger-check.js`.
 
@@ -531,23 +651,33 @@ The protocol Claude follows during manual analysis sessions. Defines exactly whi
 **`strategies/smc-setups.md`**
 The rulebook. Defines all criteria for Setup A, B, and C including entry triggers, stop placement, targets, and invalidation conditions.
 
+**`trades.json`**
+Auto-created on first signal. Full trade log — entry/stop/targets, all indicator readings at signal time, criteria checklist, and outcome/pnlR fields that are filled in automatically as price moves.
+
 **`.trigger-state.json`**
-Auto-created. Stores two things: per-zone cooldown timestamps (prevents alert spam) and the previous OI reading (used to determine if OI is rising or falling).
+Auto-created. Stores three things: per-zone cooldown timestamps (prevents alert spam), the previous OI reading (used to determine if OI is rising or falling), and the active reclaim watch list.
 
 ---
 
-## 11. Crontab Schedule
+## 12. Crontab Schedule
 
-The script runs every 30 minutes. The current crontab entry:
+Two scheduled jobs run via macOS crontab. The PATH is set explicitly in both because cron runs with a minimal environment and cannot find `node` otherwise.
+
+**Zone trigger — every 30 minutes:**
 
 ```
 */30 * * * * PATH=/Users/vpm/.nvm/versions/node/v22.22.0/bin:/Users/vpm/.local/bin:/usr/local/bin:/usr/bin:/bin /Users/vpm/.nvm/versions/node/v22.22.0/bin/node /Users/vpm/trading/scripts/trigger-check.js >> /Users/vpm/trading/logs/trigger-check.log 2>&1
 ```
 
-The PATH is set explicitly because cron runs with a minimal environment and cannot find `node` otherwise.
+**Weekly performance report — every Monday at 09:00 UTC:**
+
+```
+0 9 * * 1 PATH=/Users/vpm/.nvm/versions/node/v22.22.0/bin:/Users/vpm/.local/bin:/usr/local/bin:/usr/bin:/bin /Users/vpm/.nvm/versions/node/v22.22.0/bin/node /Users/vpm/trading/scripts/weekly-report.js >> /Users/vpm/trading/logs/weekly-report.log 2>&1
+```
 
 To view your crontab: `crontab -l`
 To edit: `crontab -e`
+To install both entries automatically: `make cron`
 
 ### What happens each run
 
@@ -560,7 +690,7 @@ To edit: `crontab -e`
 
 ---
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 ### Error: "Cannot reach TradingView Desktop (CDP port 9222 not responding)"
 
