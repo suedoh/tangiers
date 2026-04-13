@@ -2,7 +2,7 @@
 
 An automated market monitoring and trade setup detection system for **BTC/USDT perpetual futures** on Binance. Built around Smart Money Concepts (SMC) technical analysis.
 
-The system watches your TradingView chart every 30 minutes, detects when price approaches or enters a key supply/demand zone, evaluates a full set of trade criteria automatically, and fires a complete trade plan to Discord — entry, stop loss, three take-profit targets, R:R ratios, and a criteria checklist — with no manual work required. Every signal is logged and outcomes are tracked automatically. A weekly performance report posts to `#btc-backtest` every Monday so you can measure strategy accuracy over time.
+The system watches your TradingView chart every 30 minutes, detects when price approaches or enters a key supply/demand zone, evaluates a full set of trade criteria automatically, and fires a complete trade plan to Discord — entry, stop loss, three take-profit targets, R:R ratios, and a criteria checklist — with no manual work required. Every signal is logged and outcomes are tracked automatically. A weekly performance report posts to `#btc-backtest` every Monday so you can measure strategy accuracy over time. Every Sunday morning an institutional-grade weekly war report posts to `#btc-weekly-war-report` — reference levels, key supply/demand zones, scenario planning, macro calendar, options expiry data, and a bias score — so you are fully prepared before the week opens.
 
 ---
 
@@ -39,6 +39,10 @@ Every 30 minutes, the system automatically:
 9. Logs every signal to `trades.json` and automatically records outcomes as price hits TP/stop levels
 10. Monitors previously alerted zones — if a zone is mitigated, evaluates order flow to determine real break vs stop hunt and posts a follow-up alert
 11. If a stop hunt is detected, watches for price to reclaim the zone and fires a reclaim alert if order flow confirms
+
+Every Sunday at 09:00 EST, independently of the above:
+
+12. Posts a weekly war report to Discord covering: quarterly/monthly/weekly reference levels, 4H LuxAlgo zones, weekly candle structure, scenario planning (bull and bear case), macro calendar events, BTC options max pain, and a 6-factor bias score — all sourced from TradingView, Binance, Deribit, and ForexFactory with no manual input required
 
 If TradingView is not running, the chart is on the wrong symbol, or any other error occurs, the system posts a specific error message to Discord with instructions on how to fix it.
 
@@ -80,12 +84,24 @@ If TradingView is not running, the chart is on the wrong symbol, or any other er
 │         │                                                       │
 │         └─ always: updateOutcomes() → trades.json              │
 │                                                                 │
-│  macOS crontab (every Monday 09:00 UTC)                        │
+│  macOS crontab (every Monday 09:00 UTC)                         │
 │                                                                 │
 │  node scripts/weekly-report.js                                  │
 │         │  reads trades.json, computes 7-day stats             │
 │         ▼                                                       │
 │  discord-notify → #btc-backtest                                 │
+│                                                                 │
+│  macOS crontab (every Sunday 14:00 UTC / 09:00 EST)            │
+│                                                                 │
+│  node scripts/weekly-war-report.js                              │
+│         │  TradingView CDP: weekly/monthly bars, zones,        │
+│         │    CVD, OI, VWAP                                      │
+│         │  Binance API: funding rate                            │
+│         │  Alternative.me: Fear & Greed Index                  │
+│         │  Deribit API: options expiry + max pain               │
+│         │  ForexFactory: macro calendar                         │
+│         ▼                                                       │
+│  discord-notify → #btc-weekly-war-report                        │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -129,12 +145,13 @@ Or add this flag permanently in the app's launch configuration.
 
 ### Discord webhooks
 
-Two channels are required:
+Three channels are required:
 
 | Channel | Purpose | `.env` key |
 |---|---|---|
 | `#ace-signals` (or any name) | Live trade alerts, invalidations, reclaims | `DISCORD_WEBHOOK_URL` |
-| `#btc-backtest` | Weekly performance reports | `DISCORD_BTC_BACKTEST_WEBHOOK_URL` |
+| `#btc-backtest` | Monday performance reports | `DISCORD_BTC_BACKTEST_WEBHOOK_URL` |
+| `#btc-weekly-war-report` | Sunday institutional preview | `DISCORD_BTC_WEEKLY_WAR_REPORT` |
 
 To create a webhook for each:
 1. Open your Discord server → channel **Settings** → **Integrations** → **Webhooks** → **New Webhook**
@@ -169,11 +186,12 @@ make deps
 cp .env.example .env
 ```
 
-Edit `.env` and add both Discord webhook URLs:
+Edit `.env` and add all three Discord webhook URLs:
 
 ```
 DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
 DISCORD_BTC_BACKTEST_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
+DISCORD_BTC_WEEKLY_WAR_REPORT=https://discord.com/api/webhooks/YOUR_ID/YOUR_TOKEN
 ```
 
 This file is gitignored and never committed.
@@ -392,6 +410,16 @@ Seven alert types across two channels:
 | Type | When it fires |
 |---|---|
 | 📊 **Weekly Report** | Every Monday 09:00 UTC — 7-day win rate, R totals, setup breakdown |
+
+**`#btc-weekly-war-report`**
+
+| Type | When it fires |
+|---|---|
+| 📋 **Weekly War Report** | Every Sunday 14:00 UTC (09:00 EST) — institutional weekly preview |
+
+The war report covers: quarterly/monthly/weekly reference levels, 4H supply/demand zones, weekly candle structure and trend, bull/bear scenario plans, high-impact macro events, Deribit options expiry and max pain, and a 6-factor bias score with a directional verdict and summary paragraph. All data is sourced automatically from TradingView, Binance, Deribit, and ForexFactory — no manual input required.
+
+Run manually at any time with `make war-report` or `node scripts/weekly-war-report.js`.
 
 ### What a trade alert contains
 
@@ -618,7 +646,8 @@ Stop trading for the day if account is down 2%. Come back fresh next session.
 │
 ├── scripts/
 │   ├── trigger-check.js             ← main cron script: zone check + full trade plan
-│   ├── weekly-report.js             ← weekly performance report → #btc-backtest
+│   ├── weekly-report.js             ← Monday performance report → #btc-backtest
+│   ├── weekly-war-report.js         ← Sunday war report → #btc-weekly-war-report
 │   └── discord-notify.sh            ← Discord webhook poster (5 alert types)
 │
 ├── strategies/
@@ -642,6 +671,9 @@ The core of the system. Runs every 30 minutes via cron. Connects to TradingView 
 **`scripts/weekly-report.js`**
 Reads `trades.json`, computes statistics for the past 7 days (or `--days N`), and posts a performance report to `#btc-backtest` via Discord. Run automatically every Monday at 09:00 UTC. Can also be run manually at any time.
 
+**`scripts/weekly-war-report.js`**
+Institutional weekly preview posted every Sunday at 14:00 UTC to `#btc-weekly-war-report`. Sources data from TradingView (weekly/monthly OHLCV, 4H LuxAlgo zones, CVD, OI, VWAP), Binance (funding rate), Alternative.me (Fear & Greed), Deribit (options max pain), and ForexFactory (macro calendar). Produces reference levels, scenario plans, bias score, and a summary paragraph. Zero Claude/AI — fully automated. Run manually with `make war-report`.
+
 **`scripts/discord-notify.sh`**
 Thin wrapper around a Discord webhook HTTP POST. Takes a type (`long`, `short`, `info`, `approaching`, `error`) and a message. Called by `trigger-check.js`.
 
@@ -661,7 +693,7 @@ Auto-created. Stores three things: per-zone cooldown timestamps (prevents alert 
 
 ## 12. Crontab Schedule
 
-Two scheduled jobs run via macOS crontab. The PATH is set explicitly in both because cron runs with a minimal environment and cannot find `node` otherwise.
+Three scheduled jobs run via macOS crontab. The PATH is set explicitly in all three because cron runs with a minimal environment and cannot find `node` otherwise.
 
 **Zone trigger — every 30 minutes:**
 
@@ -675,11 +707,19 @@ Two scheduled jobs run via macOS crontab. The PATH is set explicitly in both bec
 0 9 * * 1 PATH=/Users/vpm/.nvm/versions/node/v22.22.0/bin:/Users/vpm/.local/bin:/usr/local/bin:/usr/bin:/bin /Users/vpm/.nvm/versions/node/v22.22.0/bin/node /Users/vpm/trading/scripts/weekly-report.js >> /Users/vpm/trading/logs/weekly-report.log 2>&1
 ```
 
+**Weekly war report — every Sunday at 14:00 UTC (09:00 EST / 10:00 EDT):**
+
+```
+0 14 * * 0 PATH=/Users/vpm/.nvm/versions/node/v22.22.0/bin:/Users/vpm/.local/bin:/usr/local/bin:/usr/bin:/bin /Users/vpm/.nvm/versions/node/v22.22.0/bin/node /Users/vpm/trading/scripts/weekly-war-report.js >> /Users/vpm/trading/logs/weekly-war-report.log 2>&1
+```
+
 To view your crontab: `crontab -l`
 To edit: `crontab -e`
-To install both entries automatically: `make cron`
+To install all three entries automatically: `make cron`
 
 ### What happens each run
+
+**Trigger check — what happens each run:**
 
 | Scenario | Duration | Output |
 |---|---|---|
@@ -687,6 +727,16 @@ To install both entries automatically: `make cron`
 | Zone trigger fires | ~5 seconds | Discord alert (fetches 4H + 12H bars) |
 | TradingView not running | ~2 seconds | Discord error alert |
 | Wrong symbol on chart | ~1 second | Discord error alert |
+
+**War report — what it fetches each Sunday:**
+
+| Source | Data | Notes |
+|---|---|---|
+| TradingView (CDP) | Weekly/monthly OHLCV, 4H zones, CVD, OI, VWAP | TradingView Desktop must be open |
+| Binance Futures API | Funding rate | Public endpoint, no auth |
+| Alternative.me | Fear & Greed Index | Public endpoint, no auth |
+| Deribit | Options expiry + max pain | Public endpoint, no auth |
+| ForexFactory | High-impact USD macro events | Public JSON feed, no auth |
 
 ---
 
