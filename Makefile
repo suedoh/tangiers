@@ -8,7 +8,7 @@ TRADING := $(shell pwd)
 
 # ─── Targets ─────────────────────────────────────────────────────────────────
 
-.PHONY: help install deps env mcp cron test test-discord logs clean
+.PHONY: help install deps env mcp cron test test-discord report report-30 war-report logs clean
 
 help: ## Show available commands
 	@echo ""
@@ -71,17 +71,27 @@ cron: ## Install the 30-minute trigger cron and weekly report cron (idempotent)
 	  REPORTLINE="0 9 * * 1 PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/weekly-report.js >> $(TRADING)/logs/weekly-report.log 2>&1"; \
 	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — weekly report every Monday 09:00 UTC"; echo "$$REPORTLINE") | crontab -; \
 	  echo "✓  Weekly report cron installed (runs Mondays at 09:00 UTC)"; \
+	fi; \
+	if crontab -l 2>/dev/null | grep -q "weekly-war-report.js"; then \
+	  echo "✓  War report cron already installed — skipping"; \
+	else \
+	  WARLINE="0 14 * * 0 PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/weekly-war-report.js >> $(TRADING)/logs/weekly-war-report.log 2>&1"; \
+	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — weekly war report every Sunday 14:00 UTC (09:00 EST / 10:00 EDT)"; echo "$$WARLINE") | crontab -; \
+	  echo "✓  War report cron installed (runs Sundays at 14:00 UTC)"; \
 	fi
 
 test: ## Run trigger-check.js once and show output
 	@echo "→ Running trigger check..."
 	@$(NODE) $(TRADING)/scripts/trigger-check.js
 
-report: ## Run the weekly report now and post to #backtest-btc
+report: ## Run the weekly performance report now and post to #btc-backtest
 	@$(NODE) $(TRADING)/scripts/weekly-report.js
 
-report-30: ## Run a 30-day report and post to #backtest-btc
+report-30: ## Run a 30-day performance report and post to #btc-backtest
 	@$(NODE) $(TRADING)/scripts/weekly-report.js --days 30
+
+war-report: ## Run the weekly war report now and post to #btc-weekly-war-report
+	@$(NODE) $(TRADING)/scripts/weekly-war-report.js
 
 test-discord: ## Send a test Discord notification
 	@bash scripts/discord-notify.sh info "Ace system online — test from \`make test-discord\`"
