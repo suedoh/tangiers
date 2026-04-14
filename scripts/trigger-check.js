@@ -853,16 +853,21 @@ function formatSetupMessage(price, trigger, setup) {
     `$${tp1Price.toLocaleString()} (TP1)`,
   ].join(' | ');
 
+  const probNum = parseInt(probability, 10);
+  const probLabel = probNum >= 70 ? 'High' : probNum >= 60 ? 'Moderate' : probNum >= 50 ? 'Low' : 'Poor';
+
   const criteriaLines = criteria.map(c => {
     const icon = c.pass === true ? '✅' : c.pass === false ? '❌' : '⚠️';
     return `${icon} ${c.label}`;
   }).join('\n');
 
+  const ts = new Date().toLocaleString('en-US', { timeZone: 'UTC', hour12: false, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
   return [
-    `${dirLabel} SIGNAL | BINANCE:BTCUSDT.P`,
+    `${dirLabel} SIGNAL | BINANCE:BTCUSDT.P | ${ts} UTC`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
     `**Price** $${Math.round(price).toLocaleString()} | **${levelType}** ${levelStr}`,
-    `**Setup** ${setupType} | **Win Rate** ${probability}`,
+    `**Setup** ${setupType} | **Win Rate** ${probability} (${probLabel})`,
     ``,
     `**ENTRY**  $${entry.toLocaleString()}`,
     `**STOP**   $${stop.toLocaleString()}`,
@@ -1037,20 +1042,19 @@ function formatStopHuntEscalation(price, direction, trig, cvd, oiTrend) {
     : `Re-entry: ${trig.type} bottom $${Math.round(trig.lo).toLocaleString()} on order flow confirmation`;
 
   return [
-    `🎯 STOP HUNT DETECTED — ${dirLabel} RE-ENTRY SETUP | BTCUSDT.P`,
+    `🎯 STOP HUNT DETECTED — ${dirLabel} RE-ENTRY | BTCUSDT.P`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-    `${trig.type} ${levelStr} was swept with low conviction (probable stop hunt).`,
-    `**Probability: ~63% reversal back toward original ${dirLabel} thesis.**`,
+    `**Price** $${Math.round(price).toLocaleString()} | **${trig.type}** ${levelStr}`,
+    `${trig.type} swept with low conviction — probable stop hunt, ~63% reversal probability.`,
     ``,
-    `**ORDER FLOW**`,
+    `**ORDER FLOW AT SWEEP**`,
     `CVD: ${cvdLabel} — ${direction === 'long' ? 'no bear conviction on the break' : 'no bull conviction on the break'}`,
-    `OI: ${oiTrend ?? 'flat'} — ${oiTrend === 'rising' ? 'some positioning' : 'no new positions — likely liquidation-driven'}`,
+    `OI: ${oiTrend ?? 'flat'} — ${oiTrend === 'rising' ? 'some positioning present' : 'no new positions — likely liquidation-driven'}`,
     ``,
-    `**ACTION**  ${reclaim}`,
-    `**${entryNote}**`,
-    `Cooldown reset: next proximity trigger fires in 30 minutes.`,
+    `**WATCH**  ${reclaim}`,
+    `**RE-ENTRY**  ${entryNote}`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-    `\`You are analysing BINANCE:BTCUSDT.P. A ${dirLabel} ${trig.type} ${levelStr} was just swept as a probable stop hunt — flat/falling OI and non-confirming CVD (${cvdLabel}). This is ~63% reversal probability. Run the 30M analysis from strategies/mtf-analysis.md. Look for order flow confirmation at $${Math.round(direction === 'long' ? trig.lo : trig.hi).toLocaleString()}. If confirmed, post a ${direction} re-entry signal to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh ${direction} "your message".\``,
+    `📊 React with 📊 for deep MTF analysis`,
   ].join('\n');
 }
 
@@ -1065,18 +1069,17 @@ function formatInvalidationMessage(price, direction, trig, isRealBreak, cvd, cvd
   const nextLevelStr = 'Check VRVP for next HVN/VAL/VAH';
 
   if (isRealBreak) {
-    // Change 4: flag breakout continuation mode when triggered by high volume
     const breakoutNote = isBreakoutMode && recentVol && avgVol
-      ? `⚡ HIGH-VOLUME BREAKOUT — vol ${Math.round(recentVol).toLocaleString()} (${(recentVol / avgVol).toFixed(1)}× avg). Zone consumed as support/resistance flip.`
+      ? `⚡ HIGH-VOLUME BREAKOUT — vol ${Math.round(recentVol).toLocaleString()} (${(recentVol / avgVol).toFixed(1)}× avg). Level consumed as S/R flip.`
       : `Price broke through with institutional CVD + OI confirmation. Not a stop hunt.`;
     const breakoutAction = isBreakoutMode
-      ? `Watch for ${direction === 'long' ? 'bearish' : 'bullish'} continuation — zone ${zoneStr} is now flipped ${direction === 'long' ? 'resistance' : 'support'}.`
-      : `Identify the next key ${direction === 'long' ? 'demand' : 'supply'} zone.`;
+      ? `Watch for ${direction === 'long' ? 'bearish' : 'bullish'} continuation — ${levelStr} now flipped ${direction === 'long' ? 'resistance' : 'support'}.`
+      : `Identify the next key ${direction === 'long' ? 'demand' : 'supply'} zone on VRVP.`;
 
     return [
       `🚫 SIGNAL INVALIDATED${isBreakoutMode ? ' — BREAKOUT MODE' : ''} | BINANCE:BTCUSDT.P`,
       `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-      `Original ${dirLabel} ${trig.type} ${levelStr} has been broken.`,
+      `**Price** $${Math.round(price).toLocaleString()} | **${trig.type}** ${levelStr} broken`,
       ``,
       `**VERDICT**  Real break — ${dirLabel} thesis is off`,
       breakoutNote,
@@ -1088,7 +1091,7 @@ function formatInvalidationMessage(price, direction, trig, isRealBreak, cvd, cvd
       `**NEXT LEVEL**  ${nextLevelStr}`,
       `**ACTION**  ${breakoutAction}`,
       `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-      `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${dirLabel} ${trig.type} ${levelStr} was just confirmed broken${isBreakoutMode ? ` on high volume (${recentVol ? Math.round(recentVol).toLocaleString() : '?'} vs avg ${avgVol ? Math.round(avgVol).toLocaleString() : '?'})` : ' — rising OI and confirming CVD'}. ${breakoutAction} Run the full 12H→4H→1H→30M analysis from strategies/mtf-analysis.md, assess whether a new setup in either direction is forming, and post your verdict to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh info "your message here".\``,
+      `📊 React with 📊 for deep MTF analysis`,
     ].join('\n');
   } else {
     const watchAction = direction === 'long'
@@ -1097,7 +1100,7 @@ function formatInvalidationMessage(price, direction, trig, isRealBreak, cvd, cvd
     return [
       `⚠️ LEVEL BROKEN — POSSIBLE STOP HUNT | BINANCE:BTCUSDT.P`,
       `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-      `Original ${dirLabel} ${trig.type} ${levelStr} has been broken.`,
+      `**Price** $${Math.round(price).toLocaleString()} | **${trig.type}** ${levelStr} broken`,
       ``,
       `**VERDICT**  Ambiguous — possible stop hunt (~63% reversal probability)`,
       `Low conviction on the break. Institutional confirmation absent.`,
@@ -1109,7 +1112,7 @@ function formatInvalidationMessage(price, direction, trig, isRealBreak, cvd, cvd
       `**WATCH**  ${watchAction}`,
       `**NEXT LEVEL**  ${nextLevelStr}`,
       `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-      `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${dirLabel} ${trig.type} ${levelStr} was just broken with flat/falling OI and ${cvd != null && cvd > 0 ? 'bullish' : 'bearish'} CVD — this is a probable stop hunt (~63% reversal probability). Run the 30M analysis from strategies/mtf-analysis.md. Check whether price is forming a reclaim at $${Math.round(direction === 'long' ? trig.lo : trig.hi).toLocaleString()} with confirming order flow. Post your verdict to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh info "your message here".\``,
+      `📊 React with 📊 for deep MTF analysis`,
     ].join('\n');
   }
 }
@@ -1154,19 +1157,27 @@ function checkReclaimWatch(price, indicators) {
       const cvdLabel = `${cvd > 0 ? '+' : ''}${Math.round(cvd)} (${cvd < 0 ? 'bearish' : 'bullish'})`;
       log(`Reclaim confirmed: ${dirLabel} ${levelType} ${levelStr} | CVD ${cvdLabel} | OI ${oiTrend}`);
 
+      const reclaimEntry = direction === 'long'
+        ? `$${Math.round(levelHi ?? levelMid + 30).toLocaleString()} (${levelType ?? 'level'} top)`
+        : `$${Math.round(levelLo ?? levelMid - 30).toLocaleString()} (${levelType ?? 'level'} bottom)`;
+      const reclaimStop = direction === 'long'
+        ? `$${Math.round((levelLo ?? levelMid - 30) * 0.998).toLocaleString()} (below level)`
+        : `$${Math.round((levelHi ?? levelMid + 30) * 1.002).toLocaleString()} (above level)`;
       messages.push([
         `🔄 RECLAIM CONFIRMED | BINANCE:BTCUSDT.P`,
         `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-        `Price has returned to ${dirLabel} ${levelType ?? 'level'} ${levelStr} with institutional backing.`,
-        `The earlier break was a stop hunt. Original thesis back in play.`,
+        `**Price** $${Math.round(price).toLocaleString()} | **${levelType ?? 'Level'}** ${levelStr}`,
+        `Price returned to ${dirLabel} ${levelType ?? 'level'} with institutional backing. Original thesis back in play.`,
         ``,
         `**ORDER FLOW AT RECLAIM**`,
         `✅ CVD ${cvdLabel}`,
         `✅ OI ${oiTrend} — new positioning confirming the reclaim`,
         ``,
-        `**ACTION**  Re-evaluate entry. Wait for order flow confirmation in ${direction} direction.`,
+        `**ENTRY**   ${reclaimEntry}`,
+        `**STOP**    ${reclaimStop}`,
+        `**TRIGGER** 30M ${direction === 'long' ? 'bullish' : 'bearish'} close with CVD confirmation`,
         `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-        `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${dirLabel} ${levelType} ${levelStr} that was previously swept as a stop hunt has now been reclaimed — price is back at the level with rising OI and ${direction === 'long' ? 'bullish' : 'bearish'} CVD. Run the 30M analysis from strategies/mtf-analysis.md. Give me a take/skip verdict and post it to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh ${direction} "your message here".\``,
+        `📊 React with 📊 for deep MTF analysis`,
       ].join('\n'));
 
       delete state[key];
@@ -1244,20 +1255,18 @@ function checkPendingConfirmation(price, indicators) {
     const msg = [
       `${dirLabel} TRIGGER CONFIRMED | BINANCE:BTCUSDT.P`,
       `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-      `Zone ${zoneStr} — flat OI at alert time has now confirmed.`,
-      `Institutional flow entered AFTER the initial alert. This is the real entry.`,
+      `**Price** $${Math.round(price).toLocaleString()} | **Zone** ${zoneStr}`,
+      `Flat OI at initial alert has now confirmed. Institutional flow entered after the signal — this is the real entry.`,
       ``,
       `**CONFIRMATION ORDER FLOW**`,
       `✅ OI: ${baselineOI?.toFixed(2)}K → ${oi?.toFixed(2)}K (+${oiPct}%) — new ${direction} positions opening`,
       `✅ CVD: ${cvdBase} → ${cvdNow} (Δ ${cvdDeltaStr}) — conviction surge confirmed`,
       ``,
-      `**PRICE** $${Math.round(price).toLocaleString()} | **ZONE** ${zoneStr}`,
-      ``,
       `**ENTRY**  Pullback to zone top $${Math.round(high).toLocaleString()} or aggressive at market`,
-      `**STOP**   Below zone low $${Math.round(low * (1 - 0.002)).toLocaleString()}`,
+      `**STOP**   $${Math.round(low * (1 - 0.002)).toLocaleString()} (below zone low)`,
       `**ACTION** Check 30M for CHoCH — if not fired yet, it is imminent`,
       `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-      `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${direction.toUpperCase()} zone ${zoneStr} has just received institutional confirmation — OI rose ${oiPct}% and CVD surged from ${cvdBase} to ${cvdNow} since the initial zone alert. This is the delayed confirmation that was missing at first alert. Run the 30M analysis from strategies/mtf-analysis.md focusing on: (1) has 30M CHoCH fired at the zone? (2) is OI still rising? Give a take/late-entry/skip verdict and post to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh ${direction} "your message here".\``,
+      `📊 React with 📊 for deep MTF analysis`,
     ].join('\n');
 
     // Remove pending state, refresh the level's cooldown timestamp
@@ -1568,8 +1577,11 @@ async function main() {
           ``,
           `**WATCH FOR**  Breakout close above $${Math.round(trigger.hi).toLocaleString()} → long continuation`,
           `**FLIP TRIGGER**  4H close below $${Math.round(trigger.lo).toLocaleString()} would change regime`,
-          `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+          ``,
+          `**CRITERIA**`,
           setup.criteria.map(c => `${c.pass === true ? '✅' : c.pass === false ? '❌' : '⚠️'} ${c.label}`).join('\n'),
+          `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+          `📊 React with 📊 for deep MTF analysis`,
         ].join('\n'));
         markAlerted(levelKey, trigger.direction, trigger);
         triggered = true;
@@ -1587,8 +1599,11 @@ async function main() {
           ``,
           `**WATCH FOR**  Break close below $${Math.round(trigger.lo).toLocaleString()} → short continuation`,
           `**FLIP TRIGGER**  4H close above $${Math.round(trigger.hi).toLocaleString()} would change regime`,
-          `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+          ``,
+          `**CRITERIA**`,
           setup.criteria.map(c => `${c.pass === true ? '✅' : c.pass === false ? '❌' : '⚠️'} ${c.label}`).join('\n'),
+          `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+          `📊 React with 📊 for deep MTF analysis`,
         ].join('\n'));
         markAlerted(levelKey, trigger.direction, trigger);
         triggered = true;
