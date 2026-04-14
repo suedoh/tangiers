@@ -8,11 +8,15 @@
  *
  * What it does:
  *   1. Connects to TradingView Desktop via CDP (port 9222)
- *   2. Reads price, supply/demand zones, CVD, OI, Session VP
- *   3. Checks zone proximity trigger formula
+ *   2. Reads price, VRVP histogram (POC/VAH/VAL/HVNs/LVNs), CVD, OI, Session VP
+ *   3. Checks VRVP level proximity as primary trigger
  *   4. If triggered: evaluates setup criteria + generates full trade plan
  *   5. Posts complete setup to Discord (entry, SL, TPs, criteria, alerts)
  *   6. On any error: posts actionable error message to Discord
+ *
+ * Primary trigger source: Visible Range Volume Profile (VRVP)
+ *   VAL/VAH (value area boundaries) > HVN (high-volume nodes) > POC (point of control)
+ *   LuxAlgo SMC zones are read for secondary context only.
  *
  * Requires: TradingView Desktop open on 🕵Ace layout (BINANCE:BTCUSDT.P)
  */
@@ -328,6 +332,55 @@ function buildLabelsExpr(filter) {
 })()`;
 }
 
+// ─── VRVP Extractor ──────────────────────────────────────────────────────────
+// Reads the Visible Range Volume Profile histogram from TradingView's native
+// (non-Pine) study data layer. Returns raw histogram rows + POC/VAH/VAL.
+const VRVP_EXPR = `
+(function() {
+  try {
+    var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
+    var sources = chart.model().model().dataSources();
+    for (var si = 0; si < sources.length; si++) {
+      var s = sources[si];
+      if (!s.metaInfo) continue;
+      var name = '';
+      try { name = s.metaInfo().description || ''; } catch(e) { continue; }
+      if (name !== 'Visible Range Volume Profile') continue;
+
+      // POC / VAH / VAL — the study's developing-line data store
+      var poc = null, vah = null, val = null;
+      try {
+        var lastVal = s._data.last().value;
+        if (lastVal) { poc = lastVal[1]; vah = lastVal[2]; val = lastVal[3]; }
+      } catch(e) {}
+
+      // Full histogram rows
+      var rows = [];
+      try {
+        var hhists = s.graphics().hhists();
+        var histBars = hhists.get('histBars2');
+        if (histBars && histBars._primitivesDataById) {
+          histBars._primitivesDataById.forEach(function(v) {
+            if (v.priceLow != null && v.rate) {
+              rows.push({
+                lo: Math.round(v.priceLow * 10) / 10,
+                hi: Math.round(v.priceHigh * 10) / 10,
+                uv: v.rate[0] || 0,
+                dv: v.rate[1] || 0,
+                tv: (v.rate[0] || 0) + (v.rate[1] || 0)
+              });
+            }
+          });
+          rows.sort(function(a, b) { return a.lo - b.lo; });
+        }
+      } catch(e) {}
+
+      return { poc: poc, vah: vah, val: val, rows: rows };
+    }
+    return null;
+  } catch(e) { return { error: e.message }; }
+})()`;
+
 // ─── Indicator Parsers ────────────────────────────────────────────────────────
 
 function parseFloat_(str) {
@@ -491,27 +544,156 @@ function checkProximity(price, zone) {
   return { triggered, insideZone, minDist, buffer };
 }
 
+// ─── VRVP Level Computation ───────────────────────────────────────────────────
+// Takes raw histogram from VRVP_EXPR and returns structured trading levels.
+//
+// POC  — single bucket with highest volume (the "fair value" magnet)
+// VAH  — value area high (70% of volume traded below this)
+// VAL  — value area low  (70% of volume traded above this)
+// HVNs — clustered high-volume zones (> 1.5× avg vol) — natural S/R
+// LVNs — clustered low-volume zones (< 0.35× avg vol) — air pockets / fast moves
+//
+// HVN direction logic:
+//   Price approaching HVN from ABOVE → expect support → long
+//   Price approaching HVN from BELOW → expect resistance → short
+
+function computeVRVPLevels(data) {
+  if (!data || !data.rows || data.rows.length < 5) return null;
+
+  const rows = data.rows;
+  const totalVol = rows.reduce((s, r) => s + r.tv, 0);
+  const avgVol   = totalVol / rows.length;
+
+  // POC: max volume row from histogram (more precise than _data store)
+  const pocRow = rows.reduce((best, r) => r.tv > best.tv ? r : best, rows[0]);
+  const poc = Math.round((pocRow.lo + pocRow.hi) / 2);
+
+  // VAH/VAL from study _data store (authoritative)
+  const vah = data.vah != null ? Math.round(data.vah) : null;
+  const val = data.val != null ? Math.round(data.val) : null;
+
+  // Identify HVN and LVN rows (exclude outermost 2 rows to avoid edge noise)
+  const inner = rows.slice(2, -2);
+  const hvnRows = inner.filter(r => r.tv > avgVol * 1.5);
+  const lvnRows = inner.filter(r => r.tv < avgVol * 0.35);
+
+  // Cluster adjacent rows (within 50 pts) into single zones
+  function cluster(rws) {
+    if (!rws.length) return [];
+    const out = [];
+    let cur = { lo: rws[0].lo, hi: rws[0].hi, maxVol: rws[0].tv, upVol: rws[0].uv, downVol: rws[0].dv };
+    for (let i = 1; i < rws.length; i++) {
+      if (rws[i].lo <= cur.hi + 50) {
+        cur.hi      = rws[i].hi;
+        cur.maxVol  = Math.max(cur.maxVol, rws[i].tv);
+        cur.upVol  += rws[i].uv;
+        cur.downVol += rws[i].dv;
+      } else {
+        out.push(cur);
+        cur = { lo: rws[i].lo, hi: rws[i].hi, maxVol: rws[i].tv, upVol: rws[i].uv, downVol: rws[i].dv };
+      }
+    }
+    out.push(cur);
+    return out;
+  }
+
+  const hvns = cluster(hvnRows).sort((a, b) => b.maxVol - a.maxVol).slice(0, 6);
+  const lvns = cluster(lvnRows).sort((a, b) => a.maxVol - b.maxVol).slice(0, 5);
+
+  return { poc, vah, val, hvns, lvns, pocRow, avgVol };
+}
+
+// ─── VRVP Proximity Check ─────────────────────────────────────────────────────
+// Finds the nearest actionable VRVP level and determines setup direction.
+// Returns null if no level is within the proximity buffer.
+//
+// Priority: VAL/VAH (value area boundaries) > HVN > POC
+// Buffer: 0.35% of price (tighter than SMC 0.5% — VRVP levels are precise)
+
+function checkVRVPProximity(price, levels) {
+  if (!levels) return null;
+  const { poc, vah, val, hvns } = levels;
+  const buf = price * 0.0035;
+  const candidates = [];
+
+  // VAL — value area low (demand, expect support)
+  if (val != null) {
+    const dist = Math.abs(price - val);
+    if (dist <= buf * 1.5 || (price >= val - buf && price <= val + buf * 3)) {
+      candidates.push({ type: 'VAL', mid: val, lo: val - 30, hi: val + 30, direction: 'long', dist, priority: 10 });
+    }
+  }
+
+  // VAH — value area high (supply, expect resistance; or breakout long if price above)
+  if (vah != null) {
+    const dist = Math.abs(price - vah);
+    if (dist <= buf * 1.5) {
+      const dir = price > vah + buf ? 'long' : 'short'; // above VAH = breakout long
+      candidates.push({ type: 'VAH', mid: vah, lo: vah - 30, hi: vah + 30, direction: dir, dist, priority: 10 });
+    }
+  }
+
+  // HVNs — high-volume nodes (approach from above = long support, from below = short resistance)
+  for (const hvn of (hvns || [])) {
+    const mid    = (hvn.lo + hvn.hi) / 2;
+    const inside = price >= hvn.lo && price <= hvn.hi;
+    const distLo = Math.abs(price - hvn.lo);
+    const distHi = Math.abs(price - hvn.hi);
+    const dist   = inside ? 0 : Math.min(distLo, distHi);
+    if (inside || dist <= buf) {
+      // Approaching from above: long (support). From below: short (resistance).
+      const dir = price > mid ? 'long' : 'short';
+      candidates.push({ type: 'HVN', mid: Math.round(mid), lo: hvn.lo, hi: hvn.hi, direction: dir, dist, priority: 7, upVol: hvn.upVol, downVol: hvn.downVol });
+    }
+  }
+
+  // POC — mean reversion magnet (only trigger if nothing higher priority nearby)
+  if (poc != null) {
+    const dist = Math.abs(price - poc);
+    if (dist <= buf * 0.7) {
+      const dir = price > poc ? 'long' : 'short';
+      candidates.push({ type: 'POC', mid: poc, lo: poc - 30, hi: poc + 30, direction: dir, dist, priority: 5 });
+    }
+  }
+
+  if (!candidates.length) return null;
+
+  // Sort by priority first, then distance
+  candidates.sort((a, b) => b.priority - a.priority || a.dist - b.dist);
+  return candidates[0];
+}
+
 // ─── Setup Evaluation ────────────────────────────────────────────────────────
 
-function evaluateSetup(price, zone, indicators, allZones) {
-  const { cvd, oi, sessionVP, vwap, oiTrend, macd4h, rsi12h, weeklyTrend, bosChoch } = indicators;
+function evaluateSetup(price, trigger, indicators, levels) {
+  const { cvd, oi, sessionVP, vwap, oiTrend, macd4h, rsi12h, weeklyTrend } = indicators;
+  const direction = trigger.direction;
+  const criteria  = [];
 
-  const isSupply    = price < zone.low;   // zone above price
-  const isDemand    = price > zone.high;  // zone below price
-  const direction   = isSupply ? 'short' : 'long';
+  // 1. VRVP level type and context
+  const levelDesc = {
+    HVN: `HVN $${Math.round(trigger.lo).toLocaleString()}–$${Math.round(trigger.hi).toLocaleString()} — ${direction === 'long' ? 'demand wall (price above, expect support)' : 'supply wall (price below, expect resistance)'}`,
+    VAL: `VAL $${Math.round(trigger.mid).toLocaleString()} — value area low, institutional demand zone`,
+    VAH: direction === 'long' ? `VAH $${Math.round(trigger.mid).toLocaleString()} — breakout above value area, bullish expansion` : `VAH $${Math.round(trigger.mid).toLocaleString()} — value area high, institutional supply zone`,
+    POC: `POC $${Math.round(trigger.mid).toLocaleString()} — mean reversion to fair value`,
+  }[trigger.type] || `Level at $${Math.round(trigger.mid).toLocaleString()}`;
+  criteria.push({ label: levelDesc, pass: true, auto: true });
 
-  // --- Criteria ---
-  const criteria = [];
+  // 2. VRVP delta at the level (up vol vs down vol)
+  if (trigger.type === 'HVN' && trigger.upVol != null) {
+    const totalLevelVol = (trigger.upVol || 0) + (trigger.downVol || 0);
+    const upPct = totalLevelVol > 0 ? Math.round(trigger.upVol / totalLevelVol * 100) : 50;
+    const levelBullish = upPct > 55;
+    const levelBearish = upPct < 45;
+    const aligned = (direction === 'long' && levelBullish) || (direction === 'short' && levelBearish);
+    criteria.push({
+      label: `HVN delta: ${upPct}% bull / ${100 - upPct}% bear — ${levelBullish ? 'buyers dominated' : levelBearish ? 'sellers dominated' : 'balanced'}`,
+      pass: aligned ? true : (levelBullish || levelBearish) ? false : null,
+      auto: !!aligned || levelBullish || levelBearish,
+    });
+  }
 
-  // 1. Price location
-  criteria.push({
-    label: isSupply ? 'Price approaching supply zone'
-         : isDemand ? 'Price approaching demand zone'
-         : 'Price inside zone',
-    pass: true, auto: true,
-  });
-
-  // 2. CVD alignment
+  // 3. CVD alignment
   if (cvd != null) {
     const aligned = direction === 'short' ? cvd < 0 : cvd > 0;
     criteria.push({
@@ -522,9 +704,8 @@ function evaluateSetup(price, zone, indicators, allZones) {
     criteria.push({ label: 'CVD: unavailable', pass: null, auto: false });
   }
 
-  // 3. Session VP
+  // 4. Session VP
   if (sessionVP) {
-    const ratio = sessionVP.up / (sessionVP.down || 1);
     const sessionBearish = sessionVP.down > sessionVP.up;
     const sessionBullish = sessionVP.up > sessionVP.down;
     const aligned = direction === 'short' ? sessionBearish : sessionBullish;
@@ -534,18 +715,17 @@ function evaluateSetup(price, zone, indicators, allZones) {
     });
   }
 
-  // 4. VWAP position
+  // 5. VWAP
   if (vwap != null) {
     const belowVwap = price < vwap;
-    const aboveVwap = price > vwap;
-    const aligned = direction === 'short' ? belowVwap : aboveVwap;
+    const aligned = direction === 'short' ? belowVwap : !belowVwap;
     criteria.push({
       label: `VWAP $${Math.round(vwap).toLocaleString()} — price is ${belowVwap ? 'below' : 'above'}`,
       pass: aligned, auto: true,
     });
   }
 
-  // 5. OI trend
+  // 6. OI trend
   if (oiTrend && oiTrend !== 'flat') {
     const oiRising = oiTrend === 'rising';
     const aligned = direction === 'long' ? oiRising : !oiRising;
@@ -554,12 +734,12 @@ function evaluateSetup(price, zone, indicators, allZones) {
       pass: aligned, auto: true,
     });
   } else if (oiTrend === 'flat') {
-    criteria.push({ label: `OI flat — no directional conviction`, pass: null, auto: false });
+    criteria.push({ label: 'OI flat — no directional conviction yet', pass: null, auto: false });
   } else {
-    criteria.push({ label: `OI ${oi != null ? oi.toFixed(2) : 'n/a'} — first run, trend available next poll`, pass: null, auto: false });
+    criteria.push({ label: `OI ${oi != null ? oi.toFixed(2) : 'n/a'} — first run`, pass: null, auto: false });
   }
 
-  // 6. 4H MACD
+  // 7. 4H MACD
   if (macd4h) {
     const aligned = direction === 'long' ? macd4h.bullish : !macd4h.bullish;
     criteria.push({
@@ -567,25 +747,24 @@ function evaluateSetup(price, zone, indicators, allZones) {
       pass: aligned, auto: true,
     });
   } else {
-    criteria.push({ label: '4H MACD — unavailable', pass: null, auto: false, note: 'Check chart manually' });
+    criteria.push({ label: '4H MACD — unavailable', pass: null, auto: false });
   }
 
-  // 7. 12H RSI
+  // 8. 12H RSI
   if (rsi12h != null) {
-    const rsiRounded = Math.round(rsi12h);
     const aboveMid = rsi12h > 50;
     const aligned = direction === 'long' ? aboveMid : !aboveMid;
     criteria.push({
-      label: `12H RSI ${rsiRounded} (${aboveMid ? 'above' : 'below'} 50)`,
+      label: `12H RSI ${Math.round(rsi12h)} (${aboveMid ? 'above' : 'below'} 50)`,
       pass: aligned, auto: true,
     });
   } else {
-    criteria.push({ label: '12H RSI — unavailable', pass: null, auto: false, note: 'Check chart manually' });
+    criteria.push({ label: '12H RSI — unavailable', pass: null, auto: false });
   }
 
-  // 8. Weekly trend regime (Change 1)
+  // 9. Weekly trend regime
   if (weeklyTrend && weeklyTrend !== 'neutral') {
-    const trendAligned = (direction === 'long'  && weeklyTrend === 'uptrend')
+    const trendAligned = (direction === 'long' && weeklyTrend === 'uptrend')
                       || (direction === 'short' && weeklyTrend === 'downtrend');
     criteria.push({
       label: `Weekly trend: ${weeklyTrend} — ${trendAligned ? 'with trend ✓' : 'COUNTER-TREND ⚠'}`,
@@ -595,42 +774,33 @@ function evaluateSetup(price, zone, indicators, allZones) {
     criteria.push({ label: 'Weekly trend: neutral / ranging', pass: null, auto: false });
   }
 
-  // 9. BOS / CHoCH structure confirmation (Change 3)
-  if (bosChoch) {
-    const { text, isBullish, isBOS, isCHoCH } = bosChoch;
-    const structureAligned = direction === 'long' ? isBullish : !isBullish;
-    const structureType = isCHoCH ? 'CHoCH' : isBOS ? 'BOS' : 'Structure';
-    criteria.push({
-      label: `${structureType}: "${text}" — ${isBullish ? 'bullish' : 'bearish'} structure ${structureAligned ? '✓' : '✗'}`,
-      pass: structureAligned, auto: true,
-    });
-  }
-
-  // --- Levels ---
-  const buf = 0.002; // 0.2% stop buffer
+  // ─── Levels (TP targets from VRVP) ───────────────────────────────────────
+  const buf = 0.002;
   let entry, stop, tp1Price, tp2Price, tp3Price;
 
   if (direction === 'short') {
-    entry    = Math.round(zone.low + (zone.high - zone.low) * 0.3);
-    stop     = Math.round(zone.high * (1 + buf));
+    entry = Math.round(trigger.hi - (trigger.hi - trigger.lo) * 0.2);
+    stop  = Math.round(trigger.hi * (1 + buf));
     const riskPts = stop - entry;
-    // TPs: demand zones below current price, sorted closest first
-    const targets = allZones
-      .filter(z => z.high < price - 100)
-      .sort((a, b) => b.high - a.high);
-    tp1Price = Math.round(targets[0]?.high ?? (entry - riskPts));
-    tp2Price = Math.round(targets[1]?.high ?? (entry - riskPts * 2));
+    // TPs: HVNs below current price, sorted closest first
+    const targets = (levels?.hvns || [])
+      .filter(h => h.hi < price - 100)
+      .sort((a, b) => b.hi - a.hi);
+    const valTarget = levels?.val != null && levels.val < price - 100 ? levels.val : null;
+    tp1Price = Math.round(targets[0]?.hi ?? valTarget ?? (entry - riskPts));
+    tp2Price = Math.round(targets[1]?.hi ?? (entry - riskPts * 2));
     tp3Price = Math.round(entry - riskPts * 3);
   } else {
-    entry    = Math.round(zone.high - (zone.high - zone.low) * 0.3);
-    stop     = Math.round(zone.low * (1 - buf));
+    entry = Math.round(trigger.lo + (trigger.hi - trigger.lo) * 0.2);
+    stop  = Math.round(trigger.lo * (1 - buf));
     const riskPts = entry - stop;
-    // TPs: supply zones above current price, sorted closest first
-    const targets = allZones
-      .filter(z => z.low > price + 100)
-      .sort((a, b) => a.low - b.low);
-    tp1Price = Math.round(targets[0]?.low ?? (entry + riskPts));
-    tp2Price = Math.round(targets[1]?.low ?? (entry + riskPts * 2));
+    // TPs: HVNs above current price, sorted closest first
+    const targets = (levels?.hvns || [])
+      .filter(h => h.lo > price + 100)
+      .sort((a, b) => a.lo - b.lo);
+    const vahTarget = levels?.vah != null && levels.vah > price + 100 ? levels.vah : null;
+    tp1Price = Math.round(targets[0]?.lo ?? vahTarget ?? (entry + riskPts));
+    tp2Price = Math.round(targets[1]?.lo ?? (entry + riskPts * 2));
     tp3Price = Math.round(entry + riskPts * 3);
   }
 
@@ -639,59 +809,55 @@ function evaluateSetup(price, zone, indicators, allZones) {
   const rr2 = riskPts > 0 ? (Math.abs(tp2Price - entry) / riskPts).toFixed(1) : '?';
   const rr3 = riskPts > 0 ? (Math.abs(tp3Price - entry) / riskPts).toFixed(1) : '?';
 
-  // --- Confirm count ---
+  // --- Setup classification ---
   const autoPassed = criteria.filter(c => c.auto && c.pass === true).length;
   const autoFailed = criteria.filter(c => c.auto && c.pass === false).length;
   const autoTotal  = criteria.filter(c => c.auto).length;
 
-  // --- Setup classification ---
-  // Setup C (Liquidity Grab): all auto criteria pass including VWAP → ~70%
-  // Setup A (Trend Continuation): majority pass → ~62%
-  // Setup B (Reversal at Major Level): partial confirmation → ~52%
   let setupType, probability;
   if (autoPassed === autoTotal && autoTotal >= 3) {
-    setupType = 'C — Liquidity Grab'; probability = '~70%';
+    setupType = 'A — Full Confluence'; probability = '~70%';
   } else if (autoPassed >= autoTotal * 0.6) {
-    setupType = 'A — Trend Continuation'; probability = '~62%';
+    setupType = 'B — Partial Confluence'; probability = '~60%';
   } else {
-    setupType = 'B — Reversal'; probability = '~52%';
+    setupType = 'C — Low Confluence'; probability = '~48%';
   }
 
   return {
     direction, entry, stop, tp1Price, tp2Price, tp3Price,
-    rr1, rr2, rr3, criteria,
-    autoPassed, autoFailed, autoTotal,
-    zoneType: isSupply ? 'Supply' : isDemand ? 'Demand' : 'Inside',
-    setupType, probability,
+    rr1, rr2, rr3, criteria, autoPassed, autoFailed, autoTotal,
+    levelType: trigger.type, setupType, probability,
   };
 }
 
 // ─── Discord Message Formatter ────────────────────────────────────────────────
 
-function formatSetupMessage(price, zone, setup) {
-  const { direction, entry, stop, tp1Price, tp2Price, tp3Price, rr1, rr2, rr3, criteria, autoPassed, autoTotal, zoneType, setupType, probability } = setup;
+function formatSetupMessage(price, trigger, setup) {
+  const { direction, entry, stop, tp1Price, tp2Price, tp3Price, rr1, rr2, rr3,
+          criteria, autoPassed, autoTotal, levelType, setupType, probability } = setup;
   const dirLabel = direction === 'short' ? '🔴 SHORT' : '🟢 LONG';
-  const trigger  = direction === 'short'
-    ? 'Wait for 30M CHoCH below current price'
-    : 'Wait for 30M CHoCH above current price';
+  const triggerLine = direction === 'short'
+    ? 'Wait for 30M bearish confirmation below level'
+    : 'Wait for 30M bullish confirmation above level';
   const invalidation = direction === 'short'
     ? `4H close above $${stop.toLocaleString()}`
     : `4H close below $${stop.toLocaleString()}`;
+  const levelStr = `$${Math.round(trigger.lo).toLocaleString()}–$${Math.round(trigger.hi).toLocaleString()}`;
   const alertLevels = [
-    `$${Math.round(direction === 'short' ? zone.low : zone.high).toLocaleString()} (zone edge)`,
+    `$${Math.round(trigger.mid).toLocaleString()} (${levelType})`,
     `$${stop.toLocaleString()} (stop)`,
     `$${tp1Price.toLocaleString()} (TP1)`,
   ].join(' | ');
 
   const criteriaLines = criteria.map(c => {
     const icon = c.pass === true ? '✅' : c.pass === false ? '❌' : '⚠️';
-    return `${icon} ${c.label}${c.note ? ` — ${c.note}` : ''}`;
+    return `${icon} ${c.label}`;
   }).join('\n');
 
   return [
     `${dirLabel} SIGNAL | BINANCE:BTCUSDT.P`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-    `**Price** $${Math.round(price).toLocaleString()} | **${zoneType} Zone** $${Math.round(zone.low).toLocaleString()}–$${Math.round(zone.high).toLocaleString()}`,
+    `**Price** $${Math.round(price).toLocaleString()} | **${levelType}** ${levelStr}`,
     `**Setup** ${setupType} | **Win Rate** ${probability}`,
     ``,
     `**ENTRY**  $${entry.toLocaleString()}`,
@@ -700,7 +866,7 @@ function formatSetupMessage(price, zone, setup) {
     `**TP2**    $${tp2Price.toLocaleString()} — 1:${rr2}`,
     `**TP3**    $${tp3Price.toLocaleString()} — 1:${rr3}`,
     ``,
-    `**TRIGGER**  ${trigger}`,
+    `**TRIGGER**  ${triggerLine}`,
     ``,
     `**CRITERIA** (${autoPassed}/${autoTotal} auto-confirmed)`,
     criteriaLines,
@@ -709,17 +875,17 @@ function formatSetupMessage(price, zone, setup) {
     ``,
     `**SET ALERTS**  ${alertLevels}`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-    `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${direction.toUpperCase()} signal just fired at $${Math.round(price).toLocaleString()} in the ${zoneType.toLowerCase()} zone $${Math.round(zone.low).toLocaleString()}–$${Math.round(zone.high).toLocaleString()} (${setupType}, ${probability} win rate). Run the full 12H→4H→1H→30M analysis from strategies/mtf-analysis.md. Evaluate all setup criteria in strategies/smc-setups.md and give me a clear take/skip/wait verdict with your reasoning. Post your verdict to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh ${direction} "your message here".\``,
+    `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${direction.toUpperCase()} signal just fired at $${Math.round(price).toLocaleString()} at the ${levelType} ${levelStr} (${setupType}, ${probability} win rate). Run the full 12H→4H→1H→30M analysis from strategies/mtf-analysis.md. Evaluate all setup criteria in strategies/smc-setups.md and give me a clear take/skip/wait verdict with your reasoning. Post your verdict to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh ${direction} "your message here".\``,
   ].join('\n');
 }
 
 // ─── Cooldown / Alert State ───────────────────────────────────────────────────
 //
-// State file format:
-//   { "71750-71580": { ts: 1234567890, direction: "long", high: 71750, low: 71580 },
+// State file format (VRVP era):
+//   { "hvn-72993": { ts: 1234567890, direction: "long", levelType: "HVN", levelMid: 72993, levelLo: 72780, levelHi: 73200 },
 //     "_previousOI": 91.38 }
 //
-// Keys prefixed with "_" are internal (OI tracking etc.), not zone entries.
+// Keys prefixed with "_" are internal (OI tracking etc.), not level entries.
 
 function readState() {
   try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { return {}; }
@@ -738,9 +904,16 @@ function isCoolingDown(zoneKey) {
   } catch { return false; }
 }
 
-function markAlerted(zoneKey, direction, zone) {
+function markAlerted(levelKey, direction, trigger) {
   const state = readState();
-  state[zoneKey] = { ts: Date.now(), direction, high: zone.high, low: zone.low };
+  state[levelKey] = {
+    ts:        Date.now(),
+    direction,
+    levelType: trigger.type,
+    levelMid:  trigger.mid,
+    levelLo:   trigger.lo,
+    levelHi:   trigger.hi,
+  };
   writeState(state);
 }
 
@@ -749,45 +922,42 @@ function markAlerted(zoneKey, direction, zone) {
 // compares current OI and CVD against the baseline captured here. When both
 // confirm, it fires a TRIGGER CONFIRMED Discord alert without waiting for the
 // next manual analysis run, bypassing the cooldown gate entirely.
-function markPending(zoneKey, direction, zone, indicators) {
+function markPending(levelKey, direction, trigger, indicators) {
   const state = readState();
-  const key = `_pending_${zoneKey}`;
+  const key = `_pending_${levelKey}`;
   state[key] = {
     ts:          Date.now(),
     direction,
-    high:        zone.high,
-    low:         zone.low,
+    levelType:   trigger.type,
+    levelMid:    trigger.mid,
+    levelLo:     trigger.lo,
+    levelHi:     trigger.hi,
     expires:     Date.now() + PENDING_TTL_MS,
     baselineOI:  indicators.oi,
     baselineCVD: indicators.cvd,
   };
   writeState(state);
-  log(`Zone ${zoneKey} → pending confirmation (baseline OI: ${indicators.oi}, CVD: ${indicators.cvd})`);
+  log(`Level ${levelKey} → pending confirmation (baseline OI: ${indicators.oi}, CVD: ${indicators.cvd})`);
 }
 
 // ─── Invalidation Check ───────────────────────────────────────────────────────
 //
-// Called every poll. Compares previously alerted zones against current active
-// zones. If a zone has disappeared (LuxAlgo mitigated it), evaluates CVD + OI
-// to determine whether it was a real institutional break or a stop hunt.
+// Called every poll. For each alerted VRVP level in state, checks whether price
+// has moved significantly (0.8%) THROUGH the level mid — meaning the level has
+// been broken. Unlike LuxAlgo zones, VRVP levels don't disappear; we infer
+// invalidation from price action.
 //
-// Verdict logic (based on market microstructure research):
-//   Real break   : CVD confirms break direction AND OI rising → ~68–72% continuation
-//   Ambiguous    : CVD contradicts OR OI flat/falling → ~63% reversal probability
-//
-// In both cases the zone is removed from state (cooldown reset), so if LuxAlgo
-// redraws the zone, a fresh alert can fire. Zones that survive a stop hunt are
-// proven levels — resetting the cooldown is correct.
+// Verdict logic:
+//   Real break   : CVD confirms break direction AND OI rising → continuation
+//   High-vol break: volume > 2× avg AND OI rising → breakout mode
+//   Stop hunt    : neither — ~63% reversal probability
 
-function checkInvalidations(currentZones, price, indicators) {
+function checkInvalidations(price, indicators) {
   const { cvd, oiTrend, volumes } = indicators;
   const state = readState();
-  // Each element: { msg, type }  — type is the discord-notify.sh alert type
   const messages = [];
 
-  // ─── Change 4: Breakout volume detection ─────────────────────────────────
-  // If the current bar volume > 2× the 10-bar average, classify as high-volume break.
-  const vols = Array.isArray(volumes) ? volumes : [];
+  const vols      = Array.isArray(volumes) ? volumes : [];
   const recentVol = vols[vols.length - 1] || 0;
   const avgVol    = vols.length > 1
     ? vols.slice(0, -1).reduce((a, b) => a + b, 0) / (vols.length - 1)
@@ -796,73 +966,53 @@ function checkInvalidations(currentZones, price, indicators) {
 
   for (const [key, entry] of Object.entries(state)) {
     if (key.startsWith('_')) continue;
-    if (typeof entry !== 'object' || !entry.direction) continue; // legacy entry
+    if (typeof entry !== 'object' || !entry.direction || !entry.levelMid) continue;
 
-    // Is this zone still active?
-    const stillActive = currentZones.some(z =>
-      Math.abs(z.high - entry.high) < 10 && Math.abs(z.low - entry.low) < 10
-    );
-    if (stillActive) continue;
+    const { direction, levelMid, levelLo, levelHi, levelType } = entry;
 
-    // Zone is gone — determine verdict
-    const { direction, high, low } = entry;
-    // Real break: CVD moves against the trade AND OI expands (new conviction positions)
-    // -OR- (Change 4) high volume + OI rising regardless of CVD
+    // Has price broken significantly through the level? (0.8% beyond midpoint)
+    const BREAK_PCT = 0.008;
+    const isLevelBroken = direction === 'long'
+      ? price < levelMid - levelMid * BREAK_PCT   // support broken — price fell through
+      : price > levelMid + levelMid * BREAK_PCT;  // resistance broken — price pushed through
+
+    if (!isLevelBroken) continue;
+
     const cvdConfirmsBreak = direction === 'long' ? (cvd != null && cvd < 0) : (cvd != null && cvd > 0);
     const oiExpanding      = oiTrend === 'rising';
     const isRealBreak      = (cvdConfirmsBreak && oiExpanding) || (isHighVolBreak && oiExpanding);
-    const isBreakoutMode   = isHighVolBreak && oiExpanding && !cvdConfirmsBreak; // vol break, not stop hunt
+    const isBreakoutMode   = isHighVolBreak && oiExpanding && !cvdConfirmsBreak;
 
-    log(`Zone ${key} mitigated | CVD confirms break: ${cvdConfirmsBreak} | OI expanding: ${oiExpanding} | high-vol break: ${isHighVolBreak} | verdict: ${isRealBreak ? (isBreakoutMode ? 'BREAKOUT' : 'REAL BREAK') : 'STOP HUNT'}`);
+    log(`Level ${key} broken | price $${Math.round(price)} vs mid $${Math.round(levelMid)} | CVD confirms: ${cvdConfirmsBreak} | OI expanding: ${oiExpanding} | high-vol: ${isHighVolBreak} | verdict: ${isRealBreak ? (isBreakoutMode ? 'BREAKOUT' : 'REAL BREAK') : 'STOP HUNT'}`);
 
-    // Mark any open trade for this zone as invalidated in the trade log
     if (isRealBreak) {
       const trades = readTrades();
       for (const t of trades) {
         if (t.outcome !== null) continue;
-        if (Math.abs(t.zone.high - high) < 10 && Math.abs(t.zone.low - low) < 10) {
-          t.outcome  = 'invalidated';
-          t.closedAt = new Date().toISOString();
-          t.pnlR     = -1.0; // treated as a loss — stop thesis failed
-          log(`Trade for zone ${key} marked invalidated`);
+        if (Math.abs((t.zone?.mid ?? 0) - levelMid) < 50) {
+          t.outcome = 'invalidated'; t.closedAt = new Date().toISOString(); t.pnlR = -1.0;
+          log(`Trade for level ${key} marked invalidated`);
         }
       }
       writeTrades(trades);
     }
 
+    const trig = { type: levelType || 'Level', mid: levelMid, lo: levelLo ?? levelMid - 30, hi: levelHi ?? levelMid + 30 };
     messages.push({
-      msg:  formatInvalidationMessage(price, direction, { high, low }, isRealBreak, cvd, cvdConfirmsBreak, oiTrend, oiExpanding, currentZones, isBreakoutMode, recentVol, avgVol),
+      msg:  formatInvalidationMessage(price, direction, trig, isRealBreak, cvd, cvdConfirmsBreak, oiTrend, oiExpanding, isBreakoutMode, recentVol, avgVol),
       type: isRealBreak ? 'info' : 'approaching',
     });
 
-    // Remove the alerted zone entry.
     delete state[key];
 
     if (!isRealBreak) {
-      // ─── Change 2: Stop Hunt Re-entry Escalation ─────────────────────────
-      // Fire an immediate elevated re-entry alert and shorten the cooldown
-      // to 30 minutes so the next proximity trigger can re-fire quickly.
-      const stophuntMsg = formatStopHuntEscalation(price, direction, { high, low }, cvd, oiTrend, currentZones);
+      const stophuntMsg = formatStopHuntEscalation(price, direction, trig, cvd, oiTrend);
       messages.push({ msg: stophuntMsg, type: 'approaching' });
 
-      // Add to reclaim watch (4h window for full CVD+OI confirmation)
       const watchKey = `_watch_${key}`;
-      state[watchKey] = {
-        ts:        Date.now(),
-        direction,
-        high,
-        low,
-        expires:   Date.now() + 4 * 60 * 60 * 1000,
-      };
-      // Short 30-min cooldown so zone can immediately re-trigger as a fresh signal
-      // (normal cooldown = 1h; we set ts = now - 30min so only 30min remain)
-      state[key] = {
-        ts:        Date.now() - (COOLDOWN_MS - 30 * 60 * 1000),
-        direction,
-        high,
-        low,
-      };
-      log(`Zone ${key} → stop hunt | re-entry alert fired | cooldown reset to 30m`);
+      state[watchKey] = { ts: Date.now(), direction, levelType, levelMid, levelLo, levelHi, expires: Date.now() + 4 * 60 * 60 * 1000 };
+      state[key] = { ts: Date.now() - (COOLDOWN_MS - 30 * 60 * 1000), direction, levelType, levelMid, levelLo, levelHi };
+      log(`Level ${key} → stop hunt | re-entry alert fired | cooldown reset to 30m`);
     }
   }
 
@@ -870,23 +1020,22 @@ function checkInvalidations(currentZones, price, indicators) {
   return messages;
 }
 
-// ─── Change 2: Stop Hunt Re-entry Alert Formatter ────────────────────────────
-function formatStopHuntEscalation(price, direction, zone, cvd, oiTrend, allZones) {
-  const zoneStr   = `$${Math.round(zone.low).toLocaleString()}–$${Math.round(zone.high).toLocaleString()}`;
+// ─── Stop Hunt Re-entry Alert Formatter ──────────────────────────────────────
+function formatStopHuntEscalation(price, direction, trig, cvd, oiTrend) {
+  const levelStr  = `$${Math.round(trig.lo).toLocaleString()}–$${Math.round(trig.hi).toLocaleString()}`;
   const dirLabel  = direction === 'long' ? 'LONG' : 'SHORT';
-  const oppDir    = direction === 'long' ? 'SHORT' : 'LONG';
   const cvdLabel  = cvd != null ? `${cvd > 0 ? '+' : ''}${Math.round(cvd)} (${cvd < 0 ? 'bearish' : 'bullish'})` : 'n/a';
   const reclaim   = direction === 'long'
-    ? `Watch for 30M CHoCH + bullish CVD above $${Math.round(zone.low).toLocaleString()}`
-    : `Watch for 30M CHoCH + bearish CVD below $${Math.round(zone.high).toLocaleString()}`;
+    ? `Watch for 30M bullish CVD + OI confirmation above $${Math.round(trig.lo).toLocaleString()}`
+    : `Watch for 30M bearish CVD + OI confirmation below $${Math.round(trig.hi).toLocaleString()}`;
   const entryNote = direction === 'long'
-    ? `Re-entry: zone top $${Math.round(zone.high).toLocaleString()} on CHoCH confirmation`
-    : `Re-entry: zone bottom $${Math.round(zone.low).toLocaleString()} on CHoCH confirmation`;
+    ? `Re-entry: ${trig.type} top $${Math.round(trig.hi).toLocaleString()} on order flow confirmation`
+    : `Re-entry: ${trig.type} bottom $${Math.round(trig.lo).toLocaleString()} on order flow confirmation`;
 
   return [
     `🎯 STOP HUNT DETECTED — ${dirLabel} RE-ENTRY SETUP | BTCUSDT.P`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-    `Zone ${zoneStr} was swept with low conviction (probable stop hunt).`,
+    `${trig.type} ${levelStr} was swept with low conviction (probable stop hunt).`,
     `**Probability: ~63% reversal back toward original ${dirLabel} thesis.**`,
     ``,
     `**ORDER FLOW**`,
@@ -897,26 +1046,19 @@ function formatStopHuntEscalation(price, direction, zone, cvd, oiTrend, allZones
     `**${entryNote}**`,
     `Cooldown reset: next proximity trigger fires in 30 minutes.`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-    `\`You are analysing BINANCE:BTCUSDT.P. A ${dirLabel} zone ${zoneStr} was just swept as a probable stop hunt — flat/falling OI and non-confirming CVD (${cvdLabel}). This is ~63% reversal probability. Run the 30M analysis from strategies/mtf-analysis.md. Look for CHoCH forming at $${Math.round(direction === 'long' ? zone.low : zone.high).toLocaleString()}. If yes, post a ${direction} re-entry signal to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh ${direction} "your message".\``,
+    `\`You are analysing BINANCE:BTCUSDT.P. A ${dirLabel} ${trig.type} ${levelStr} was just swept as a probable stop hunt — flat/falling OI and non-confirming CVD (${cvdLabel}). This is ~63% reversal probability. Run the 30M analysis from strategies/mtf-analysis.md. Look for order flow confirmation at $${Math.round(direction === 'long' ? trig.lo : trig.hi).toLocaleString()}. If confirmed, post a ${direction} re-entry signal to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh ${direction} "your message".\``,
   ].join('\n');
 }
 
-function formatInvalidationMessage(price, direction, zone, isRealBreak, cvd, cvdConfirmsBreak, oiTrend, oiExpanding, allZones, isBreakoutMode, recentVol, avgVol) {
-  const zoneStr   = `$${Math.round(zone.low).toLocaleString()}–$${Math.round(zone.high).toLocaleString()}`;
+function formatInvalidationMessage(price, direction, trig, isRealBreak, cvd, cvdConfirmsBreak, oiTrend, oiExpanding, isBreakoutMode, recentVol, avgVol) {
+  const levelStr  = `$${Math.round(trig.lo).toLocaleString()}–$${Math.round(trig.hi).toLocaleString()}`;
   const dirLabel  = direction === 'long' ? 'LONG' : 'SHORT';
 
   const cvdIcon  = cvdConfirmsBreak ? '❌' : '✅';
   const oiIcon   = oiExpanding      ? '❌' : '✅';
   const cvdLabel = cvd != null ? `${cvd > 0 ? '+' : ''}${Math.round(cvd)} (${cvd < 0 ? 'bearish' : 'bullish'})` : 'unavailable';
   const oiLabel  = oiTrend ?? 'unavailable';
-
-  // Find next level in the direction of the break
-  const nextZone = direction === 'long'
-    ? allZones.filter(z => z.high < zone.low - 50).sort((a, b) => b.high - a.high)[0]
-    : allZones.filter(z => z.low  > zone.high + 50).sort((a, b) => a.low  - b.low )[0];
-  const nextLevelStr = nextZone
-    ? `$${Math.round(nextZone.low).toLocaleString()}–$${Math.round(nextZone.high).toLocaleString()} ($${Math.round(Math.min(Math.abs(price - nextZone.high), Math.abs(price - nextZone.low))).toLocaleString()} away)`
-    : 'No next zone found';
+  const nextLevelStr = 'Check VRVP for next HVN/VAL/VAH';
 
   if (isRealBreak) {
     // Change 4: flag breakout continuation mode when triggered by high volume
@@ -930,7 +1072,7 @@ function formatInvalidationMessage(price, direction, zone, isRealBreak, cvd, cvd
     return [
       `🚫 SIGNAL INVALIDATED${isBreakoutMode ? ' — BREAKOUT MODE' : ''} | BINANCE:BTCUSDT.P`,
       `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-      `Original ${dirLabel} zone ${zoneStr} has been mitigated.`,
+      `Original ${dirLabel} ${trig.type} ${levelStr} has been broken.`,
       ``,
       `**VERDICT**  Real break — ${dirLabel} thesis is off`,
       breakoutNote,
@@ -942,16 +1084,16 @@ function formatInvalidationMessage(price, direction, zone, isRealBreak, cvd, cvd
       `**NEXT LEVEL**  ${nextLevelStr}`,
       `**ACTION**  ${breakoutAction}`,
       `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-      `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${dirLabel} zone ${zoneStr} was just confirmed broken${isBreakoutMode ? ` on high volume (${recentVol ? Math.round(recentVol).toLocaleString() : '?'} vs avg ${avgVol ? Math.round(avgVol).toLocaleString() : '?'})` : ' — rising OI and confirming CVD'}. ${breakoutAction} Run the full 12H→4H→1H→30M analysis from strategies/mtf-analysis.md, assess whether a new setup in either direction is forming, and post your verdict to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh info "your message here".\``,
+      `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${dirLabel} ${trig.type} ${levelStr} was just confirmed broken${isBreakoutMode ? ` on high volume (${recentVol ? Math.round(recentVol).toLocaleString() : '?'} vs avg ${avgVol ? Math.round(avgVol).toLocaleString() : '?'})` : ' — rising OI and confirming CVD'}. ${breakoutAction} Run the full 12H→4H→1H→30M analysis from strategies/mtf-analysis.md, assess whether a new setup in either direction is forming, and post your verdict to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh info "your message here".\``,
     ].join('\n');
   } else {
     const watchAction = direction === 'long'
-      ? `If price reclaims $${Math.round(zone.low).toLocaleString()} with rising CVD → long still viable`
-      : `If price reclaims $${Math.round(zone.high).toLocaleString()} with falling CVD → short still viable`;
+      ? `If price reclaims $${Math.round(trig.lo).toLocaleString()} with rising CVD → long still viable`
+      : `If price reclaims $${Math.round(trig.hi).toLocaleString()} with falling CVD → short still viable`;
     return [
-      `⚠️ ZONE REMOVED | BINANCE:BTCUSDT.P`,
+      `⚠️ LEVEL BROKEN — POSSIBLE STOP HUNT | BINANCE:BTCUSDT.P`,
       `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-      `Original ${dirLabel} zone ${zoneStr} has been mitigated.`,
+      `Original ${dirLabel} ${trig.type} ${levelStr} has been broken.`,
       ``,
       `**VERDICT**  Ambiguous — possible stop hunt (~63% reversal probability)`,
       `Low conviction on the break. Institutional confirmation absent.`,
@@ -963,7 +1105,7 @@ function formatInvalidationMessage(price, direction, zone, isRealBreak, cvd, cvd
       `**WATCH**  ${watchAction}`,
       `**NEXT LEVEL**  ${nextLevelStr}`,
       `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-      `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${dirLabel} zone ${zoneStr} was just mitigated with flat/falling OI and ${cvd != null && cvd > 0 ? 'bullish' : 'bearish'} CVD — this is a probable stop hunt (~63% reversal probability). Run the 30M analysis from strategies/mtf-analysis.md. Check whether price is forming a reclaim above $${Math.round(direction === 'long' ? zone.low : zone.high).toLocaleString()} with rising CVD. If yes, confirm as a long setup. If not, assess downside. Post your verdict to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh info "your message here".\``,
+      `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${dirLabel} ${trig.type} ${levelStr} was just broken with flat/falling OI and ${cvd != null && cvd > 0 ? 'bullish' : 'bearish'} CVD — this is a probable stop hunt (~63% reversal probability). Run the 30M analysis from strategies/mtf-analysis.md. Check whether price is forming a reclaim at $${Math.round(direction === 'long' ? trig.lo : trig.hi).toLocaleString()} with confirming order flow. Post your verdict to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh info "your message here".\``,
     ].join('\n');
   }
 }
@@ -978,7 +1120,7 @@ function formatInvalidationMessage(price, direction, zone, isRealBreak, cvd, cvd
 //
 // Watch expires after 4 hours. If not reclaimed, the thesis is abandoned.
 
-function checkReclaimWatch(currentZones, price, indicators) {
+function checkReclaimWatch(price, indicators) {
   const { cvd, oiTrend } = indicators;
   const state = readState();
   const messages = [];
@@ -986,50 +1128,48 @@ function checkReclaimWatch(currentZones, price, indicators) {
   for (const [key, watch] of Object.entries(state)) {
     if (!key.startsWith('_watch_')) continue;
 
-    // Expire old watches
     if (Date.now() > watch.expires) {
       log(`Reclaim watch ${key} expired — removing`);
       delete state[key];
       continue;
     }
 
-    const { direction, high, low } = watch;
-    const zone = { high, low };
-    const proximity = checkProximity(price, zone);
+    const { direction, levelMid, levelLo, levelHi, levelType } = watch;
+    if (!levelMid) continue; // skip legacy entries without VRVP fields
 
-    if (!proximity.triggered) continue;
+    // Price returned near the level — within 0.5% of mid
+    const nearLevel = Math.abs(price - levelMid) <= levelMid * 0.005;
+    if (!nearLevel) continue;
 
-    // Price is back near the zone — check order flow confirms the reclaim
     const cvdAligned = direction === 'long' ? (cvd != null && cvd > 0) : (cvd != null && cvd < 0);
     const oiAligned  = oiTrend === 'rising';
 
     if (cvdAligned && oiAligned) {
-      const zoneStr  = `$${Math.round(low).toLocaleString()}–$${Math.round(high).toLocaleString()}`;
+      const levelStr = `$${Math.round(levelLo ?? levelMid - 30).toLocaleString()}–$${Math.round(levelHi ?? levelMid + 30).toLocaleString()}`;
       const dirLabel = direction === 'long' ? 'LONG' : 'SHORT';
       const cvdLabel = `${cvd > 0 ? '+' : ''}${Math.round(cvd)} (${cvd < 0 ? 'bearish' : 'bullish'})`;
-      log(`Reclaim confirmed: ${dirLabel} zone ${zoneStr} | CVD ${cvdLabel} | OI ${oiTrend}`);
+      log(`Reclaim confirmed: ${dirLabel} ${levelType} ${levelStr} | CVD ${cvdLabel} | OI ${oiTrend}`);
 
       messages.push([
         `🔄 RECLAIM CONFIRMED | BINANCE:BTCUSDT.P`,
         `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-        `Price has returned to ${dirLabel} zone ${zoneStr} with institutional backing.`,
+        `Price has returned to ${dirLabel} ${levelType ?? 'level'} ${levelStr} with institutional backing.`,
         `The earlier break was a stop hunt. Original thesis back in play.`,
         ``,
         `**ORDER FLOW AT RECLAIM**`,
         `✅ CVD ${cvdLabel}`,
         `✅ OI ${oiTrend} — new positioning confirming the reclaim`,
         ``,
-        `**ACTION**  Re-evaluate entry. Wait for 30M CHoCH in ${direction} direction.`,
+        `**ACTION**  Re-evaluate entry. Wait for order flow confirmation in ${direction} direction.`,
         `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-        `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${dirLabel} zone ${zoneStr} that was previously swept as a stop hunt has now been reclaimed — price is back in zone with rising OI and ${direction === 'long' ? 'bullish' : 'bearish'} CVD. Run the 30M analysis from strategies/mtf-analysis.md. Check for CHoCH formation. Give me a take/skip verdict and post it to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh ${direction} "your message here".\``,
+        `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${dirLabel} ${levelType} ${levelStr} that was previously swept as a stop hunt has now been reclaimed — price is back at the level with rising OI and ${direction === 'long' ? 'bullish' : 'bearish'} CVD. Run the 30M analysis from strategies/mtf-analysis.md. Give me a take/skip verdict and post it to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh ${direction} "your message here".\``,
       ].join('\n'));
 
-      // Remove watch, set a fresh cooldown so it doesn't immediately re-trigger
       delete state[key];
-      const zoneKey = key.replace('_watch_', '');
-      state[zoneKey] = { ts: Date.now(), direction, high, low };
+      const levelKey = key.replace('_watch_', '');
+      state[levelKey] = { ts: Date.now(), direction, levelType, levelMid, levelLo, levelHi };
     } else {
-      log(`Reclaim watch ${key}: price near zone but order flow not confirming (CVD aligned: ${cvdAligned}, OI aligned: ${oiAligned})`);
+      log(`Reclaim watch ${key}: price near level but order flow not confirming (CVD aligned: ${cvdAligned}, OI aligned: ${oiAligned})`);
     }
   }
 
@@ -1068,7 +1208,9 @@ function checkPendingConfirmation(price, indicators) {
       continue;
     }
 
-    const { direction, high, low, baselineOI, baselineCVD } = pending;
+    const { direction, levelType, levelMid, levelLo, levelHi, baselineOI, baselineCVD } = pending;
+    const high = levelHi ?? levelMid + 30;
+    const low  = levelLo ?? levelMid - 30;
 
     // OI confirmation: must have risen ≥ 0.5% from the baseline snapshot
     const oiConfirmed = oi != null && baselineOI != null && baselineOI > 0
@@ -1114,10 +1256,10 @@ function checkPendingConfirmation(price, indicators) {
       `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${direction.toUpperCase()} zone ${zoneStr} has just received institutional confirmation — OI rose ${oiPct}% and CVD surged from ${cvdBase} to ${cvdNow} since the initial zone alert. This is the delayed confirmation that was missing at first alert. Run the 30M analysis from strategies/mtf-analysis.md focusing on: (1) has 30M CHoCH fired at the zone? (2) is OI still rising? Give a take/late-entry/skip verdict and post to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh ${direction} "your message here".\``,
     ].join('\n');
 
-    // Remove pending state, refresh the zone's cooldown timestamp
+    // Remove pending state, refresh the level's cooldown timestamp
     delete state[key];
-    const zoneKey = key.replace('_pending_', '');
-    state[zoneKey] = { ts: Date.now(), direction, high, low };
+    const levelKey = key.replace('_pending_', '');
+    state[levelKey] = { ts: Date.now(), direction, levelType, levelMid, levelLo: low, levelHi: high };
 
     results.push({ msg, direction });
     log(`Pending ${key} CONFIRMED — firing ${dirLabel} alert`);
@@ -1131,13 +1273,13 @@ function checkPendingConfirmation(price, indicators) {
 //
 // trades.json schema (array of trade objects):
 // {
-//   id:        "1744000000000-70823-70470"   unique: ts + zone
+//   id:        "1744000000000-HVN-72993"    unique: ts + level type + mid
 //   firedAt:   ISO timestamp
 //   direction: "long" | "short"
-//   setupType: "A — Trend Continuation" etc.
-//   price:     70775                          price when alert fired
-//   zone:      { high: 70823, low: 70470 }
-//   entry:     70717
+//   setupType: "A — Full Confluence" etc.
+//   price:     72800                          price when alert fired
+//   zone:      { mid: 72993, high: 73200, low: 72780, type: "HVN" }
+//   entry:     72826
 //   stop:      70329
 //   tp1:       71580,  tp2: 73400,  tp3: 71881
 //   rr1:       "2.2",  rr2: "6.9",  rr3: "3.0"
@@ -1156,9 +1298,9 @@ function writeTrades(trades) {
   fs.writeFileSync(TRADES_FILE, JSON.stringify(trades, null, 2));
 }
 
-function logTrade(price, zone, setup) {
+function logTrade(price, trigger, setup) {
   const trades = readTrades();
-  const id = `${Date.now()}-${Math.round(zone.high)}-${Math.round(zone.low)}`;
+  const id = `${Date.now()}-${trigger.type}-${Math.round(trigger.mid)}`;
   trades.push({
     id,
     firedAt:    new Date().toISOString(),
@@ -1166,7 +1308,7 @@ function logTrade(price, zone, setup) {
     setupType:  setup.setupType,
     probability: setup.probability,
     price:      Math.round(price),
-    zone:       { high: zone.high, low: zone.low },
+    zone:       { mid: trigger.mid, high: trigger.hi, low: trigger.lo, type: trigger.type },
     entry:      setup.entry,
     stop:       setup.stop,
     tp1:        setup.tp1Price, tp2: setup.tp2Price, tp3: setup.tp3Price,
@@ -1273,14 +1415,13 @@ async function main() {
     process.exit(1);
   }
 
-  let price, zones, studies;
+  let price, studies;
 
   try {
     // 2. Get current price
     const quote = await cdpEval(client, QUOTE_EXPR);
     if (!quote || quote.error) throw { code: 'NO_QUOTE', msg: quote?.error || 'null response' };
 
-    // Verify we're on the right chart
     if (quote.symbol && !quote.symbol.includes('BTCUSDT')) {
       errorAlert(
         `Wrong chart symbol: got "${quote.symbol}", expected BINANCE:BTCUSDT.P`,
@@ -1295,51 +1436,46 @@ async function main() {
     if (!price) throw { code: 'NO_PRICE', msg: 'last/close price is null' };
     log(`Price: $${Math.round(price).toLocaleString()}`);
 
-    // 3. Get supply/demand zones
-    zones = await cdpEval(client, buildBoxesExpr('LuxAlgo'));
-    if (!Array.isArray(zones) || zones.length === 0) {
-      log('No LuxAlgo zones found — sending info alert');
-      notify('info', `📊 No active zones | BTC $${Math.round(price).toLocaleString()} | Ace chart may need LuxAlgo SMC visible`);
-      await client.close();
-      return;
+    // 3. Get VRVP data — PRIMARY TRIGGER SOURCE
+    const vrvpRaw = await cdpEval(client, VRVP_EXPR);
+    studies = [];
+    studies._vrvpRaw = vrvpRaw;
+    if (!vrvpRaw || vrvpRaw.error || !vrvpRaw.rows?.length) {
+      log(`VRVP unavailable: ${vrvpRaw?.error || 'no data'} — check Visible Range Volume Profile is on chart`);
+    } else {
+      log(`VRVP: ${vrvpRaw.rows.length} histogram rows | POC ~$${Math.round(vrvpRaw.poc ?? 0).toLocaleString()} | VAH ~$${Math.round(vrvpRaw.vah ?? 0).toLocaleString()} | VAL ~$${Math.round(vrvpRaw.val ?? 0).toLocaleString()}`);
     }
-    log(`Zones: ${zones.length} active`);
 
-    // 4. Get study values
+    // 4. Get study values (CVD, OI, Session VP, VWAP)
     const studyData = await cdpEval(client, STUDY_VALUES_EXPR);
-    studies = Array.isArray(studyData) ? studyData : [];
+    const studyArr = Array.isArray(studyData) ? studyData : [];
+    studyArr._vrvpRaw    = studies._vrvpRaw;
+    studies = studyArr;
     log(`Studies: ${studies.length} indicators read`);
 
-    // 4.5. Get recent volumes (12 bars) — always, used for breakout detection (Change 4)
+    // 4.5. Get recent volumes (12 bars) for breakout detection
     const volumeData = await cdpEval(client, buildVolumeExpr(12));
     studies._volumes = Array.isArray(volumeData) ? volumeData : [];
 
-    // 5. Check proximity early to decide if we need HTF data
-    const anyTriggered = zones.some(z => checkProximity(price, z).triggered);
-    if (anyTriggered) {
-      // Read current TF so we can restore it
-      const originalTF = await cdpEval(client, GET_TF_EXPR) || '30';
-      log(`Trigger detected — fetching HTF data (current TF: ${originalTF})`);
+    // 5. Check VRVP proximity to decide if HTF data is needed
+    const vrvpLevelsPrelim = computeVRVPLevels(studies._vrvpRaw);
+    const anyTriggered = !!checkVRVPProximity(price, vrvpLevelsPrelim);
 
-      // Fetch 4H closes for MACD (60 bars: 26 EMA warm-up + signal + buffer)
+    if (anyTriggered) {
+      const originalTF = await cdpEval(client, GET_TF_EXPR) || '30';
+      log(`VRVP trigger detected — fetching HTF data (current TF: ${originalTF})`);
+
       const closes4h = await fetchHTFCloses(client, '240', 60, originalTF);
       studies._macd4h = computeMACD(closes4h);
       log(`4H MACD: ${studies._macd4h ? (studies._macd4h.bullish ? 'bullish' : 'bearish') + ` hist ${Math.round(studies._macd4h.histogram)}` : 'unavailable'}`);
 
-      // Fetch 12H closes for RSI (30 bars: 14-period + warm-up)
       const closes12h = await fetchHTFCloses(client, '720', 30, originalTF);
       studies._rsi12h = computeRSI(closes12h);
       log(`12H RSI: ${studies._rsi12h != null ? Math.round(studies._rsi12h) : 'unavailable'}`);
 
-      // Change 1: Fetch weekly closes for trend regime filter (10 bars)
       const weeklyCloses = await fetchHTFCloses(client, 'W', 10, originalTF);
       studies._weeklyTrend = analyseWeeklyTrend(weeklyCloses);
       log(`Weekly trend: ${studies._weeklyTrend ?? 'unavailable'} (${weeklyCloses.length} weekly closes)`);
-
-      // Change 3: Fetch LuxAlgo labels for BOS/CHoCH confirmation
-      const luxLabels = await cdpEval(client, buildLabelsExpr('LuxAlgo'));
-      studies._luxLabels = Array.isArray(luxLabels) ? luxLabels : [];
-      log(`LuxAlgo labels: ${studies._luxLabels.length} total`);
     }
 
   } catch (err) {
@@ -1353,7 +1489,7 @@ async function main() {
       errorAlert(
         `Data read failed: ${err.message || JSON.stringify(err)}`,
         'CDP data collection',
-        'Check TradingView Desktop is open on the 🕵Ace layout with LuxAlgo SMC visible.'
+        'Check TradingView Desktop is open on the 🕵Ace layout with VRVP visible.'
       );
     }
     try { await client.close(); } catch {}
@@ -1362,150 +1498,128 @@ async function main() {
 
   await client.close();
 
-  // 6. Parse indicators + enrich with HTF data
+  // 6. Parse indicators
   const indicators = parseStudies(studies);
-  indicators.oiTrend    = getOITrend(indicators.oi);
-  indicators.macd4h     = studies._macd4h    ?? null;
-  indicators.rsi12h     = studies._rsi12h    ?? null;
-  indicators.weeklyTrend = studies._weeklyTrend ?? null;           // Change 1
-  indicators.bosChoch   = parseBosChoch(studies._luxLabels ?? [], price);  // Change 3
-  indicators.volumes    = studies._volumes   ?? [];                // Change 4
-  log(`CVD: ${indicators.cvd} | OI: ${indicators.oi} (${indicators.oiTrend ?? 'no trend yet'}) | VWAP: ${indicators.vwap} | Weekly: ${indicators.weeklyTrend ?? 'n/a'} | BOS/CHoCH: ${indicators.bosChoch?.text ?? 'none'}`);
+  indicators.oiTrend     = getOITrend(indicators.oi);
+  indicators.macd4h      = studies._macd4h     ?? null;
+  indicators.rsi12h      = studies._rsi12h     ?? null;
+  indicators.weeklyTrend = studies._weeklyTrend ?? null;
+  indicators.volumes     = studies._volumes    ?? [];
+  indicators.vrvpLevels  = computeVRVPLevels(studies._vrvpRaw);
+  log(`CVD: ${indicators.cvd} | OI: ${indicators.oi} (${indicators.oiTrend ?? 'no trend yet'}) | VWAP: ${indicators.vwap} | Weekly: ${indicators.weeklyTrend ?? 'n/a'}`);
 
-  // Always update outcomes on open trades — runs every poll, no CDP needed
+  // Always update outcomes on open trades
   updateOutcomes(price);
 
-  // 7. Check if any previously alerted zones have been mitigated
-  const invalidations = checkInvalidations(zones, price, indicators);
+  // 7. Check if any alerted levels have been broken
+  const invalidations = checkInvalidations(price, indicators);
   for (const { msg, type } of invalidations) {
     notify(type, msg);
   }
 
-  // 8. Check if any watched zones (post-stop-hunt) have been reclaimed
-  const reclaims = checkReclaimWatch(zones, price, indicators);
+  // 8. Check reclaim watch (post-stop-hunt levels)
+  const reclaims = checkReclaimWatch(price, indicators);
   for (const msg of reclaims) {
-    // Direction is embedded in the message — use 'long'/'short' based on content
     const type = msg.includes('LONG') ? 'long' : 'short';
     notify(type, msg);
   }
 
-  // 8.5. Check pending confirmations — zones that fired with flat OI and are
-  // waiting for OI/CVD to move. Bypasses the cooldown gate. Fires at most once
-  // per zone (removes the _pending_ key on match and resets cooldown).
+  // 8.5. Check pending confirmations (flat OI at alert time, watching for confirmation)
   const confirmations = checkPendingConfirmation(price, indicators);
   for (const { msg, direction } of confirmations) {
     notify(direction, msg);
   }
 
-  // 9. Check each zone for proximity trigger
+  // 9. VRVP proximity trigger
   let triggered = false;
+  const trigger = checkVRVPProximity(price, indicators.vrvpLevels);
 
-  for (const zone of zones) {
-    const { triggered: hit, insideZone, minDist, buffer } = checkProximity(price, zone);
-    if (!hit) continue;
+  if (trigger) {
+    const levelKey = `${trigger.type.toLowerCase()}-${Math.round(trigger.mid)}`;
 
-    const zoneKey = `${Math.round(zone.high)}-${Math.round(zone.low)}`;
+    if (isCoolingDown(levelKey)) {
+      log(`Level ${levelKey} triggered but cooling down — skipping`);
+    } else {
+      log(`TRIGGER: ${trigger.type} $${Math.round(trigger.lo).toLocaleString()}–$${Math.round(trigger.hi).toLocaleString()} | direction: ${trigger.direction} | dist $${Math.round(trigger.dist).toLocaleString()}`);
 
-    if (isCoolingDown(zoneKey)) {
-      log(`Zone ${zoneKey} triggered but cooling down — skipping`);
-      continue;
+      const setup = evaluateSetup(price, trigger, indicators, indicators.vrvpLevels);
+      setup._cvd     = indicators.cvd;
+      setup._oi      = indicators.oi;
+      setup._oiTrend = indicators.oiTrend;
+      setup._vwap    = indicators.vwap;
+      setup._macd4h  = indicators.macd4h;
+      setup._rsi12h  = indicators.rsi12h;
+
+      // Regime filter — suppress counter-trend signals
+      if (indicators.weeklyTrend === 'uptrend' && trigger.direction === 'short') {
+        log(`Regime filter: weekly uptrend suppressing SHORT at ${levelKey}`);
+        const levelStr = `$${Math.round(trigger.lo).toLocaleString()}–$${Math.round(trigger.hi).toLocaleString()}`;
+        notify('info', [
+          `📊 ${trigger.type} APPROACHED — TREND FILTER ACTIVE | BTCUSDT.P`,
+          `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+          `**Price** $${Math.round(price).toLocaleString()} | **${trigger.type}** ${levelStr}`,
+          ``,
+          `**REGIME: WEEKLY UPTREND — SHORT SUPPRESSED**`,
+          `Weekly structure is bullish. ${trigger.type} at ${levelStr} is more likely to break than hold.`,
+          ``,
+          `**WATCH FOR**  Breakout close above $${Math.round(trigger.hi).toLocaleString()} → long continuation`,
+          `**FLIP TRIGGER**  4H close below $${Math.round(trigger.lo).toLocaleString()} would change regime`,
+          `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+          setup.criteria.map(c => `${c.pass === true ? '✅' : c.pass === false ? '❌' : '⚠️'} ${c.label}`).join('\n'),
+        ].join('\n'));
+        markAlerted(levelKey, trigger.direction, trigger);
+        triggered = true;
+
+      } else if (indicators.weeklyTrend === 'downtrend' && trigger.direction === 'long') {
+        log(`Regime filter: weekly downtrend suppressing LONG at ${levelKey}`);
+        const levelStr = `$${Math.round(trigger.lo).toLocaleString()}–$${Math.round(trigger.hi).toLocaleString()}`;
+        notify('info', [
+          `📊 ${trigger.type} APPROACHED — TREND FILTER ACTIVE | BTCUSDT.P`,
+          `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+          `**Price** $${Math.round(price).toLocaleString()} | **${trigger.type}** ${levelStr}`,
+          ``,
+          `**REGIME: WEEKLY DOWNTREND — LONG SUPPRESSED**`,
+          `Weekly structure is bearish. ${trigger.type} at ${levelStr} is more likely to break than hold.`,
+          ``,
+          `**WATCH FOR**  Break close below $${Math.round(trigger.lo).toLocaleString()} → short continuation`,
+          `**FLIP TRIGGER**  4H close above $${Math.round(trigger.hi).toLocaleString()} would change regime`,
+          `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+          setup.criteria.map(c => `${c.pass === true ? '✅' : c.pass === false ? '❌' : '⚠️'} ${c.label}`).join('\n'),
+        ].join('\n'));
+        markAlerted(levelKey, trigger.direction, trigger);
+        triggered = true;
+
+      } else {
+        // Fire the signal
+        const message = formatSetupMessage(price, trigger, setup);
+        notify(setup.direction, message);
+        markAlerted(levelKey, setup.direction, trigger);
+        logTrade(price, trigger, setup);
+        if (!indicators.oiTrend || indicators.oiTrend === 'flat') {
+          markPending(levelKey, setup.direction, trigger, indicators);
+        }
+        triggered = true;
+      }
     }
-
-    const distStr = insideZone
-      ? 'INSIDE ZONE'
-      : `$${Math.round(minDist).toLocaleString()} away`;
-
-    log(`TRIGGER: Zone ${zoneKey} | ${distStr} | buffer $${Math.round(buffer).toLocaleString()}`);
-
-    // Evaluate setup + format message
-    const setup = evaluateSetup(price, zone, indicators, zones);
-    // Snapshot indicator values onto setup for trade log
-    setup._cvd    = indicators.cvd;
-    setup._oi     = indicators.oi;
-    setup._oiTrend = indicators.oiTrend;
-    setup._vwap   = indicators.vwap;
-    setup._macd4h = indicators.macd4h;
-    setup._rsi12h = indicators.rsi12h;
-
-    // ─── Change 1: Regime filter — suppress counter-trend signals ────────────
-    // When weekly trend contradicts the setup direction, post an informational
-    // alert instead of firing the trade signal. This prevents shorting into
-    // an uptrend (the root cause of all 3 invalid Apr 12-13 signals).
-    if (indicators.weeklyTrend === 'uptrend' && setup.direction === 'short') {
-      log(`Regime filter: weekly uptrend suppressing SHORT signal at zone ${zoneKey}`);
-      const regimeMsg = [
-        `📊 SUPPLY ZONE APPROACHED — TREND FILTER ACTIVE | BTCUSDT.P`,
-        `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-        `**Price** $${Math.round(price).toLocaleString()} | **Supply Zone** $${Math.round(zone.low).toLocaleString()}–$${Math.round(zone.high).toLocaleString()}`,
-        ``,
-        `**REGIME: WEEKLY UPTREND — SHORT SUPPRESSED**`,
-        `Weekly structure shows bullish momentum (HH/HL pattern).`,
-        `Probability of zone breakout > reversal. Shorting here is counter-trend.`,
-        ``,
-        `**WATCH FOR**  Breakout close above $${Math.round(zone.high).toLocaleString()} → long continuation setup`,
-        `**FLIP TRIGGER**  4H close back below $${Math.round(zone.low).toLocaleString()} would invalidate uptrend`,
-        `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-        `Setup criteria (${setup.autoPassed}/${setup.autoTotal} confirmed — direction suppressed by trend):`,
-        setup.criteria.map(c => `${c.pass === true ? '✅' : c.pass === false ? '❌' : '⚠️'} ${c.label}`).join('\n'),
-      ].join('\n');
-      notify('info', regimeMsg);
-      markAlerted(zoneKey, setup.direction, zone);
-      triggered = true;
-      break;
-    }
-
-    if (indicators.weeklyTrend === 'downtrend' && setup.direction === 'long') {
-      log(`Regime filter: weekly downtrend suppressing LONG signal at zone ${zoneKey}`);
-      const regimeMsg = [
-        `📊 DEMAND ZONE APPROACHED — TREND FILTER ACTIVE | BTCUSDT.P`,
-        `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-        `**Price** $${Math.round(price).toLocaleString()} | **Demand Zone** $${Math.round(zone.low).toLocaleString()}–$${Math.round(zone.high).toLocaleString()}`,
-        ``,
-        `**REGIME: WEEKLY DOWNTREND — LONG SUPPRESSED**`,
-        `Weekly structure shows bearish momentum (LH/LL pattern).`,
-        `Probability of zone breakdown > bounce. Buying here is counter-trend.`,
-        ``,
-        `**WATCH FOR**  Break close below $${Math.round(zone.low).toLocaleString()} → short continuation setup`,
-        `**FLIP TRIGGER**  4H close back above $${Math.round(zone.high).toLocaleString()} would invalidate downtrend`,
-        `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-        `Setup criteria (${setup.autoPassed}/${setup.autoTotal} confirmed — direction suppressed by trend):`,
-        setup.criteria.map(c => `${c.pass === true ? '✅' : c.pass === false ? '❌' : '⚠️'} ${c.label}`).join('\n'),
-      ].join('\n');
-      notify('info', regimeMsg);
-      markAlerted(zoneKey, setup.direction, zone);
-      triggered = true;
-      break;
-    }
-    // ─── End regime filter ────────────────────────────────────────────────────
-
-    const message = formatSetupMessage(price, zone, setup);
-
-    notify(setup.direction, message);
-    markAlerted(zoneKey, setup.direction, zone);
-    logTrade(price, zone, setup);
-
-    // If OI was flat or not yet trending at alert time, register a pending
-    // confirmation watch. The next tick(s) will compare OI and CVD against
-    // this baseline and fire a TRIGGER CONFIRMED alert when both move.
-    if (!indicators.oiTrend || indicators.oiTrend === 'flat') {
-      markPending(zoneKey, setup.direction, zone, indicators);
-    }
-
-    triggered = true;
-    break; // one alert at a time
   }
 
   if (!triggered) {
-    // Find nearest zone for status message
-    const nearest = zones.reduce((best, z) => {
-      const dist = Math.min(Math.abs(price - z.high), Math.abs(price - z.low));
-      return dist < best.dist ? { zone: z, dist } : best;
-    }, { zone: null, dist: Infinity });
-
-    const nearestStr = nearest.zone
-      ? `Nearest zone: $${Math.round(nearest.zone.low).toLocaleString()}–$${Math.round(nearest.zone.high).toLocaleString()} ($${Math.round(nearest.dist).toLocaleString()} away)`
-      : 'No zones found';
-
+    // Show nearest VRVP level for status
+    const lvls = indicators.vrvpLevels;
+    let nearestStr = 'VRVP unavailable';
+    if (lvls) {
+      const candidates = [
+        lvls.val != null ? { label: 'VAL', price: lvls.val } : null,
+        lvls.vah != null ? { label: 'VAH', price: lvls.vah } : null,
+        lvls.poc != null ? { label: 'POC', price: lvls.poc } : null,
+        ...(lvls.hvns || []).map((h, i) => ({ label: `HVN${i + 1}`, price: (h.lo + h.hi) / 2 })),
+      ].filter(Boolean);
+      const nearest = candidates.reduce((best, c) => {
+        const d = Math.abs(price - c.price);
+        return d < best.dist ? { label: c.label, price: c.price, dist: d } : best;
+      }, { label: '', price: 0, dist: Infinity });
+      if (nearest.label) nearestStr = `Nearest: ${nearest.label} $${Math.round(nearest.price).toLocaleString()} ($${Math.round(nearest.dist).toLocaleString()} away)`;
+    }
     log(`No trigger. Price $${Math.round(price).toLocaleString()}. ${nearestStr}`);
   }
 
