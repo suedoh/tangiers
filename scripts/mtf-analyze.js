@@ -51,11 +51,22 @@ async function cdpEval(client, expr) {
 
 // ─── CDP Expressions ─────────────────────────────────────────────────────────
 
-const BARS_PATH = `window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().mainSeries().bars()`;
+const CHART_API  = `window.TradingViewApi._activeChartWidgetWV.value()`;
+const BARS_PATH  = `${CHART_API}._chartWidget.model().mainSeries().bars()`;
 
+// Robust quote — same as trigger-check.js: guards against null bars before calling methods
 const QUOTE_EXPR = `(function(){
-  try { var b=${BARS_PATH}; var v=b.valueAt(b.lastIndex()); return v ? {last:v[4],high:v[2],low:v[3],open:v[1]} : null; }
-  catch(e) { return null; }
+  try {
+    var api = ${CHART_API};
+    var bars = ${BARS_PATH};
+    var q = { symbol: null, last: null };
+    try { q.symbol = api.symbol(); } catch(e) {}
+    if (bars && typeof bars.lastIndex === 'function') {
+      var v = bars.valueAt(bars.lastIndex());
+      if (v) { q.last = v[4]; q.high = v[2]; q.low = v[3]; q.open = v[1]; }
+    }
+    return q;
+  } catch(e) { return { error: e.message }; }
 })()`;
 
 const STUDY_VALUES_EXPR = `(function(){
@@ -602,9 +613,15 @@ async function runMTFAnalysis() {
     try { prevOI = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))._previousOI ?? null; } catch {}
 
     // Read price first — before any TF changes — while the chart is in a stable state.
-    // Reading after a TF sweep can yield null if bars are still loading on the restored TF.
-    const quoteInitial = await cdpEval(client, QUOTE_EXPR);
-    const price        = quoteInitial?.last;
+    // Retries 3× with 1.5s waits to handle cases where the chart widget is mid-load
+    // (common when TradingView has been idle and the emoji reaction fires hours later).
+    let quoteInitial = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) await new Promise(r => setTimeout(r, 1500));
+      quoteInitial = await cdpEval(client, QUOTE_EXPR);
+      if (quoteInitial?.last) break;
+    }
+    const price = quoteInitial?.last;
     if (!price) throw new Error('Could not read price from chart — is the 🕵Ace layout loaded?');
 
     // Sweep all four timeframes
