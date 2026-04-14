@@ -29,6 +29,8 @@
  *   !analyze          → full MTF analysis + verdict + trade plan
  *   !mtf              → same
  *   !analyze status   → quick price + nearest zone check (no full sweep)
+ *   !stop             → pause all Discord notifications (signals, errors, alerts)
+ *   !start            → resume notifications
  *
  * ─── CRON ENTRY (added automatically when you run setup) ──────────────────
  *
@@ -40,12 +42,13 @@ const path   = require('path');
 const fs     = require('fs');
 const { execFileSync, spawnSync } = require('child_process');
 
-const ROOT       = path.resolve(__dirname, '..');
-const ENV_FILE   = path.join(ROOT, '.env');
-const STATE_FILE = path.join(ROOT, '.discord-bot-state.json');
-const NOTIFY     = path.join(ROOT, 'scripts', 'discord-notify.sh');
-const ANALYZE    = path.join(ROOT, 'scripts', 'mtf-analyze.js');
-const NODE       = process.execPath;
+const ROOT        = path.resolve(__dirname, '..');
+const ENV_FILE    = path.join(ROOT, '.env');
+const STATE_FILE  = path.join(ROOT, '.discord-bot-state.json');
+const PAUSE_FILE  = path.join(ROOT, '.discord-paused');
+const NOTIFY      = path.join(ROOT, 'scripts', 'discord-notify.sh');
+const ANALYZE     = path.join(ROOT, 'scripts', 'mtf-analyze.js');
+const NODE        = process.execPath;
 
 // ─── Env ─────────────────────────────────────────────────────────────────────
 
@@ -134,6 +137,38 @@ function runAnalysis() {
 
 // ─── Command Handlers ─────────────────────────────────────────────────────────
 
+async function handleStop(user) {
+  console.log(`[discord-bot] !stop from ${user}`);
+  try {
+    fs.writeFileSync(PAUSE_FILE, JSON.stringify({ pausedAt: new Date().toISOString(), by: user }, null, 2));
+    await sendMessage([
+      `⏸️ **Ace notifications paused** by **${user}**`,
+      `All signals, alerts, and errors are now suppressed.`,
+      `Type \`!start\` to resume.`,
+    ].join('\n'));
+    console.log('[discord-bot] Notifications paused');
+  } catch(e) {
+    console.error('[discord-bot] !stop error:', e.message);
+  }
+}
+
+async function handleStart(user) {
+  console.log(`[discord-bot] !start from ${user}`);
+  try {
+    const wasPaused = fs.existsSync(PAUSE_FILE);
+    if (wasPaused) fs.unlinkSync(PAUSE_FILE);
+    await sendMessage([
+      `▶️ **Ace notifications resumed** by **${user}**`,
+      wasPaused
+        ? `Signals, alerts, and errors will now post normally.`
+        : `System was already running — no change.`,
+    ].join('\n'));
+    console.log('[discord-bot] Notifications resumed');
+  } catch(e) {
+    console.error('[discord-bot] !start error:', e.message);
+  }
+}
+
 async function handleAnalyze(user) {
   console.log(`[discord-bot] !analyze from ${user}`);
   // Show typing indicator immediately so user knows it's running
@@ -206,9 +241,19 @@ async function main() {
     const text = (msg.content || '').trim();
     const user = msg.author?.username || 'unknown';
 
+    if (/^!stop\b/i.test(text)) {
+      await handleStop(user);
+      break;
+    }
+
+    if (/^!start\b/i.test(text)) {
+      await handleStart(user);
+      break;
+    }
+
     if (/^!analyze\b|^!mtf\b/i.test(text)) {
       await handleAnalyze(user);
-      break; // one analysis per poll cycle — prevents double-firing in message bursts
+      break; // one command per poll cycle — prevents double-firing in message bursts
     }
   }
 }

@@ -1,5 +1,7 @@
 .env
 .trigger-state.json
+.discord-paused
+.discord-bot-state.json
 trades.json
 node_modules/
 tradingview-mcp/node_modules/

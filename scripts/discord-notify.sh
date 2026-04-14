@@ -13,6 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/../.env"
+PAUSE_FILE="$SCRIPT_DIR/../.discord-paused"
 
 if [[ -f "$ENV_FILE" ]]; then
   # shellcheck disable=SC1090
@@ -26,6 +27,14 @@ fi
 
 ALERT_TYPE="${1:-info}"
 MESSAGE="${2:-}"
+
+# ─── Pause gate ──────────────────────────────────────────────────────────────
+# If .discord-paused exists, swallow all messages silently.
+# Use !start in Discord to resume.
+if [[ -f "$PAUSE_FILE" ]]; then
+  echo "Discord notifications paused — message suppressed [${ALERT_TYPE}]"
+  exit 0
+fi
 
 if [[ -z "$MESSAGE" ]]; then
   echo "ERROR: No message provided" >&2
