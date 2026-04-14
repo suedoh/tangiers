@@ -554,6 +554,12 @@ async function runMTFAnalysis() {
     let prevOI = null;
     try { prevOI = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))._previousOI ?? null; } catch {}
 
+    // Read price first — before any TF changes — while the chart is in a stable state.
+    // Reading after a TF sweep can yield null if bars are still loading on the restored TF.
+    const quoteInitial = await cdpEval(client, QUOTE_EXPR);
+    const price        = quoteInitial?.last;
+    if (!price) throw new Error('Could not read price from chart — is the 🕵Ace layout loaded?');
+
     // Sweep all four timeframes
     //   12H: 30 closes for RSI-14 (with warm-up)
     //   4H:  60 closes for MACD (26 EMA + signal + buffer)
@@ -564,16 +570,12 @@ async function runMTFAnalysis() {
     tfs['60']  = await fetchTF(client, '60',  0);
     tfs['30']  = await fetchTF(client, '30',  0);
 
-    // Restore to 30M and fetch VRVP + price (VRVP reads the visible range on 30M)
-    const originalTF = await cdpEval(client, GET_TF_EXPR) || '30';
-    if (originalTF !== '30') {
+    // Restore to 30M for VRVP read (VRVP reads the visible range on 30M)
+    const currentTF = await cdpEval(client, GET_TF_EXPR) || '30';
+    if (currentTF !== '30') {
       await cdpEval(client, buildSetTFExpr('30'));
       await new Promise(r => setTimeout(r, 1200));
     }
-
-    const quote    = await cdpEval(client, QUOTE_EXPR);
-    const price    = quote?.last;
-    if (!price) throw new Error('Could not read price from chart');
 
     const vrvpRaw  = await cdpEval(client, VRVP_EXPR);
     const vrvpLevels = computeVRVPLevels(vrvpRaw);
