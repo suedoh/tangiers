@@ -210,6 +210,24 @@ function buildClosesExpr(count) {
   })()`;
 }
 
+// ─── Change 4: Volume for Breakout Detection ─────────────────────────────────
+// Returns the last `count` bar volumes (index 5 in bars array).
+function buildVolumeExpr(count) {
+  return `(function() {
+    try {
+      var bars = ${BARS_PATH};
+      var vols = [];
+      var li = bars.lastIndex();
+      var start = Math.max(0, li - ${count} + 1);
+      for (var i = start; i <= li; i++) {
+        var v = bars.valueAt(i);
+        if (v && v[5] != null) vols.push(v[5]);
+      }
+      return vols;
+    } catch(e) { return []; }
+  })()`;
+}
+
 function buildBoxesExpr(filter) {
   const f = JSON.stringify(filter || '');
   return `
@@ -263,6 +281,53 @@ function buildBoxesExpr(filter) {
 })()`;
 }
 
+// ─── Change 3: BOS/CHoCH Label Reader ────────────────────────────────────────
+// Reads LuxAlgo (or other) Pine label.new() primitives from CDP.
+// Returns array of { text, price, time } — the same graphics path as boxes
+// but targeting dwglabels instead of dwgboxes.
+function buildLabelsExpr(filter) {
+  const f = JSON.stringify(filter || '');
+  return `
+(function() {
+  try {
+    var chart   = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
+    var sources = chart.model().model().dataSources();
+    var filter  = ${f};
+    var allLabels = [];
+    for (var si = 0; si < sources.length; si++) {
+      var s = sources[si];
+      if (!s.metaInfo) continue;
+      try {
+        var meta = s.metaInfo();
+        var name = meta.description || meta.shortDescription || '';
+        if (!name || (filter && name.indexOf(filter) === -1)) continue;
+        var g = s._graphics;
+        if (!g || !g._primitivesCollection) continue;
+        var pc = g._primitivesCollection;
+        var items = [];
+        try {
+          var outer = pc.dwglabels;
+          if (outer) {
+            var inner = outer.get('labels');
+            if (inner) {
+              var coll = inner.get(false);
+              if (coll && coll._primitivesDataById && coll._primitivesDataById.size > 0)
+                coll._primitivesDataById.forEach(function(v, id) { items.push(v); });
+            }
+          }
+        } catch(e) {}
+        for (var i = 0; i < items.length; i++) {
+          var v = items[i];
+          var text = (v.text || v.labelText || '').trim();
+          if (text) allLabels.push({ text: text, price: v.y, time: v.x });
+        }
+      } catch(e) {}
+    }
+    return allLabels;
+  } catch(e) { return []; }
+})()`;
+}
+
 // ─── Indicator Parsers ────────────────────────────────────────────────────────
 
 function parseFloat_(str) {
@@ -307,6 +372,22 @@ function computeRSI(closes, period = 14) {
   return 100 - 100 / (1 + avgGain / avgLoss);
 }
 
+// ─── Change 1: HTF Trend Regime Filter ───────────────────────────────────────
+// Determines weekly trend direction from close prices.
+// Returns 'uptrend', 'downtrend', or 'neutral'.
+// Uses 5 closes: if 3+ consecutive moves are up → uptrend; 3+ down → downtrend.
+function analyseWeeklyTrend(closes) {
+  if (!closes || closes.length < 4) return null;
+  const last = closes.slice(-5);
+  let up = 0, down = 0;
+  for (let i = 1; i < last.length; i++) {
+    if (last[i] > last[i - 1]) up++; else down++;
+  }
+  if (up >= 3) return 'uptrend';
+  if (down >= 3) return 'downtrend';
+  return 'neutral';
+}
+
 // Read/write previous OI to detect rising vs falling trend
 function getOITrend(currentOI) {
   const state = readState();
@@ -341,7 +422,12 @@ function parseStudies(studies) {
   const cvdStudy    = find('Cumulative Volume Delta');
   const oiStudy     = find('Open Interest');
   const sessionStudy = find('Session Volume Profile');
-  const vwapStudy   = find('Volume Weighted Average Price') || find('VWAP');
+  // ─── Change 5: VWAP Fix — try all known name variants ────────────────────
+  const vwapStudy   = find('Volume Weighted Average Price')
+                   || find('VWAP')
+                   || find('vwap')
+                   || find('Anchored VWAP')
+                   || find('Anchored');
 
   const cvd = cvdStudy
     ? parseFloat_(Object.values(cvdStudy.values || {})[0])
@@ -358,11 +444,38 @@ function parseStudies(studies) {
     if (up != null && down != null) sessionVP = { up, down };
   }
 
+  // Try named keys first ('VWAP', 'Value'), then fall back to first value
   const vwap = vwapStudy
-    ? parseFloat_(Object.values(vwapStudy.values || {})[0])
+    ? parseFloat_(
+        vwapStudy.values?.['VWAP']
+        ?? vwapStudy.values?.['Value']
+        ?? Object.values(vwapStudy.values || {})[0]
+      )
     : null;
 
   return { cvd, oi, sessionVP, vwap };
+}
+
+// ─── Change 3 cont.: Parse BOS/CHoCH from LuxAlgo labels ─────────────────────
+// Scans all labels for BOS / CHoCH text. Returns the most recent event with
+// its price and bullish/bearish characterisation so evaluateSetup can use it
+// as a structure-confirmation criterion.
+function parseBosChoch(labels, price) {
+  if (!labels || !labels.length) return null;
+  const events = labels.filter(l => {
+    const t = (l.text || '').toUpperCase().replace(/\s/g, '');
+    return t.includes('BOS') || t.includes('CHOCH');
+  });
+  if (!events.length) return null;
+  const last  = events[events.length - 1];
+  const text  = last.text || '';
+  // If label has a y-coordinate, compare to price. Otherwise infer from text.
+  const isBullish = last.price != null
+    ? last.price < price        // label drawn below price = bullish structure
+    : text.includes('+') || text.toUpperCase().includes('BULL');
+  const isBOS   = text.toUpperCase().replace(/\s/g, '').includes('BOS');
+  const isCHoCH = text.toUpperCase().replace(/\s/g, '').includes('CHOCH');
+  return { text, price: last.price, isBullish, isBOS, isCHoCH };
 }
 
 // ─── Trigger Formula ─────────────────────────────────────────────────────────
@@ -381,7 +494,7 @@ function checkProximity(price, zone) {
 // ─── Setup Evaluation ────────────────────────────────────────────────────────
 
 function evaluateSetup(price, zone, indicators, allZones) {
-  const { cvd, oi, sessionVP, vwap, oiTrend, macd4h, rsi12h } = indicators;
+  const { cvd, oi, sessionVP, vwap, oiTrend, macd4h, rsi12h, weeklyTrend, bosChoch } = indicators;
 
   const isSupply    = price < zone.low;   // zone above price
   const isDemand    = price > zone.high;  // zone below price
@@ -468,6 +581,29 @@ function evaluateSetup(price, zone, indicators, allZones) {
     });
   } else {
     criteria.push({ label: '12H RSI — unavailable', pass: null, auto: false, note: 'Check chart manually' });
+  }
+
+  // 8. Weekly trend regime (Change 1)
+  if (weeklyTrend && weeklyTrend !== 'neutral') {
+    const trendAligned = (direction === 'long'  && weeklyTrend === 'uptrend')
+                      || (direction === 'short' && weeklyTrend === 'downtrend');
+    criteria.push({
+      label: `Weekly trend: ${weeklyTrend} — ${trendAligned ? 'with trend ✓' : 'COUNTER-TREND ⚠'}`,
+      pass: trendAligned, auto: true,
+    });
+  } else if (weeklyTrend === 'neutral') {
+    criteria.push({ label: 'Weekly trend: neutral / ranging', pass: null, auto: false });
+  }
+
+  // 9. BOS / CHoCH structure confirmation (Change 3)
+  if (bosChoch) {
+    const { text, isBullish, isBOS, isCHoCH } = bosChoch;
+    const structureAligned = direction === 'long' ? isBullish : !isBullish;
+    const structureType = isCHoCH ? 'CHoCH' : isBOS ? 'BOS' : 'Structure';
+    criteria.push({
+      label: `${structureType}: "${text}" — ${isBullish ? 'bullish' : 'bearish'} structure ${structureAligned ? '✓' : '✗'}`,
+      pass: structureAligned, auto: true,
+    });
   }
 
   // --- Levels ---
@@ -644,9 +780,19 @@ function markPending(zoneKey, direction, zone, indicators) {
 // proven levels — resetting the cooldown is correct.
 
 function checkInvalidations(currentZones, price, indicators) {
-  const { cvd, oiTrend } = indicators;
+  const { cvd, oiTrend, volumes } = indicators;
   const state = readState();
+  // Each element: { msg, type }  — type is the discord-notify.sh alert type
   const messages = [];
+
+  // ─── Change 4: Breakout volume detection ─────────────────────────────────
+  // If the current bar volume > 2× the 10-bar average, classify as high-volume break.
+  const vols = Array.isArray(volumes) ? volumes : [];
+  const recentVol = vols[vols.length - 1] || 0;
+  const avgVol    = vols.length > 1
+    ? vols.slice(0, -1).reduce((a, b) => a + b, 0) / (vols.length - 1)
+    : 0;
+  const isHighVolBreak = avgVol > 0 && recentVol > avgVol * 2;
 
   for (const [key, entry] of Object.entries(state)) {
     if (key.startsWith('_')) continue;
@@ -661,11 +807,13 @@ function checkInvalidations(currentZones, price, indicators) {
     // Zone is gone — determine verdict
     const { direction, high, low } = entry;
     // Real break: CVD moves against the trade AND OI expands (new conviction positions)
+    // -OR- (Change 4) high volume + OI rising regardless of CVD
     const cvdConfirmsBreak = direction === 'long' ? (cvd != null && cvd < 0) : (cvd != null && cvd > 0);
     const oiExpanding      = oiTrend === 'rising';
-    const isRealBreak      = cvdConfirmsBreak && oiExpanding;
+    const isRealBreak      = (cvdConfirmsBreak && oiExpanding) || (isHighVolBreak && oiExpanding);
+    const isBreakoutMode   = isHighVolBreak && oiExpanding && !cvdConfirmsBreak; // vol break, not stop hunt
 
-    log(`Zone ${key} mitigated | CVD confirms break: ${cvdConfirmsBreak} | OI expanding: ${oiExpanding} | verdict: ${isRealBreak ? 'REAL BREAK' : 'AMBIGUOUS'}`);
+    log(`Zone ${key} mitigated | CVD confirms break: ${cvdConfirmsBreak} | OI expanding: ${oiExpanding} | high-vol break: ${isHighVolBreak} | verdict: ${isRealBreak ? (isBreakoutMode ? 'BREAKOUT' : 'REAL BREAK') : 'STOP HUNT'}`);
 
     // Mark any open trade for this zone as invalidated in the trade log
     if (isRealBreak) {
@@ -682,22 +830,39 @@ function checkInvalidations(currentZones, price, indicators) {
       writeTrades(trades);
     }
 
-    messages.push(formatInvalidationMessage(price, direction, { high, low }, isRealBreak, cvd, cvdConfirmsBreak, oiTrend, oiExpanding, currentZones));
+    messages.push({
+      msg:  formatInvalidationMessage(price, direction, { high, low }, isRealBreak, cvd, cvdConfirmsBreak, oiTrend, oiExpanding, currentZones, isBreakoutMode, recentVol, avgVol),
+      type: isRealBreak ? 'info' : 'approaching',
+    });
 
     // Remove the alerted zone entry.
-    // If ambiguous, add to watch list so the next polls can detect a reclaim.
-    // If real break, no watch needed.
     delete state[key];
+
     if (!isRealBreak) {
+      // ─── Change 2: Stop Hunt Re-entry Escalation ─────────────────────────
+      // Fire an immediate elevated re-entry alert and shorten the cooldown
+      // to 30 minutes so the next proximity trigger can re-fire quickly.
+      const stophuntMsg = formatStopHuntEscalation(price, direction, { high, low }, cvd, oiTrend, currentZones);
+      messages.push({ msg: stophuntMsg, type: 'approaching' });
+
+      // Add to reclaim watch (4h window for full CVD+OI confirmation)
       const watchKey = `_watch_${key}`;
       state[watchKey] = {
-        ts: Date.now(),
+        ts:        Date.now(),
         direction,
         high,
         low,
-        expires: Date.now() + 4 * 60 * 60 * 1000, // watch for 4 hours
+        expires:   Date.now() + 4 * 60 * 60 * 1000,
       };
-      log(`Zone ${key} added to reclaim watch list (expires in 4h)`);
+      // Short 30-min cooldown so zone can immediately re-trigger as a fresh signal
+      // (normal cooldown = 1h; we set ts = now - 30min so only 30min remain)
+      state[key] = {
+        ts:        Date.now() - (COOLDOWN_MS - 30 * 60 * 1000),
+        direction,
+        high,
+        low,
+      };
+      log(`Zone ${key} → stop hunt | re-entry alert fired | cooldown reset to 30m`);
     }
   }
 
@@ -705,7 +870,38 @@ function checkInvalidations(currentZones, price, indicators) {
   return messages;
 }
 
-function formatInvalidationMessage(price, direction, zone, isRealBreak, cvd, cvdConfirmsBreak, oiTrend, oiExpanding, allZones) {
+// ─── Change 2: Stop Hunt Re-entry Alert Formatter ────────────────────────────
+function formatStopHuntEscalation(price, direction, zone, cvd, oiTrend, allZones) {
+  const zoneStr   = `$${Math.round(zone.low).toLocaleString()}–$${Math.round(zone.high).toLocaleString()}`;
+  const dirLabel  = direction === 'long' ? 'LONG' : 'SHORT';
+  const oppDir    = direction === 'long' ? 'SHORT' : 'LONG';
+  const cvdLabel  = cvd != null ? `${cvd > 0 ? '+' : ''}${Math.round(cvd)} (${cvd < 0 ? 'bearish' : 'bullish'})` : 'n/a';
+  const reclaim   = direction === 'long'
+    ? `Watch for 30M CHoCH + bullish CVD above $${Math.round(zone.low).toLocaleString()}`
+    : `Watch for 30M CHoCH + bearish CVD below $${Math.round(zone.high).toLocaleString()}`;
+  const entryNote = direction === 'long'
+    ? `Re-entry: zone top $${Math.round(zone.high).toLocaleString()} on CHoCH confirmation`
+    : `Re-entry: zone bottom $${Math.round(zone.low).toLocaleString()} on CHoCH confirmation`;
+
+  return [
+    `🎯 STOP HUNT DETECTED — ${dirLabel} RE-ENTRY SETUP | BTCUSDT.P`,
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+    `Zone ${zoneStr} was swept with low conviction (probable stop hunt).`,
+    `**Probability: ~63% reversal back toward original ${dirLabel} thesis.**`,
+    ``,
+    `**ORDER FLOW**`,
+    `CVD: ${cvdLabel} — ${direction === 'long' ? 'no bear conviction on the break' : 'no bull conviction on the break'}`,
+    `OI: ${oiTrend ?? 'flat'} — ${oiTrend === 'rising' ? 'some positioning' : 'no new positions — likely liquidation-driven'}`,
+    ``,
+    `**ACTION**  ${reclaim}`,
+    `**${entryNote}**`,
+    `Cooldown reset: next proximity trigger fires in 30 minutes.`,
+    `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+    `\`You are analysing BINANCE:BTCUSDT.P. A ${dirLabel} zone ${zoneStr} was just swept as a probable stop hunt — flat/falling OI and non-confirming CVD (${cvdLabel}). This is ~63% reversal probability. Run the 30M analysis from strategies/mtf-analysis.md. Look for CHoCH forming at $${Math.round(direction === 'long' ? zone.low : zone.high).toLocaleString()}. If yes, post a ${direction} re-entry signal to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh ${direction} "your message".\``,
+  ].join('\n');
+}
+
+function formatInvalidationMessage(price, direction, zone, isRealBreak, cvd, cvdConfirmsBreak, oiTrend, oiExpanding, allZones, isBreakoutMode, recentVol, avgVol) {
   const zoneStr   = `$${Math.round(zone.low).toLocaleString()}–$${Math.round(zone.high).toLocaleString()}`;
   const dirLabel  = direction === 'long' ? 'LONG' : 'SHORT';
 
@@ -723,21 +919,30 @@ function formatInvalidationMessage(price, direction, zone, isRealBreak, cvd, cvd
     : 'No next zone found';
 
   if (isRealBreak) {
+    // Change 4: flag breakout continuation mode when triggered by high volume
+    const breakoutNote = isBreakoutMode && recentVol && avgVol
+      ? `⚡ HIGH-VOLUME BREAKOUT — vol ${Math.round(recentVol).toLocaleString()} (${(recentVol / avgVol).toFixed(1)}× avg). Zone consumed as support/resistance flip.`
+      : `Price broke through with institutional CVD + OI confirmation. Not a stop hunt.`;
+    const breakoutAction = isBreakoutMode
+      ? `Watch for ${direction === 'long' ? 'bearish' : 'bullish'} continuation — zone ${zoneStr} is now flipped ${direction === 'long' ? 'resistance' : 'support'}.`
+      : `Identify the next key ${direction === 'long' ? 'demand' : 'supply'} zone.`;
+
     return [
-      `🚫 SIGNAL INVALIDATED | BINANCE:BTCUSDT.P`,
+      `🚫 SIGNAL INVALIDATED${isBreakoutMode ? ' — BREAKOUT MODE' : ''} | BINANCE:BTCUSDT.P`,
       `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
       `Original ${dirLabel} zone ${zoneStr} has been mitigated.`,
       ``,
       `**VERDICT**  Real break — ${dirLabel} thesis is off`,
-      `Price broke through with institutional confirmation. Not a stop hunt.`,
+      breakoutNote,
       ``,
       `**ORDER FLOW AT BREAK**`,
       `${cvdIcon} CVD ${cvdLabel}`,
       `${oiIcon} OI ${oiLabel} — new positions, real conviction`,
       ``,
       `**NEXT LEVEL**  ${nextLevelStr}`,
+      `**ACTION**  ${breakoutAction}`,
       `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-      `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${dirLabel} zone ${zoneStr} was just confirmed broken — rising OI and ${direction === 'long' ? 'bearish' : 'bullish'} CVD both confirmed the move. Run the full 12H→4H→1H→30M analysis from strategies/mtf-analysis.md. Identify the next key ${direction === 'long' ? 'demand' : 'supply'} zone, assess whether a new setup in either direction is forming, and post your verdict to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh info "your message here".\``,
+      `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${dirLabel} zone ${zoneStr} was just confirmed broken${isBreakoutMode ? ` on high volume (${recentVol ? Math.round(recentVol).toLocaleString() : '?'} vs avg ${avgVol ? Math.round(avgVol).toLocaleString() : '?'})` : ' — rising OI and confirming CVD'}. ${breakoutAction} Run the full 12H→4H→1H→30M analysis from strategies/mtf-analysis.md, assess whether a new setup in either direction is forming, and post your verdict to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh info "your message here".\``,
     ].join('\n');
   } else {
     const watchAction = direction === 'long'
@@ -1105,12 +1310,16 @@ async function main() {
     studies = Array.isArray(studyData) ? studyData : [];
     log(`Studies: ${studies.length} indicators read`);
 
+    // 4.5. Get recent volumes (12 bars) — always, used for breakout detection (Change 4)
+    const volumeData = await cdpEval(client, buildVolumeExpr(12));
+    studies._volumes = Array.isArray(volumeData) ? volumeData : [];
+
     // 5. Check proximity early to decide if we need HTF data
     const anyTriggered = zones.some(z => checkProximity(price, z).triggered);
     if (anyTriggered) {
       // Read current TF so we can restore it
       const originalTF = await cdpEval(client, GET_TF_EXPR) || '30';
-      log(`Trigger detected — fetching 4H/12H data (current TF: ${originalTF})`);
+      log(`Trigger detected — fetching HTF data (current TF: ${originalTF})`);
 
       // Fetch 4H closes for MACD (60 bars: 26 EMA warm-up + signal + buffer)
       const closes4h = await fetchHTFCloses(client, '240', 60, originalTF);
@@ -1121,6 +1330,16 @@ async function main() {
       const closes12h = await fetchHTFCloses(client, '720', 30, originalTF);
       studies._rsi12h = computeRSI(closes12h);
       log(`12H RSI: ${studies._rsi12h != null ? Math.round(studies._rsi12h) : 'unavailable'}`);
+
+      // Change 1: Fetch weekly closes for trend regime filter (10 bars)
+      const weeklyCloses = await fetchHTFCloses(client, 'W', 10, originalTF);
+      studies._weeklyTrend = analyseWeeklyTrend(weeklyCloses);
+      log(`Weekly trend: ${studies._weeklyTrend ?? 'unavailable'} (${weeklyCloses.length} weekly closes)`);
+
+      // Change 3: Fetch LuxAlgo labels for BOS/CHoCH confirmation
+      const luxLabels = await cdpEval(client, buildLabelsExpr('LuxAlgo'));
+      studies._luxLabels = Array.isArray(luxLabels) ? luxLabels : [];
+      log(`LuxAlgo labels: ${studies._luxLabels.length} total`);
     }
 
   } catch (err) {
@@ -1145,18 +1364,20 @@ async function main() {
 
   // 6. Parse indicators + enrich with HTF data
   const indicators = parseStudies(studies);
-  indicators.oiTrend = getOITrend(indicators.oi);
-  indicators.macd4h  = studies._macd4h ?? null;
-  indicators.rsi12h  = studies._rsi12h ?? null;
-  log(`CVD: ${indicators.cvd} | OI: ${indicators.oi} (${indicators.oiTrend ?? 'no trend yet'}) | VWAP: ${indicators.vwap}`);
+  indicators.oiTrend    = getOITrend(indicators.oi);
+  indicators.macd4h     = studies._macd4h    ?? null;
+  indicators.rsi12h     = studies._rsi12h    ?? null;
+  indicators.weeklyTrend = studies._weeklyTrend ?? null;           // Change 1
+  indicators.bosChoch   = parseBosChoch(studies._luxLabels ?? [], price);  // Change 3
+  indicators.volumes    = studies._volumes   ?? [];                // Change 4
+  log(`CVD: ${indicators.cvd} | OI: ${indicators.oi} (${indicators.oiTrend ?? 'no trend yet'}) | VWAP: ${indicators.vwap} | Weekly: ${indicators.weeklyTrend ?? 'n/a'} | BOS/CHoCH: ${indicators.bosChoch?.text ?? 'none'}`);
 
   // Always update outcomes on open trades — runs every poll, no CDP needed
   updateOutcomes(price);
 
   // 7. Check if any previously alerted zones have been mitigated
   const invalidations = checkInvalidations(zones, price, indicators);
-  for (const msg of invalidations) {
-    const type = msg.startsWith('🚫') ? 'info' : 'approaching';
+  for (const { msg, type } of invalidations) {
     notify(type, msg);
   }
 
@@ -1205,6 +1426,57 @@ async function main() {
     setup._vwap   = indicators.vwap;
     setup._macd4h = indicators.macd4h;
     setup._rsi12h = indicators.rsi12h;
+
+    // ─── Change 1: Regime filter — suppress counter-trend signals ────────────
+    // When weekly trend contradicts the setup direction, post an informational
+    // alert instead of firing the trade signal. This prevents shorting into
+    // an uptrend (the root cause of all 3 invalid Apr 12-13 signals).
+    if (indicators.weeklyTrend === 'uptrend' && setup.direction === 'short') {
+      log(`Regime filter: weekly uptrend suppressing SHORT signal at zone ${zoneKey}`);
+      const regimeMsg = [
+        `📊 SUPPLY ZONE APPROACHED — TREND FILTER ACTIVE | BTCUSDT.P`,
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+        `**Price** $${Math.round(price).toLocaleString()} | **Supply Zone** $${Math.round(zone.low).toLocaleString()}–$${Math.round(zone.high).toLocaleString()}`,
+        ``,
+        `**REGIME: WEEKLY UPTREND — SHORT SUPPRESSED**`,
+        `Weekly structure shows bullish momentum (HH/HL pattern).`,
+        `Probability of zone breakout > reversal. Shorting here is counter-trend.`,
+        ``,
+        `**WATCH FOR**  Breakout close above $${Math.round(zone.high).toLocaleString()} → long continuation setup`,
+        `**FLIP TRIGGER**  4H close back below $${Math.round(zone.low).toLocaleString()} would invalidate uptrend`,
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+        `Setup criteria (${setup.autoPassed}/${setup.autoTotal} confirmed — direction suppressed by trend):`,
+        setup.criteria.map(c => `${c.pass === true ? '✅' : c.pass === false ? '❌' : '⚠️'} ${c.label}`).join('\n'),
+      ].join('\n');
+      notify('info', regimeMsg);
+      markAlerted(zoneKey, setup.direction, zone);
+      triggered = true;
+      break;
+    }
+
+    if (indicators.weeklyTrend === 'downtrend' && setup.direction === 'long') {
+      log(`Regime filter: weekly downtrend suppressing LONG signal at zone ${zoneKey}`);
+      const regimeMsg = [
+        `📊 DEMAND ZONE APPROACHED — TREND FILTER ACTIVE | BTCUSDT.P`,
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+        `**Price** $${Math.round(price).toLocaleString()} | **Demand Zone** $${Math.round(zone.low).toLocaleString()}–$${Math.round(zone.high).toLocaleString()}`,
+        ``,
+        `**REGIME: WEEKLY DOWNTREND — LONG SUPPRESSED**`,
+        `Weekly structure shows bearish momentum (LH/LL pattern).`,
+        `Probability of zone breakdown > bounce. Buying here is counter-trend.`,
+        ``,
+        `**WATCH FOR**  Break close below $${Math.round(zone.low).toLocaleString()} → short continuation setup`,
+        `**FLIP TRIGGER**  4H close back above $${Math.round(zone.high).toLocaleString()} would invalidate downtrend`,
+        `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+        `Setup criteria (${setup.autoPassed}/${setup.autoTotal} confirmed — direction suppressed by trend):`,
+        setup.criteria.map(c => `${c.pass === true ? '✅' : c.pass === false ? '❌' : '⚠️'} ${c.label}`).join('\n'),
+      ].join('\n');
+      notify('info', regimeMsg);
+      markAlerted(zoneKey, setup.direction, zone);
+      triggered = true;
+      break;
+    }
+    // ─── End regime filter ────────────────────────────────────────────────────
 
     const message = formatSetupMessage(price, zone, setup);
 
