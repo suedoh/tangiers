@@ -78,25 +78,61 @@ const STUDY_VALUES_EXPR = `(function(){
   } catch(e) { return []; }
 })()`;
 
-const BOXES_EXPR = `(function(){
+// VRVP extractor — identical path to trigger-check.js
+const VRVP_EXPR = `(function(){
   try {
     var chart=window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
-    var sources=chart.model().model().dataSources(); var allZones=[];
+    var sources=chart.model().model().dataSources();
     for(var si=0;si<sources.length;si++){
       var s=sources[si]; if(!s.metaInfo) continue;
-      try {
-        var meta=s.metaInfo(); var name=meta.description||meta.shortDescription||'';
-        if(name.indexOf('LuxAlgo')===-1) continue;
-        var g=s._graphics; if(!g||!g._primitivesCollection) continue;
-        var pc=g._primitivesCollection; var items=[];
-        try { var outer=pc.dwgboxes; if(outer){ var inner=outer.get('boxes'); if(inner){ var coll=inner.get(false); if(coll&&coll._primitivesDataById&&coll._primitivesDataById.size>0) coll._primitivesDataById.forEach(function(v){ items.push(v); }); } } } catch(e){}
-        for(var i=0;i<items.length;i++){ var v=items[i]; var hi=v.y1!=null&&v.y2!=null?Math.round(Math.max(v.y1,v.y2)*100)/100:null; var lo=v.y1!=null&&v.y2!=null?Math.round(Math.min(v.y1,v.y2)*100)/100:null; if(hi!=null&&lo!=null) allZones.push({high:hi,low:lo}); }
-      } catch(e){}
+      var name=''; try{name=s.metaInfo().description||'';}catch(e){continue;}
+      if(name!=='Visible Range Volume Profile') continue;
+      var poc=null,vah=null,val=null;
+      try{var lv=s._data.last().value;if(lv){poc=lv[1];vah=lv[2];val=lv[3];}}catch(e){}
+      var rows=[];
+      try{
+        var hh=s.graphics().hhists().get('histBars2');
+        if(hh&&hh._primitivesDataById){
+          hh._primitivesDataById.forEach(function(v){
+            if(v.priceLow!=null&&v.rate) rows.push({lo:Math.round(v.priceLow*10)/10,hi:Math.round(v.priceHigh*10)/10,uv:v.rate[0]||0,dv:v.rate[1]||0,tv:(v.rate[0]||0)+(v.rate[1]||0)});
+          });
+          rows.sort(function(a,b){return a.lo-b.lo;});
+        }
+      }catch(e){}
+      return {poc:poc,vah:vah,val:val,rows:rows};
     }
-    var seen={}; var zones=allZones.filter(function(z){ var k=z.high+':'+z.low; if(seen[k]) return false; seen[k]=true; return true; });
-    zones.sort(function(a,b){ return b.high-a.high; }); return zones;
-  } catch(e) { return []; }
+    return null;
+  } catch(e){return{error:e.message};}
 })()`;
+
+const GET_TF_EXPR = `(function(){try{return window.TradingViewApi._activeChartWidgetWV.value().resolution();}catch(e){return null;}})()`;
+
+// ─── VRVP Level Computation (mirrors trigger-check.js) ────────────────────────
+function computeVRVPLevels(data) {
+  if (!data || !data.rows || data.rows.length < 5) return null;
+  const rows    = data.rows;
+  const total   = rows.reduce((s,r) => s + r.tv, 0);
+  const avg     = total / rows.length;
+  const pocRow  = rows.reduce((best,r) => r.tv > best.tv ? r : best, rows[0]);
+  const poc     = Math.round((pocRow.lo + pocRow.hi) / 2);
+  const vah     = data.vah != null ? Math.round(data.vah) : null;
+  const val     = data.val != null ? Math.round(data.val) : null;
+  const inner   = rows.slice(2, -2);
+  const hvnRows = inner.filter(r => r.tv > avg * 1.5);
+  const lvnRows = inner.filter(r => r.tv < avg * 0.35);
+  function cluster(rws) {
+    if (!rws.length) return [];
+    const out = []; let cur = {lo:rws[0].lo,hi:rws[0].hi,maxVol:rws[0].tv,uv:rws[0].uv,dv:rws[0].dv};
+    for (let i=1;i<rws.length;i++) {
+      if (rws[i].lo <= cur.hi+50) { cur.hi=rws[i].hi; cur.maxVol=Math.max(cur.maxVol,rws[i].tv); cur.uv+=rws[i].uv; cur.dv+=rws[i].dv; }
+      else { out.push(cur); cur={lo:rws[i].lo,hi:rws[i].hi,maxVol:rws[i].tv,uv:rws[i].uv,dv:rws[i].dv}; }
+    }
+    out.push(cur); return out;
+  }
+  const hvns = cluster(hvnRows).sort((a,b) => b.maxVol-a.maxVol).slice(0,6);
+  const lvns = cluster(lvnRows).sort((a,b) => a.maxVol-b.maxVol).slice(0,4);
+  return { poc, vah, val, hvns, lvns, avg };
+}
 
 function buildSetTFExpr(tf) {
   return `(function(){try{window.TradingViewApi._activeChartWidgetWV.value().setResolution('${tf}',function(){});return true;}catch(e){return false;}})()`;
@@ -188,12 +224,8 @@ async function fetchTF(client, tf, closeCount) {
   await cdpEval(client, buildSetTFExpr(tf));
   await new Promise(r => setTimeout(r, 1500));
   const rawStudies = await cdpEval(client, STUDY_VALUES_EXPR) || [];
-  const zones      = await cdpEval(client, BOXES_EXPR)        || [];
   const parsed     = parseStudies(Array.isArray(rawStudies) ? rawStudies : []);
 
-  // Use chart-native RSI/MACD if present on the layout (zero extra cost).
-  // Fall back to computing from closes only when not on chart — so adding
-  // RSI/MACD to the Ace layout automatically improves accuracy here.
   let macd = parsed.macdFromChart ?? null;
   let rsi  = parsed.rsiFromChart  ?? null;
 
@@ -203,30 +235,53 @@ async function fetchTF(client, tf, closeCount) {
     if (macd === null && closeCount >= 35) macd = computeMACD(closes);
   }
 
-  return { tf, ...parsed, zones, macd, rsi };
+  return { tf, ...parsed, macd, rsi };
 }
 
 // ─── Synthesis ────────────────────────────────────────────────────────────────
 
-function nearestZones(zones, price) {
-  return {
-    supply: zones.filter(z => z.low  > price).sort((a,b) => a.low  - b.low )[0] || null,
-    demand: zones.filter(z => z.high < price).sort((a,b) => b.high - a.high)[0] || null,
-    inside: zones.find(z => price >= z.low && price <= z.high)                   || null,
-  };
+// Find nearest VRVP level to price and whether it acts as support (long) or resistance (short)
+function nearestVRVPLevel(levels, price) {
+  if (!levels) return null;
+  const { poc, vah, val, hvns } = levels;
+  const buf = price * 0.005; // 0.5% proximity window for MTF analysis (wider than trigger)
+  const candidates = [];
+
+  if (val != null) candidates.push({ type: 'VAL', price: val, dist: Math.abs(price - val), dir: 'long' });
+  if (vah != null) candidates.push({ type: 'VAH', price: vah, dist: Math.abs(price - vah), dir: price > vah ? 'long' : 'short' });
+  if (poc != null) candidates.push({ type: 'POC', price: poc, dist: Math.abs(price - poc), dir: price >= poc ? 'long' : 'short' });
+  for (const h of (hvns || [])) {
+    const mid = (h.lo + h.hi) / 2;
+    candidates.push({ type: 'HVN', price: mid, lo: h.lo, hi: h.hi, dist: Math.abs(price - mid), dir: price >= mid ? 'long' : 'short', uv: h.uv, dv: h.dv });
+  }
+
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => a.dist - b.dist);
+  const nearest = candidates[0];
+  nearest.atLevel = nearest.dist <= buf;
+  return nearest;
 }
 
-function evaluateSetupA(tfs, price, oiDelta) {
+function evaluateSetupA(tfs, price, oiDelta, vrvpLevels) {
   const d4h  = tfs['240'] || {};
   const d12h = tfs['720'] || {};
   const d30m = tfs['30']  || {};
-  const d1h  = tfs['60']  || {};
 
-  const z30m = nearestZones(d30m.zones || [], price);
-  const z1h  = nearestZones(d1h.zones  || [], price);
-  const atZone = !!(z30m.inside || z1h.inside
-    || (z30m.demand && Math.abs(price - z30m.demand.high) < price * 0.006)
-    || (z1h.demand  && Math.abs(price - z1h.demand.high)  < price * 0.006));
+  // VRVP proximity — primary structure check (replaces LuxAlgo zone check)
+  const nearLevel = nearestVRVPLevel(vrvpLevels, price);
+  const atVRVP = !!(nearLevel?.atLevel);
+  const vrvpNote = nearLevel
+    ? `${nearLevel.type} $${Math.round(nearLevel.price).toLocaleString()} (${Math.round(nearLevel.dist)} away)`
+    : 'VRVP unavailable';
+
+  // HVN delta — is the nearest HVN buyer or seller dominated?
+  let hvnDeltaPass = null, hvnDeltaNote = null;
+  if (nearLevel?.type === 'HVN' && nearLevel.uv != null) {
+    const total = (nearLevel.uv || 0) + (nearLevel.dv || 0);
+    const upPct = total > 0 ? Math.round(nearLevel.uv / total * 100) : 50;
+    hvnDeltaPass = upPct > 55;
+    hvnDeltaNote = `${upPct}% bull / ${100-upPct}% bear at HVN`;
+  }
 
   const allAboveVwap = ['720','240','60','30'].every(k =>
     tfs[k]?.vwap != null ? price > tfs[k].vwap : true
@@ -238,24 +293,33 @@ function evaluateSetupA(tfs, price, oiDelta) {
                         : (d4h.cvd != null ? d4h.cvd > 0 : null);
 
   const criteria = [
-    { label: '4H MACD bullish',       pass: d4h.macd  ? d4h.macd.bullish : null,
+    { label: '4H MACD bullish',
+      pass: d4h.macd ? d4h.macd.bullish : null,
       note: d4h.macd ? `hist ${d4h.macd.histogram>0?'+':''}${Math.round(d4h.macd.histogram)}` : 'computed from closes' },
-    { label: '12H RSI > 50',           pass: d12h.rsi != null ? d12h.rsi > 50 : null,
+    { label: '12H RSI > 50',
+      pass: d12h.rsi != null ? d12h.rsi > 50 : null,
       note: d12h.rsi != null ? `RSI ${Math.round(d12h.rsi)}` : 'computed from closes' },
-    { label: 'Price in 1H/30M demand zone', pass: atZone,    note: null },
-    { label: '4H CVD aligned (long)',  pass: d4h.cvd != null ? d4h.cvd > 0 : null,
+    { label: 'Price at VRVP level',
+      pass: atVRVP, note: vrvpNote },
+    { label: 'HVN buyer-dominated',
+      pass: hvnDeltaPass, note: hvnDeltaNote },
+    { label: '4H CVD aligned (long)',
+      pass: d4h.cvd != null ? d4h.cvd > 0 : null,
       note: d4h.cvd != null ? `${d4h.cvd>0?'+':''}${Math.round(d4h.cvd)}` : null },
-    { label: 'OI rising',              pass: oiDelta != null ? oiDelta > 0 : null,
+    { label: 'OI rising',
+      pass: oiDelta != null ? oiDelta > 0 : null,
       note: oiDelta != null ? `Δ${oiDelta>0?'+':''}${oiDelta.toFixed(2)}K` : 'first run — check next tick' },
-    { label: 'Price above VWAP (all TFs)', pass: allAboveVwap, note: `30M VWAP $${d30m.vwap?Math.round(d30m.vwap).toLocaleString():'?'}` },
-    { label: '12H + 4H macro aligned', pass: macro12hBullish && macro4hBullish != null ? (macro12hBullish && macro4hBullish) : null,
+    { label: 'Price above VWAP (all TFs)',
+      pass: allAboveVwap, note: `30M VWAP $${d30m.vwap?Math.round(d30m.vwap).toLocaleString():'?'}` },
+    { label: '12H + 4H macro aligned',
+      pass: macro12hBullish && macro4hBullish != null ? (macro12hBullish && macro4hBullish) : null,
       note: null },
   ];
 
   const passed  = criteria.filter(c => c.pass === true).length;
   const failed  = criteria.filter(c => c.pass === false).length;
   const unknown = criteria.filter(c => c.pass === null).length;
-  return { criteria, passed, failed, unknown };
+  return { criteria, passed, failed, unknown, nearLevel };
 }
 
 // ─── Probability Engine ───────────────────────────────────────────────────────
@@ -282,18 +346,18 @@ function evaluateSetupA(tfs, price, oiDelta) {
 //
 // Output is clamped to [28%, 91%] — nothing in trading is certain.
 
-function calculateProbability(setupA, tfs, price, oiDelta) {
-  let prob = 0.62; // Setup A base rate
+function calculateProbability(setupA, tfs, price, oiDelta, vrvpLevels) {
+  let prob = 0.62; // base rate
 
-  // Per-criterion weights: { pass: reward, fail: penalty (negative) }
   const WEIGHTS = {
-    '4H CVD aligned (long)':          { pass: +0.07, fail: -0.11 }, // priority signal
-    'OI rising':                       { pass: +0.06, fail: -0.09 }, // conviction check
-    'Price in 1H/30M demand zone':     { pass: +0.05, fail: -0.08 }, // setup foundation
-    '12H + 4H macro aligned':          { pass: +0.05, fail: -0.08 }, // structural bias
-    '4H MACD bullish':                 { pass: +0.04, fail: -0.06 },
-    'Price above VWAP (all TFs)':      { pass: +0.04, fail: -0.06 },
-    '12H RSI > 50':                    { pass: +0.03, fail: -0.04 },
+    '4H CVD aligned (long)':      { pass: +0.07, fail: -0.11 },
+    'OI rising':                   { pass: +0.06, fail: -0.09 },
+    'Price at VRVP level':         { pass: +0.06, fail: -0.08 }, // replaces zone check
+    'HVN buyer-dominated':         { pass: +0.04, fail: -0.05 }, // delta at level
+    '12H + 4H macro aligned':      { pass: +0.05, fail: -0.08 },
+    '4H MACD bullish':             { pass: +0.04, fail: -0.06 },
+    'Price above VWAP (all TFs)':  { pass: +0.04, fail: -0.06 },
+    '12H RSI > 50':                { pass: +0.03, fail: -0.04 },
   };
 
   for (const c of setupA.criteria) {
@@ -316,7 +380,17 @@ function calculateProbability(setupA, tfs, price, oiDelta) {
   if (d12h.sessionVP?.up > d12h.sessionVP?.down) prob += 0.01;
   if (d30m.sessionVP?.down > d30m.sessionVP?.up) prob -= 0.01; // mild 30M headwind
 
-  // VRVP consensus — volume-weighted range bias
+  // VRVP structural bonus — POC proximity and value area position
+  if (vrvpLevels) {
+    const { poc, vah, val } = vrvpLevels;
+    // Price between VAL and POC = strongest demand zone in the visible range
+    if (val != null && poc != null && price >= val && price <= poc) prob += 0.03;
+    // Price above POC = range in bullish control
+    else if (poc != null && price > poc) prob += 0.01;
+    // Price below VAL = danger zone for longs
+    if (val != null && price < val) prob -= 0.03;
+  }
+  // Session VP VRVP bullish (legacy Up/Down ratio)
   if (d12h.vrvp?.bullish) prob += 0.01;
   if (d4h.vrvp?.bullish)  prob += 0.01;
 
@@ -341,9 +415,9 @@ function calculateProbability(setupA, tfs, price, oiDelta) {
 
 function fmt$(n) { return n != null ? `$${Math.round(n).toLocaleString()}` : '?'; }
 
-function buildReport(tfs, price, oiDelta) {
-  const setupA      = evaluateSetupA(tfs, price, oiDelta);
-  const probability = calculateProbability(setupA, tfs, price, oiDelta);
+function buildReport(tfs, price, oiDelta, vrvpLevels) {
+  const setupA      = evaluateSetupA(tfs, price, oiDelta, vrvpLevels);
+  const probability = calculateProbability(setupA, tfs, price, oiDelta, vrvpLevels);
   const TF_KEYS = ['720','240','60','30'];
   const TF_LBLS = { '720':'12H','240':'4H','60':'1H','30':'30M' };
 
@@ -403,35 +477,53 @@ function buildReport(tfs, price, oiDelta) {
     vType = 'approaching';
   }
 
-  // Trade plan + EV
-  const z30m = nearestZones(tfs['30']?.zones || [], price);
-  const zone  = z30m.inside || z30m.demand;
+  // VRVP key levels line
+  let vrvpLine = '';
+  if (vrvpLevels) {
+    const { poc, vah, val, hvns } = vrvpLevels;
+    const nearestHVN = (hvns || []).reduce((best, h) => {
+      const mid = (h.lo + h.hi) / 2;
+      const d = Math.abs(price - mid);
+      return d < best.dist ? { mid, lo: h.lo, hi: h.hi, dist: d } : best;
+    }, { mid: null, dist: Infinity });
+    vrvpLine = [
+      `**VRVP** POC ${fmt$(poc)} | VAH ${fmt$(vah)} | VAL ${fmt$(val)}`,
+      nearestHVN.mid ? `Nearest HVN $${Math.round(nearestHVN.lo).toLocaleString()}–$${Math.round(nearestHVN.hi).toLocaleString()} ($${Math.round(nearestHVN.dist).toLocaleString()} away)` : '',
+    ].filter(Boolean).join(' | ');
+  }
+
+  // Trade plan + EV — built from VRVP levels
   let plan = '';
-  if (vType !== 'info' && zone) {
-    const entry = Math.round(zone.high * 0.997);
-    const stop  = Math.round(zone.low  * 0.998);
-    const risk  = Math.max(entry - stop, 1);
-    const supply = (tfs['30']?.zones || []).filter(z => z.low > price).sort((a,b) => a.low-b.low)[0];
-    const tp1   = supply ? Math.round(supply.low) : entry + risk;
-    const tp2   = entry + risk * 2;
-    const tp3   = entry + risk * 3;
-    const rr1   = (Math.abs(tp1 - entry) / risk);
-    const rr2   = (Math.abs(tp2 - entry) / risk);
-    const rr3   = (Math.abs(tp3 - entry) / risk);
-    const p     = probability / 100;
-
-    // Expected Value = (win_prob × reward_R) − (loss_prob × 1R)
-    // Calculated at TP2 as the primary target (partial exits at TP1/TP3)
-    const ev2   = ((p * rr2) - ((1 - p) * 1.0)).toFixed(2);
-    const evStr = parseFloat(ev2) > 0 ? `+${ev2}R` : `${ev2}R`;
-
-    plan = [
-      ``,
-      `**TRADE PLAN** | Win rate ${probability}% | EV at TP2: **${evStr}**`,
-      `Entry ${fmt$(entry)} | Stop ${fmt$(stop)} | Risk ${fmt$(risk)}/contract`,
-      `TP1 ${fmt$(tp1)} (1:${rr1.toFixed(1)}) | TP2 ${fmt$(tp2)} (1:${rr2.toFixed(1)}) | TP3 ${fmt$(tp3)} (1:${rr3.toFixed(1)})`,
-      `Trigger  30M CHoCH above ${fmt$(zone.high)}`,
-    ].join('\n');
+  if (vType !== 'info' && vrvpLevels) {
+    const nearLevel = setupA.nearLevel;
+    // Entry: at nearest VRVP support level (VAL, HVN bottom, or POC)
+    const entryLevel = nearLevel?.type === 'HVN' ? nearLevel.lo
+                     : nearLevel?.type === 'VAL' ? nearLevel.price
+                     : nearLevel?.type === 'POC' ? nearLevel.price
+                     : null;
+    if (entryLevel) {
+      const entry = Math.round(entryLevel * 1.001); // just above level
+      const stop  = Math.round(entryLevel * 0.997); // 0.3% below level
+      const risk  = Math.max(entry - stop, 1);
+      // TP1: nearest HVN above price; TP2: VAH; TP3: 3R
+      const hvnsAbove = (vrvpLevels.hvns || []).filter(h => h.lo > price + 50).sort((a,b) => a.lo - b.lo);
+      const tp1 = hvnsAbove[0] ? Math.round(hvnsAbove[0].lo) : entry + risk;
+      const tp2 = vrvpLevels.vah && vrvpLevels.vah > price + 50 ? vrvpLevels.vah : entry + risk * 2;
+      const tp3 = entry + risk * 3;
+      const rr1 = (Math.abs(tp1 - entry) / risk);
+      const rr2 = (Math.abs(tp2 - entry) / risk);
+      const rr3 = (Math.abs(tp3 - entry) / risk);
+      const p   = probability / 100;
+      const ev2 = ((p * rr2) - ((1 - p) * 1.0)).toFixed(2);
+      const evStr = parseFloat(ev2) > 0 ? `+${ev2}R` : `${ev2}R`;
+      plan = [
+        ``,
+        `**TRADE PLAN** | Win rate ${probability}% | EV at TP2: **${evStr}**`,
+        `Entry ${fmt$(entry)} | Stop ${fmt$(stop)} | Risk ${fmt$(risk)}/contract`,
+        `TP1 ${fmt$(tp1)} (1:${rr1.toFixed(1)}) | TP2 ${fmt$(tp2)} (1:${rr2.toFixed(1)}) | TP3 ${fmt$(tp3)} (1:${rr3.toFixed(1)})`,
+        `Trigger  30M bullish order flow confirmation above ${fmt$(Math.round(entryLevel))}`,
+      ].join('\n');
+    }
   }
 
   const ts  = new Date().toLocaleString('en-US', { timeZone: 'UTC', hour12: false, month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
@@ -440,9 +532,10 @@ function buildReport(tfs, price, oiDelta) {
   const text = [
     `📊 **MTF ANALYSIS — BTCUSDT** | **${fmt$(price)}** | ${ts} UTC | ${oiS}`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+    ...(vrvpLine ? [vrvpLine, ``] : []),
     ...gridLines,
     ``,
-    `**SETUP A CRITERIA**`,
+    `**SETUP CRITERIA**`,
     ...critLines,
     ``,
     verdict,
@@ -458,30 +551,37 @@ function buildReport(tfs, price, oiDelta) {
 async function runMTFAnalysis() {
   const client = await cdpConnect();
   try {
-    // Read previous OI from trigger-check state for delta calculation
     let prevOI = null;
     try { prevOI = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'))._previousOI ?? null; } catch {}
 
-    // Sweep all four timeframes in one CDP session
+    // Sweep all four timeframes
     //   12H: 30 closes for RSI-14 (with warm-up)
     //   4H:  60 closes for MACD (26 EMA + signal + buffer)
-    //   1H/30M: indicator values + zones only
+    //   1H/30M: indicator values only
     const tfs = {};
     tfs['720'] = await fetchTF(client, '720', 30);
     tfs['240'] = await fetchTF(client, '240', 60);
     tfs['60']  = await fetchTF(client, '60',  0);
     tfs['30']  = await fetchTF(client, '30',  0);
 
-    // Final price read on 30M (most current)
-    const quote = await cdpEval(client, QUOTE_EXPR);
-    const price = quote?.last;
+    // Restore to 30M and fetch VRVP + price (VRVP reads the visible range on 30M)
+    const originalTF = await cdpEval(client, GET_TF_EXPR) || '30';
+    if (originalTF !== '30') {
+      await cdpEval(client, buildSetTFExpr('30'));
+      await new Promise(r => setTimeout(r, 1200));
+    }
+
+    const quote    = await cdpEval(client, QUOTE_EXPR);
+    const price    = quote?.last;
     if (!price) throw new Error('Could not read price from chart');
 
-    // OI delta vs trigger-check.js baseline
+    const vrvpRaw  = await cdpEval(client, VRVP_EXPR);
+    const vrvpLevels = computeVRVPLevels(vrvpRaw);
+
     const currentOI = tfs['30'].oi;
     const oiDelta   = (prevOI != null && currentOI != null) ? currentOI - prevOI : null;
 
-    return buildReport(tfs, price, oiDelta);
+    return buildReport(tfs, price, oiDelta, vrvpLevels);
   } finally {
     await client.close();
   }

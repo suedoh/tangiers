@@ -64,10 +64,14 @@ function log(msg) {
 
 // ─── Discord ─────────────────────────────────────────────────────────────────
 
-function notify(type, message) {
+function notify(type, message, onMessageId) {
   try {
-    execFileSync('bash', [NOTIFY, type, message], { stdio: 'pipe' });
-    log(`Discord [${type}] sent`);
+    const out = execFileSync('bash', [NOTIFY, type, message], { stdio: 'pipe', encoding: 'utf8' });
+    // Parse MSG_ID:xxx line from notify script output
+    const idMatch = (out || '').match(/^MSG_ID:(.+)$/m);
+    const msgId = idMatch ? idMatch[1].trim() : null;
+    log(`Discord [${type}] sent${msgId ? ` id=${msgId}` : ''}`);
+    if (msgId && onMessageId) onMessageId(msgId);
   } catch (e) {
     log(`Discord notify failed: ${e.message}`);
   }
@@ -875,7 +879,7 @@ function formatSetupMessage(price, trigger, setup) {
     ``,
     `**SET ALERTS**  ${alertLevels}`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-    `\`You are analysing BINANCE:BTCUSDT.P using the TradingView MCP server. Switch to the 🕵Ace layout. A ${direction.toUpperCase()} signal just fired at $${Math.round(price).toLocaleString()} at the ${levelType} ${levelStr} (${setupType}, ${probability} win rate). Run the full 12H→4H→1H→30M analysis from strategies/mtf-analysis.md. Evaluate all setup criteria in strategies/smc-setups.md and give me a clear take/skip/wait verdict with your reasoning. Post your verdict to Discord via: bash /Users/vpm/trading/scripts/discord-notify.sh ${direction} "your message here".\``,
+    `📊 React with 📊 for deep MTF analysis`,
   ].join('\n');
 }
 
@@ -1592,7 +1596,21 @@ async function main() {
       } else {
         // Fire the signal
         const message = formatSetupMessage(price, trigger, setup);
-        notify(setup.direction, message);
+        notify(setup.direction, message, (msgId) => {
+          const st = readState();
+          if (!Array.isArray(st._signal_messages)) st._signal_messages = [];
+          st._signal_messages.push({
+            id:        msgId,
+            firedAt:   Date.now(),
+            levelKey,
+            direction: setup.direction,
+            analyzed:  false,
+          });
+          // Keep only last 20 signal messages
+          if (st._signal_messages.length > 20) st._signal_messages = st._signal_messages.slice(-20);
+          writeState(st);
+          log(`Stored signal message id=${msgId} for reaction polling`);
+        });
         markAlerted(levelKey, setup.direction, trigger);
         logTrade(price, trigger, setup);
         if (!indicators.oiTrend || indicators.oiTrend === 'flat') {

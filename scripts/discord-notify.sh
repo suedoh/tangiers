@@ -86,13 +86,20 @@ PAYLOAD=$(cat <<EOF
 EOF
 )
 
+# Append ?wait=true so Discord returns the full message object (with ID)
+WEBHOOK_URL="${DISCORD_WEBHOOK_URL}?wait=true"
+
 HTTP_STATUS=$(curl -s -o /tmp/discord_response.txt -w "%{http_code}" \
   -H "Content-Type: application/json" \
   -d "$PAYLOAD" \
-  "$DISCORD_WEBHOOK_URL")
+  "$WEBHOOK_URL")
 
-if [[ "$HTTP_STATUS" == "204" ]]; then
-  echo "Discord notification sent [${ALERT_TYPE}]"
+if [[ "$HTTP_STATUS" == "200" ]]; then
+  # Extract and echo message ID — callers can capture this for reaction polling
+  MSG_ID=$(python3 -c "import sys,json; d=json.load(open('/tmp/discord_response.txt')); print(d.get('id',''))" 2>/dev/null || true)
+  echo "Discord notification sent [${ALERT_TYPE}] id=${MSG_ID}"
+  # Print ID on its own line so callers can parse it unambiguously
+  if [[ -n "$MSG_ID" ]]; then echo "MSG_ID:${MSG_ID}"; fi
 else
   echo "ERROR: Discord webhook returned HTTP $HTTP_STATUS" >&2
   cat /tmp/discord_response.txt >&2
