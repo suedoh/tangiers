@@ -492,36 +492,82 @@ function buildReport(tfs, price, oiDelta, vrvpLevels) {
     ].filter(Boolean).join(' | ');
   }
 
-  // Trade plan + EV — built from VRVP levels
+  // ─── Reasoning sentence — synthesise key passing criteria ───────────────────
+  let reasoning = '';
+  if (vType !== 'info') {
+    const passingLabels = setupA.criteria.filter(c => c.pass === true).map(c => c.label);
+    const pieces = [];
+    if (passingLabels.includes('4H MACD bullish') && passingLabels.includes('12H RSI > 50'))
+      pieces.push('macro momentum confirmed on 12H + 4H');
+    else if (passingLabels.includes('4H MACD bullish'))
+      pieces.push('4H MACD trending bullish');
+    else if (passingLabels.includes('12H RSI > 50'))
+      pieces.push('12H RSI above 50 — macro bullish');
+    if (passingLabels.some(l => l.includes('CVD aligned')))
+      pieces.push('order flow aligned long');
+    if (passingLabels.includes('OI rising'))
+      pieces.push('rising OI confirms real positioning');
+    if (passingLabels.includes('Price above VWAP (all TFs)'))
+      pieces.push('price above full VWAP stack');
+    if (passingLabels.includes('12H + 4H macro aligned'))
+      pieces.push('trend coherent across timeframes');
+    if (passingLabels.includes('Price at VRVP level'))
+      pieces.push('at high-volume structural level');
+    if (pieces.length > 0)
+      reasoning = `*${pieces.join(' · ')}*`;
+  }
+
+  // ─── Trade plan — VRVP levels primary, VWAP anchor fallback ─────────────────
   let plan = '';
-  if (vType !== 'info' && vrvpLevels) {
-    const nearLevel = setupA.nearLevel;
-    // Entry: at nearest VRVP support level (VAL, HVN bottom, or POC)
-    const entryLevel = nearLevel?.type === 'HVN' ? nearLevel.lo
-                     : nearLevel?.type === 'VAL' ? nearLevel.price
-                     : nearLevel?.type === 'POC' ? nearLevel.price
-                     : null;
-    if (entryLevel) {
-      const entry = Math.round(entryLevel * 1.001); // just above level
-      const stop  = Math.round(entryLevel * 0.997); // 0.3% below level
-      const risk  = Math.max(entry - stop, 1);
-      // TP1: nearest HVN above price; TP2: VAH; TP3: 3R
-      const hvnsAbove = (vrvpLevels.hvns || []).filter(h => h.lo > price + 50).sort((a,b) => a.lo - b.lo);
-      const tp1 = hvnsAbove[0] ? Math.round(hvnsAbove[0].lo) : entry + risk;
-      const tp2 = vrvpLevels.vah && vrvpLevels.vah > price + 50 ? vrvpLevels.vah : entry + risk * 2;
-      const tp3 = entry + risk * 3;
-      const rr1 = (Math.abs(tp1 - entry) / risk);
-      const rr2 = (Math.abs(tp2 - entry) / risk);
-      const rr3 = (Math.abs(tp3 - entry) / risk);
-      const p   = probability / 100;
-      const ev2 = ((p * rr2) - ((1 - p) * 1.0)).toFixed(2);
+  if (vType !== 'info') {
+    let entry, stop, risk, tp1, tp2, tp3, anchor;
+
+    // Primary: use nearest VRVP level as structural anchor
+    if (vrvpLevels) {
+      const nearLevel = setupA.nearLevel;
+      const entryLevel = nearLevel?.type === 'HVN' ? nearLevel.lo
+                       : nearLevel?.type === 'VAL' ? nearLevel.price
+                       : nearLevel?.type === 'POC' ? nearLevel.price
+                       : null;
+      if (entryLevel) {
+        anchor = `${nearLevel.type} ${fmt$(Math.round(entryLevel))}`;
+        entry  = Math.round(entryLevel * 1.001);
+        stop   = Math.round(entryLevel * 0.997);
+        risk   = Math.max(entry - stop, 1);
+        const hvnsAbove = (vrvpLevels.hvns || []).filter(h => h.lo > price + 50).sort((a,b) => a.lo - b.lo);
+        tp1 = hvnsAbove[0] ? Math.round(hvnsAbove[0].lo) : entry + risk;
+        tp2 = vrvpLevels.vah && vrvpLevels.vah > price + 50 ? Math.round(vrvpLevels.vah) : entry + risk * 2;
+        tp3 = entry + risk * 3;
+      }
+    }
+
+    // Fallback: VWAP as structural anchor (VRVP unavailable or no near level found)
+    if (!entry) {
+      const vwap30 = tfs['30']?.vwap;
+      if (vwap30 && price > vwap30) {
+        anchor = `VWAP ${fmt$(Math.round(vwap30))} (fallback)`;
+        entry  = Math.round(price);
+        stop   = Math.round(vwap30 * 0.997); // 0.3% below VWAP
+        risk   = Math.max(entry - stop, 1);
+        tp1    = entry + risk;
+        tp2    = entry + risk * 2;
+        tp3    = entry + risk * 3;
+      }
+    }
+
+    if (entry && stop && risk) {
+      const rr1   = (Math.abs(tp1 - entry) / risk);
+      const rr2   = (Math.abs(tp2 - entry) / risk);
+      const rr3   = (Math.abs(tp3 - entry) / risk);
+      const p     = probability / 100;
+      const ev2   = ((p * rr2) - ((1 - p) * 1.0)).toFixed(2);
       const evStr = parseFloat(ev2) > 0 ? `+${ev2}R` : `${ev2}R`;
       plan = [
         ``,
-        `**TRADE PLAN** | Win rate ${probability}% | EV at TP2: **${evStr}**`,
-        `Entry ${fmt$(entry)} | Stop ${fmt$(stop)} | Risk ${fmt$(risk)}/contract`,
-        `TP1 ${fmt$(tp1)} (1:${rr1.toFixed(1)}) | TP2 ${fmt$(tp2)} (1:${rr2.toFixed(1)}) | TP3 ${fmt$(tp3)} (1:${rr3.toFixed(1)})`,
-        `Trigger  30M bullish order flow confirmation above ${fmt$(Math.round(entryLevel))}`,
+        `**TRADE PLAN** (anchor: ${anchor}) | EV @ TP2: **${evStr}**`,
+        `**Entry** ${fmt$(entry)} | **Stop** ${fmt$(stop)} | Risk ${fmt$(risk)}/contract`,
+        `**TP1** ${fmt$(tp1)} (1:${rr1.toFixed(1)}) | **TP2** ${fmt$(tp2)} (1:${rr2.toFixed(1)}) | **TP3** ${fmt$(tp3)} (1:${rr3.toFixed(1)})`,
+        `**Trigger** 30M bullish close above ${fmt$(entry)} with CVD confirmation`,
       ].join('\n');
     }
   }
@@ -539,7 +585,8 @@ function buildReport(tfs, price, oiDelta, vrvpLevels) {
     ...critLines,
     ``,
     verdict,
-    plan,
+    ...(reasoning ? [reasoning] : []),
+    ...(plan      ? [plan]      : []),
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
   ].join('\n');
 
