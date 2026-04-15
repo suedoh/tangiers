@@ -218,6 +218,25 @@ function buildClosesExpr(count) {
   })()`;
 }
 
+// Returns the last `count` bars as {time, open, high, low, close} objects.
+// Used by bar-accurate outcome detection — checks high/low per bar rather than
+// spot price, so wicks and intrabar order (stop before TP on same candle) are handled.
+function buildOHLCVExpr(count) {
+  return `(function() {
+    try {
+      var bars = ${BARS_PATH};
+      var result = [];
+      var li = bars.lastIndex();
+      var start = Math.max(0, li - ${count} + 1);
+      for (var i = start; i <= li; i++) {
+        var v = bars.valueAt(i);
+        if (v && v[4] != null) result.push({ time: v[0], open: v[1], high: v[2], low: v[3], close: v[4] });
+      }
+      return result;
+    } catch(e) { return []; }
+  })()`;
+}
+
 // ─── Change 4: Volume for Breakout Detection ─────────────────────────────────
 // Returns the last `count` bar volumes (index 5 in bars array).
 function buildVolumeExpr(count) {
@@ -1282,25 +1301,85 @@ function checkPendingConfirmation(price, indicators) {
   return results;
 }
 
+// ─── Confirmation Tracking ────────────────────────────────────────────────────
+//
+// A signal fires when price APPROACHES a VRVP level with order flow alignment.
+// The actual trade trigger is "wait for 30M close above entry" — this function
+// detects when that close happens and stamps the trade as confirmed.
+//
+// Confirmed trades are separated from unconfirmed in the weekly report.
+// This is the single most important filter: if confirmed signals have a much
+// higher win rate than all signals, the confirmation bar is doing real work.
+//
+// Confirmation logic:
+//   Long:  a 30M bar closes ABOVE entry price  (close > entry)
+//   Short: a 30M bar closes BELOW entry price  (close < entry)
+//
+// The bar must be AFTER firedAt. CVD is checked from current indicators —
+// not per-bar — which is a simplification, but directional CVD is the most
+// persistent of the indicators and directionally correct at confirmation time.
+
+async function checkConfirmation(client, indicators) {
+  const trades = readTrades();
+  const unconfirmed = trades.filter(t => !t.confirmed && t.outcome === null);
+  if (unconfirmed.length === 0) return;
+
+  // Fetch recent 30M bars (already on 30M from outcome check above)
+  const bars = await cdpEval(client, buildOHLCVExpr(96)).catch(() => []); // 48h of 30M bars
+  if (!bars || bars.length === 0) return;
+
+  let changed = false;
+
+  for (const t of unconfirmed) {
+    const signalTs = new Date(t.firedAt).getTime() / 1000;
+    const relevantBars = bars.filter(b => b.time > signalTs);
+    if (relevantBars.length === 0) continue;
+
+    const cvdAligned = t.direction === 'long'
+      ? (indicators.cvd != null && indicators.cvd > 0)
+      : (indicators.cvd != null && indicators.cvd < 0);
+
+    for (const bar of relevantBars) {
+      const closeConfirms = t.direction === 'long'
+        ? bar.close > t.entry
+        : bar.close < t.entry;
+
+      if (closeConfirms && cvdAligned) {
+        t.confirmed      = true;
+        t.confirmedAt    = new Date(bar.time * 1000).toISOString();
+        t.confirmedPrice = bar.close;
+        changed = true;
+        log(`Trade ${t.id} CONFIRMED — 30M close ${bar.close} ${t.direction === 'long' ? 'above' : 'below'} entry ${t.entry}`);
+        break;
+      }
+    }
+  }
+
+  if (changed) writeTrades(trades);
+}
+
 // ─── Trade Log ───────────────────────────────────────────────────────────────
 //
 // trades.json schema (array of trade objects):
 // {
-//   id:        "1744000000000-HVN-72993"    unique: ts + level type + mid
-//   firedAt:   ISO timestamp
-//   direction: "long" | "short"
-//   setupType: "A — Full Confluence" etc.
-//   price:     72800                          price when alert fired
-//   zone:      { mid: 72993, high: 73200, low: 72780, type: "HVN" }
-//   entry:     72826
-//   stop:      70329
-//   tp1:       71580,  tp2: 73400,  tp3: 71881
-//   rr1:       "2.2",  rr2: "6.9",  rr3: "3.0"
-//   criteria:  [ { label, pass, auto } ... ]  snapshot of criteria at signal time
-//   indicators: { cvd, oi, oiTrend, vwap, macd4hBullish, rsi12h }
-//   outcome:   null | "tp1" | "tp2" | "tp3" | "stop" | "invalidated" | "expired"
-//   closedAt:  null | ISO timestamp
-//   pnlR:      null | number   (R-multiple: 1.0 = hit TP1, -1.0 = stopped out, etc.)
+//   id:             "1744000000000-HVN-72993"    unique: ts + level type + mid
+//   firedAt:        ISO timestamp
+//   direction:      "long" | "short"
+//   setupType:      "A — Full Confluence" etc.
+//   price:          72800                          price when alert fired
+//   zone:           { mid: 72993, high: 73200, low: 72780, type: "HVN" }
+//   entry:          72826
+//   stop:           70329
+//   tp1:            71580,  tp2: 73400,  tp3: 71881
+//   rr1:            "2.2",  rr2: "6.9",  rr3: "3.0"
+//   criteria:       [ { label, pass, auto } ... ]  snapshot of criteria at signal time
+//   indicators:     { cvd, oi, oiTrend, vwap, macd4hBullish, rsi12h }
+//   confirmed:      false | true   — 30M close above entry with +CVD happened
+//   confirmedAt:    null | ISO timestamp
+//   confirmedPrice: null | number
+//   outcome:        null | "tp1" | "tp2" | "tp3" | "stop" | "invalidated" | "expired"
+//   closedAt:       null | ISO timestamp
+//   pnlR:           null | number   (R-multiple: 1.0 = hit TP1, -1.0 = stopped out, etc.)
 // }
 
 function readTrades() {
@@ -1335,6 +1414,11 @@ function logTrade(price, trigger, setup) {
       macd4hBullish: setup._macd4h  != null ? setup._macd4h.bullish : null,
       rsi12h:        setup._rsi12h  != null ? Math.round(setup._rsi12h) : null,
     },
+    // Confirmation tracking — did the 30M trigger bar actually close above entry?
+    // Populated by checkConfirmation() on subsequent polls, not at signal time.
+    confirmed:       false,
+    confirmedAt:     null,
+    confirmedPrice:  null,
     outcome:  null,
     closedAt: null,
     pnlR:     null,
@@ -1343,17 +1427,54 @@ function logTrade(price, trigger, setup) {
   log(`Trade logged: ${id}`);
 }
 
-// Check open trades against current price and mark outcomes automatically.
-// Called every poll — only processes trades where outcome is still null.
-// R-multiples: TP1=rr1, TP2=rr2, TP3=rr3, stop=-1.0
-function updateOutcomes(currentPrice) {
+// ─── Bar-accurate outcome detection ──────────────────────────────────────────
+//
+// Replaces spot-price polling. For each open trade, fetches 30M OHLCV bars
+// from the bar AFTER the signal fired up to now, then walks bar-by-bar:
+//
+//   Long:  if bar.low <= stop  → LOSS  (stop hit before TP on ambiguous bars)
+//          elif bar.high >= tp1/tp2/tp3 → WIN at highest TP reached
+//
+//   Short: if bar.high >= stop → LOSS
+//          elif bar.low <= tp1/tp2/tp3  → WIN at lowest TP reached
+//
+// On a bar where BOTH stop and a TP are crossed (a big candle), stop wins —
+// conservative but honest. This prevents phantom TP hits on stop-out candles.
+//
+// Bars since signal: capped at 336 (7 days × 48 × 30M bars) — more than enough
+// for any trade to resolve. Older open trades expire after 30 days as before.
+
+async function updateOutcomes(client) {
   const trades = readTrades();
   let changed = false;
+
+  // Collect open trades that need checking
+  const open = trades.filter(t => t.outcome === null);
+  if (open.length === 0) return;
+
+  // Switch to 30M and fetch enough bars to cover all open trades
+  // (we always work on the 30M timeframe for outcome detection)
+  const originalTF = await cdpEval(client, GET_TF_EXPR).catch(() => '30');
+  await cdpEval(client, buildSetTFExpr('30'));
+  await new Promise(r => setTimeout(r, 800));
+
+  // Fetch last 336 bars (7 days of 30M) — raw OHLCV
+  const bars = await cdpEval(client, buildOHLCVExpr(336)).catch(() => []);
+
+  // Restore original timeframe
+  if (originalTF && originalTF !== '30') {
+    await cdpEval(client, buildSetTFExpr(originalTF));
+  }
+
+  if (!bars || bars.length === 0) {
+    log('updateOutcomes: no bar data returned — skipping this cycle');
+    return;
+  }
 
   for (const t of trades) {
     if (t.outcome !== null) continue;
 
-    // Expire trades older than 30 days with no outcome — treat as no-trade
+    // Expire after 30 days
     const age = Date.now() - new Date(t.firedAt).getTime();
     if (age > 30 * 24 * 60 * 60 * 1000) {
       t.outcome  = 'expired';
@@ -1364,33 +1485,71 @@ function updateOutcomes(currentPrice) {
       continue;
     }
 
-    const price = currentPrice;
-    if (t.direction === 'long') {
-      if (price <= t.stop) {
-        t.outcome = 'stop'; t.pnlR = -1.0;
-      } else if (price >= t.tp3) {
-        t.outcome = 'tp3'; t.pnlR = parseFloat(t.rr3);
-      } else if (price >= t.tp2) {
-        t.outcome = 'tp2'; t.pnlR = parseFloat(t.rr2);
-      } else if (price >= t.tp1) {
-        t.outcome = 'tp1'; t.pnlR = parseFloat(t.rr1);
-      }
-    } else {
-      if (price >= t.stop) {
-        t.outcome = 'stop'; t.pnlR = -1.0;
-      } else if (price <= t.tp3) {
-        t.outcome = 'tp3'; t.pnlR = parseFloat(t.rr3);
-      } else if (price <= t.tp2) {
-        t.outcome = 'tp2'; t.pnlR = parseFloat(t.rr2);
-      } else if (price <= t.tp1) {
-        t.outcome = 'tp1'; t.pnlR = parseFloat(t.rr1);
+    // Only look at bars that closed AFTER the signal fired
+    const signalTs = new Date(t.firedAt).getTime() / 1000; // seconds
+    const relevantBars = bars.filter(b => b.time > signalTs);
+    if (relevantBars.length === 0) continue;
+
+    const stop = t.stop;
+    const tp1  = t.tp1;
+    const tp2  = t.tp2;
+    const tp3  = t.tp3;
+    const rr1  = parseFloat(t.rr1);
+    const rr2  = parseFloat(t.rr2);
+    const rr3  = parseFloat(t.rr3);
+
+    let outcome = null;
+    let pnlR    = null;
+    let closedBarTime = null;
+
+    for (const bar of relevantBars) {
+      if (t.direction === 'long') {
+        const stopHit = bar.low  <= stop;
+        const tp3Hit  = bar.high >= tp3;
+        const tp2Hit  = bar.high >= tp2;
+        const tp1Hit  = bar.high >= tp1;
+
+        if (stopHit && !tp1Hit) {
+          // Stop hit, no TP reached on this bar
+          outcome = 'stop'; pnlR = -1.0; closedBarTime = bar.time; break;
+        } else if (tp3Hit) {
+          outcome = 'tp3'; pnlR = rr3; closedBarTime = bar.time; break;
+        } else if (tp2Hit) {
+          outcome = 'tp2'; pnlR = rr2; closedBarTime = bar.time; break;
+        } else if (tp1Hit) {
+          outcome = 'tp1'; pnlR = rr1; closedBarTime = bar.time; break;
+        } else if (stopHit) {
+          // Both stop and tp1+ hit on same bar — stop wins (conservative)
+          outcome = 'stop'; pnlR = -1.0; closedBarTime = bar.time; break;
+        }
+      } else {
+        const stopHit = bar.high >= stop;
+        const tp3Hit  = bar.low  <= tp3;
+        const tp2Hit  = bar.low  <= tp2;
+        const tp1Hit  = bar.low  <= tp1;
+
+        if (stopHit && !tp1Hit) {
+          outcome = 'stop'; pnlR = -1.0; closedBarTime = bar.time; break;
+        } else if (tp3Hit) {
+          outcome = 'tp3'; pnlR = rr3; closedBarTime = bar.time; break;
+        } else if (tp2Hit) {
+          outcome = 'tp2'; pnlR = rr2; closedBarTime = bar.time; break;
+        } else if (tp1Hit) {
+          outcome = 'tp1'; pnlR = rr1; closedBarTime = bar.time; break;
+        } else if (stopHit) {
+          outcome = 'stop'; pnlR = -1.0; closedBarTime = bar.time; break;
+        }
       }
     }
 
-    if (t.outcome !== null) {
-      t.closedAt = new Date().toISOString();
-      changed    = true;
-      log(`Trade ${t.id} closed: ${t.outcome} | R: ${t.pnlR}`);
+    if (outcome !== null) {
+      t.outcome  = outcome;
+      t.pnlR     = pnlR;
+      t.closedAt = closedBarTime
+        ? new Date(closedBarTime * 1000).toISOString()
+        : new Date().toISOString();
+      changed = true;
+      log(`Trade ${t.id} closed: ${outcome} | R: ${pnlR} | bar: ${t.closedAt}`);
     }
   }
 
@@ -1521,8 +1680,11 @@ async function main() {
   indicators.vrvpLevels  = computeVRVPLevels(studies._vrvpRaw);
   log(`CVD: ${indicators.cvd} | OI: ${indicators.oi} (${indicators.oiTrend ?? 'no trend yet'}) | VWAP: ${indicators.vwap} | Weekly: ${indicators.weeklyTrend ?? 'n/a'}`);
 
-  // Always update outcomes on open trades
-  updateOutcomes(price);
+  // Always update outcomes on open trades (bar-accurate — uses CDP)
+  await updateOutcomes(client);
+
+  // Track 30M confirmation closes for unconfirmed open trades
+  await checkConfirmation(client, indicators);
 
   // 7. Check if any alerted levels have been broken
   const invalidations = checkInvalidations(price, indicators);
