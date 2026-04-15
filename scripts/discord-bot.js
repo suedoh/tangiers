@@ -28,9 +28,13 @@
  * In Discord, type any of:
  *   !analyze          → full MTF analysis + verdict + trade plan
  *   !mtf              → same
- *   !analyze status   → quick price + nearest zone check (no full sweep)
  *   !stop             → pause all Discord notifications (signals, errors, alerts)
  *   !start            → resume notifications
+ *   !trades           → list open trades from trades.json with current status
+ *
+ * Phase 2 commands (wired, activate once Phase 1 data is validated):
+ *   !took <id>        → log that you entered on a system signal (writes my-trades.json)
+ *   !exit tp1|tp2|tp3|stop|manual <price>  → log your actual exit
  *
  * ─── CRON ENTRY (added automatically when you run setup) ──────────────────
  *
@@ -46,6 +50,8 @@ const ROOT              = path.resolve(__dirname, '..');
 const ENV_FILE          = path.join(ROOT, '.env');
 const STATE_FILE        = path.join(ROOT, '.discord-bot-state.json');
 const TRIGGER_STATE     = path.join(ROOT, '.trigger-state.json');
+const TRADES_FILE       = path.join(ROOT, 'trades.json');
+const MY_TRADES_FILE    = path.join(ROOT, 'my-trades.json');
 const PAUSE_FILE        = path.join(ROOT, '.discord-paused');
 const NOTIFY            = path.join(ROOT, 'scripts', 'discord-notify.sh');
 const ANALYZE           = path.join(ROOT, 'scripts', 'mtf-analyze.js');
@@ -210,6 +216,163 @@ async function handleAnalyze(user) {
 
   notify(vType, reportText);
   console.log(`[discord-bot] Analysis posted to Discord as [${vType}]`);
+}
+
+// ─── !trades handler ─────────────────────────────────────────────────────────
+
+function readTrades() {
+  try { return JSON.parse(fs.readFileSync(TRADES_FILE, 'utf8')); } catch { return []; }
+}
+
+function readMyTrades() {
+  try { return JSON.parse(fs.readFileSync(MY_TRADES_FILE, 'utf8')); } catch { return []; }
+}
+
+function writeMyTrades(t) {
+  try { fs.writeFileSync(MY_TRADES_FILE, JSON.stringify(t, null, 2)); } catch {}
+}
+
+async function handleTrades(user) {
+  console.log(`[discord-bot] !trades from ${user}`);
+  const trades = readTrades();
+  const open   = trades.filter(t => t.outcome === null);
+  const recent = trades
+    .filter(t => t.outcome !== null && t.outcome !== 'expired')
+    .sort((a, b) => new Date(b.closedAt || b.firedAt) - new Date(a.closedAt || a.firedAt))
+    .slice(0, 5);
+
+  if (trades.length === 0) {
+    await sendMessage('📭 No trades logged yet — waiting for first signal.');
+    return;
+  }
+
+  const lines = [];
+
+  if (open.length > 0) {
+    lines.push(`**OPEN TRADES (${open.length})**`);
+    for (const t of open) {
+      const age  = Math.round((Date.now() - new Date(t.firedAt).getTime()) / 3600000);
+      const conf = t.confirmed ? `✅ confirmed ${t.confirmedAt?.slice(11,16)} UTC` : '⏳ awaiting 30M confirmation';
+      const dir  = t.direction === 'long' ? '🟢' : '🔴';
+      lines.push(
+        `${dir} **${t.zone?.type ?? '?'} ${t.direction.toUpperCase()}** fired ${t.firedAt.slice(0,10)} (${age}h ago)`,
+        `  Entry $${t.entry?.toLocaleString()} | Stop $${t.stop?.toLocaleString()} | TP1 $${t.tp1?.toLocaleString()} | TP2 $${t.tp2?.toLocaleString()}`,
+        `  ${conf}`,
+        `  ID: \`${t.id}\``
+      );
+    }
+  } else {
+    lines.push('**OPEN TRADES** — none');
+  }
+
+  if (recent.length > 0) {
+    lines.push('', `**LAST ${recent.length} CLOSED**`);
+    for (const t of recent) {
+      const pnl  = t.pnlR != null ? (t.pnlR >= 0 ? `+${t.pnlR.toFixed(2)}R` : `${t.pnlR.toFixed(2)}R`) : '?R';
+      const icon = t.outcome?.startsWith('tp') ? '✅' : '❌';
+      const conf = t.confirmed ? '✅' : '⬜';
+      const dir  = t.direction === 'long' ? '🟢' : '🔴';
+      lines.push(`${icon} ${dir} ${t.zone?.type ?? '?'} ${t.direction.toUpperCase()} ${t.firedAt.slice(0,10)} → **${pnl}** (${t.outcome}) conf:${conf}`);
+    }
+  }
+
+  lines.push('', `*Total in file: ${trades.length} | Use \`!took <id>\` to log your entry (Phase 2)*`);
+  await sendMessage(lines.join('\n'));
+}
+
+// ─── Phase 2: !took / !exit handlers ─────────────────────────────────────────
+// These are wired and ready but intentionally inactive until Phase 1 data
+// (bar-accurate outcomes + confirmation tracking) has been validated over
+// at least 2 weeks of live signals. Activate by removing the early-return.
+
+async function handleTook(user, args) {
+  // Phase 2 — not yet active
+  await sendMessage('⏸️ **!took** is a Phase 2 feature — activate once Phase 1 data is validated.\n*Run `!trades` to review current open signals.*');
+  return;
+
+  /* Phase 2 implementation (unreachable until activated):
+  const tradeId = args[0];
+  if (!tradeId) {
+    await sendMessage('Usage: `!took <trade-id>` — get the ID from `!trades`');
+    return;
+  }
+  const trades = readTrades();
+  const trade  = trades.find(t => t.id === tradeId);
+  if (!trade) {
+    await sendMessage(`❌ Trade \`${tradeId}\` not found. Use \`!trades\` to list open signals.`);
+    return;
+  }
+  const myTrades = readMyTrades();
+  if (myTrades.find(t => t.systemId === tradeId)) {
+    await sendMessage(`⚠️ You already logged an entry for \`${tradeId}\`.`);
+    return;
+  }
+  const entry = {
+    systemId:  tradeId,
+    direction: trade.direction,
+    zone:      trade.zone,
+    firedAt:   trade.firedAt,
+    tookAt:    new Date().toISOString(),
+    tookBy:    user,
+    entry:     trade.entry,
+    stop:      trade.stop,
+    tp1: trade.tp1, tp2: trade.tp2, tp3: trade.tp3,
+    rr1: trade.rr1, rr2: trade.rr2, rr3: trade.rr3,
+    outcome:   null,
+    exitPrice: null,
+    pnlR:      null,
+    exitAt:    null,
+  };
+  myTrades.push(entry);
+  writeMyTrades(myTrades);
+  await sendMessage(`✅ Logged entry on ${trade.direction.toUpperCase()} ${trade.zone?.type} \`${tradeId}\`\nEntry $${trade.entry?.toLocaleString()} | Stop $${trade.stop?.toLocaleString()} | TP1 $${trade.tp1?.toLocaleString()}`);
+  */
+}
+
+async function handleExit(user, args) {
+  // Phase 2 — not yet active
+  await sendMessage('⏸️ **!exit** is a Phase 2 feature — activate once Phase 1 data is validated.');
+  return;
+
+  /* Phase 2 implementation (unreachable until activated):
+  // Usage: !exit tp1 | !exit tp2 | !exit tp3 | !exit stop | !exit manual 75800
+  const outcome   = args[0]?.toLowerCase();
+  const manualPx  = args[1] ? parseFloat(args[1]) : null;
+  const valid     = ['tp1','tp2','tp3','stop','manual'];
+  if (!outcome || !valid.includes(outcome)) {
+    await sendMessage(`Usage: \`!exit tp1|tp2|tp3|stop|manual <price>\``);
+    return;
+  }
+  if (outcome === 'manual' && !manualPx) {
+    await sendMessage('Usage: `!exit manual <price>` — provide the exit price');
+    return;
+  }
+  const myTrades = readMyTrades();
+  const open = myTrades.filter(t => t.outcome === null);
+  if (open.length === 0) {
+    await sendMessage('No open trades in my-trades.json. Use `!took <id>` first.');
+    return;
+  }
+  // Exit the most recently opened trade
+  const trade = open[open.length - 1];
+  const exitPrice = outcome === 'manual' ? manualPx
+    : outcome === 'tp1' ? trade.tp1
+    : outcome === 'tp2' ? trade.tp2
+    : outcome === 'tp3' ? trade.tp3
+    : trade.stop;
+  const rr = outcome === 'stop' ? -1.0
+    : outcome === 'tp1' ? parseFloat(trade.rr1)
+    : outcome === 'tp2' ? parseFloat(trade.rr2)
+    : outcome === 'tp3' ? parseFloat(trade.rr3)
+    : exitPrice && trade.entry ? parseFloat(((exitPrice - trade.entry) / Math.abs(trade.entry - trade.stop)).toFixed(2)) : null;
+  trade.outcome   = outcome;
+  trade.exitPrice = exitPrice;
+  trade.pnlR      = rr;
+  trade.exitAt    = new Date().toISOString();
+  writeMyTrades(myTrades);
+  const pnlStr = rr != null ? (rr >= 0 ? `+${rr.toFixed(2)}R` : `${rr.toFixed(2)}R`) : '?R';
+  await sendMessage(`${rr >= 0 ? '✅' : '❌'} Exit logged — ${trade.direction.toUpperCase()} ${trade.zone?.type} → **${pnlStr}** (${outcome} @ $${exitPrice?.toLocaleString()})`);
+  */
 }
 
 // ─── Emoji Reaction Polling ───────────────────────────────────────────────────
@@ -392,6 +555,21 @@ async function main() {
 
     if (/^!start\b/i.test(text)) {
       await handleStart(user);
+      break;
+    }
+
+    if (/^!trades\b/i.test(text)) {
+      await handleTrades(user);
+      break;
+    }
+
+    if (/^!took\b/i.test(text)) {
+      await handleTook(user, text.split(/\s+/).slice(1));
+      break;
+    }
+
+    if (/^!exit\b/i.test(text)) {
+      await handleExit(user, text.split(/\s+/).slice(1));
       break;
     }
 
