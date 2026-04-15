@@ -64,14 +64,37 @@ function log(msg) {
 
 // ─── Discord ─────────────────────────────────────────────────────────────────
 
+// Store a Discord message ID in state so discord-bot.js reaction polling can
+// detect 📊 reactions on ANY notification type, not just main signals.
+function storeMessageId(msgId, label) {
+  try {
+    const st = readState();
+    if (!Array.isArray(st._signal_messages)) st._signal_messages = [];
+    st._signal_messages.push({
+      id:       msgId,
+      firedAt:  Date.now(),
+      label:    label || 'notification',
+      analyzed: false,
+    });
+    // Keep only last 20
+    if (st._signal_messages.length > 20) st._signal_messages = st._signal_messages.slice(-20);
+    writeState(st);
+  } catch (e) {
+    log(`storeMessageId failed: ${e.message}`);
+  }
+}
+
 function notify(type, message, onMessageId) {
   try {
     const out = execFileSync('bash', [NOTIFY, type, message], { stdio: 'pipe', encoding: 'utf8' });
-    // Parse MSG_ID:xxx line from notify script output
     const idMatch = (out || '').match(/^MSG_ID:(.+)$/m);
     const msgId = idMatch ? idMatch[1].trim() : null;
     log(`Discord [${type}] sent${msgId ? ` id=${msgId}` : ''}`);
-    if (msgId && onMessageId) onMessageId(msgId);
+    if (msgId) {
+      // Always store for reaction polling — every notification type supports 📊
+      storeMessageId(msgId, type);
+      if (onMessageId) onMessageId(msgId);
+    }
   } catch (e) {
     log(`Discord notify failed: ${e.message}`);
   }
@@ -1771,23 +1794,9 @@ async function main() {
         triggered = true;
 
       } else {
-        // Fire the signal
+        // Fire the signal — storeMessageId() is called automatically inside notify()
         const message = formatSetupMessage(price, trigger, setup);
-        notify(setup.direction, message, (msgId) => {
-          const st = readState();
-          if (!Array.isArray(st._signal_messages)) st._signal_messages = [];
-          st._signal_messages.push({
-            id:        msgId,
-            firedAt:   Date.now(),
-            levelKey,
-            direction: setup.direction,
-            analyzed:  false,
-          });
-          // Keep only last 20 signal messages
-          if (st._signal_messages.length > 20) st._signal_messages = st._signal_messages.slice(-20);
-          writeState(st);
-          log(`Stored signal message id=${msgId} for reaction polling`);
-        });
+        notify(setup.direction, message);
         markAlerted(levelKey, setup.direction, trigger);
         logTrade(price, trigger, setup);
         if (!indicators.oiTrend || indicators.oiTrend === 'flat') {
