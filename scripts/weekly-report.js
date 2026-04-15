@@ -154,6 +154,49 @@ function analyse(trades, days) {
     }
   }
 
+  // Streak — current consecutive wins or losses in confirmed closed trades
+  // Walk from most recent backward and count until the streak breaks
+  const streakTrades = [...confirmedClosed]
+    .filter(t => t.closedAt)
+    .sort((a, b) => new Date(b.closedAt) - new Date(a.closedAt));
+  let streak = 0, streakType = null;
+  for (const t of streakTrades) {
+    const won = t.outcome?.startsWith('tp');
+    if (streakType === null) { streakType = won ? 'win' : 'loss'; streak = 1; }
+    else if ((streakType === 'win') === won) streak++;
+    else break;
+  }
+
+  // Time-to-outcome — avg hours from signal fired to outcome bar (confirmed only)
+  const timesToClose = confirmedClosed
+    .filter(t => t.firedAt && t.closedAt)
+    .map(t => (new Date(t.closedAt) - new Date(t.firedAt)) / 3600000); // hours
+  const avgHoursToClose = timesToClose.length
+    ? timesToClose.reduce((a, b) => a + b, 0) / timesToClose.length
+    : null;
+  const winTimes  = confirmedClosed
+    .filter(t => t.outcome?.startsWith('tp') && t.firedAt && t.closedAt)
+    .map(t => (new Date(t.closedAt) - new Date(t.firedAt)) / 3600000);
+  const lossTimes = confirmedClosed
+    .filter(t => t.outcome === 'stop' && t.firedAt && t.closedAt)
+    .map(t => (new Date(t.closedAt) - new Date(t.firedAt)) / 3600000);
+  const avgWinHours  = winTimes.length  ? winTimes.reduce((a,b)=>a+b,0)  / winTimes.length  : null;
+  const avgLossHours = lossTimes.length ? lossTimes.reduce((a,b)=>a+b,0) / lossTimes.length : null;
+
+  // ── Phase 2 stub: your execution track ──────────────────────────────────────
+  // Reads my-trades.json once it exists. All values are null until !took / !exit
+  // are activated (remove the early-return guards in discord-bot.js handleTook/handleExit).
+  // TODO (Phase 2): uncomment and wire into formatReport()
+  //
+  // const MY_TRADES_FILE = path.join(ROOT, 'my-trades.json');
+  // function readMyTrades() { try { return JSON.parse(fs.readFileSync(MY_TRADES_FILE,'utf8')); } catch { return []; } }
+  // const myTrades = readMyTrades();
+  // const myWindow = myTrades.filter(t => new Date(t.tookAt).getTime() >= cutoff);
+  // const myClosed = myWindow.filter(t => t.outcome !== null);
+  // const myTrack  = calcTrack(myClosed);
+  // const selectivity = allWindow > 0 ? myWindow.length / allWindow : null; // % of signals you took
+  // return { ..., myTrack, selectivity };
+
   return {
     days,
     allWindow, open: open.length, expired: expired.length,
@@ -162,6 +205,8 @@ function analyse(trades, days) {
     confLongs: confLongs.length, confLongWins: confLongWins.length,
     confShorts: confShorts.length, confShortWins: confShortWins.length,
     byLevel, best, worst, criteriaStats,
+    streak, streakType,
+    avgHoursToClose, avgWinHours, avgLossHours,
   };
 }
 
@@ -230,12 +275,37 @@ function formatReport(s) {
   const bestLine  = s.best  ? `  ${s.best.direction.toUpperCase()} ${s.best.zone?.type ?? ''} ${s.best.firedAt.slice(0,10)} → ${fmt(s.best.pnlR)} (${s.best.outcome})` : '  —';
   const worstLine = s.worst ? `  ${s.worst.direction.toUpperCase()} ${s.worst.zone?.type ?? ''} ${s.worst.firedAt.slice(0,10)} → ${fmt(s.worst.pnlR)} (${s.worst.outcome})` : '  —';
 
+  // ── Streak ──
+  const streakLine = s.streakType
+    ? `Current streak: **${s.streak} ${s.streakType}${s.streak > 1 ? 's' : ''}** in a row (confirmed trades)`
+    : 'Current streak: — (no confirmed closed trades yet)';
+
+  // ── Time to outcome ──
+  const h = n => n != null ? `${n.toFixed(1)}h` : '—';
+  const timeLines = [
+    `Avg time to close: ${h(s.avgHoursToClose)} | Wins: ${h(s.avgWinHours)} | Losses: ${h(s.avgLossHours)}`,
+    s.avgWinHours != null && s.avgLossHours != null
+      ? (s.avgWinHours < s.avgLossHours
+          ? `  ✅ Wins resolve faster than losses — momentum-driven, healthy`
+          : `  ⚠️ Losses resolving faster — stops being hit quickly, review stop placement`)
+      : '',
+  ].filter(Boolean).join('\n');
+
   // ── Confirmation filter value ──
   const filterNote = conf.winRate != null && unconf.winRate != null
     ? (conf.winRate > unconf.winRate
         ? `✅ Confirmation filter adds +${Math.round((conf.winRate - unconf.winRate) * 100)}pp — keep waiting for the close`
         : `⚠️ Confirmation filter not adding value this week — review entry criteria`)
     : '';
+
+  // ── Phase 2 execution stub ──
+  // Replace this block once !took / !exit are activated in discord-bot.js.
+  // When my-trades.json has data, uncomment the myTrack/selectivity lines in analyse()
+  // and replace this stub with real numbers.
+  const executionLines = [
+    `*Phase 2 not yet active — use \`!took <id>\` and \`!exit\` to track your entries.*`,
+    `*Once active: your win rate vs system win rate, selectivity %, and R comparison will appear here.*`,
+  ].join('\n');
 
   const noDataNote = all.count === 0
     ? '\n⚠️ No closed trades yet — outcomes populate automatically each poll cycle.'
@@ -259,10 +329,18 @@ function formatReport(s) {
     `**MOST PREDICTIVE CRITERIA** (confirmed trades)`,
     criteriaLines,
     ``,
+    `**TIME TO OUTCOME** (confirmed trades)`,
+    timeLines,
+    ``,
+    streakLine,
+    ``,
     `**BEST TRADE**`,
     bestLine,
     `**WORST TRADE**`,
     worstLine,
+    ``,
+    `**YOUR EXECUTION** (Phase 2)`,
+    executionLines,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
     noDataNote,
   ].filter(l => l !== undefined).join('\n');
