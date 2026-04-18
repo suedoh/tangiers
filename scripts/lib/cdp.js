@@ -106,6 +106,61 @@ async function setTimeframe(client, tf, timeoutMs = 5000) {
   await sleep(800);
 }
 
+/**
+ * Switch to a saved TradingView layout by name.
+ * Navigates to the layout URL directly then waits for chart to reload.
+ * Layout IDs are stored in the BZ_LAYOUT_ID / ACE_LAYOUT_ID env vars.
+ */
+function buildSwitchLayoutExpr(layoutId) {
+  return `(function(){
+    try {
+      var tm = window.__tvWidgetsMap || {};
+      var keys = Object.keys(tm);
+      if (keys.length > 0) {
+        var w = tm[keys[0]];
+        if (w && w.activeChart && w.activeChart().getChartLayoutId) {
+          // Already on this layout
+          if (w.activeChart().getChartLayoutId() === ${JSON.stringify(layoutId)}) return 'already';
+        }
+      }
+      // Navigate to layout URL
+      window.location.replace('https://www.tradingview.com/chart/${layoutId === '__placeholder__' ? '' : ''+layoutId}/');
+      return 'navigating';
+    } catch(e) { return 'error:' + e.message; }
+  })()`;
+}
+
+async function switchLayout(client, layoutId, expectedSymbol, timeoutMs = 15000) {
+  // Navigate to layout URL via CDP Page navigation (safer than JS redirect)
+  await client.Page.navigate({ url: `https://www.tradingview.com/chart/${layoutId}/` });
+  // Wait for chart to load and symbol to appear
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await sleep(600);
+    try {
+      const sym = await getSymbol(client);
+      if (sym && (!expectedSymbol || sym === expectedSymbol || sym.endsWith(expectedSymbol.split(':')[1]))) return;
+    } catch {}
+  }
+  throw new Error(`Layout switch to ${layoutId} timed out after ${timeoutMs}ms`);
+}
+
+/**
+ * Poll getQuote until a valid price is returned.
+ * Ensures bars are actually loaded after a symbol/layout switch.
+ */
+async function waitForPrice(client, timeoutMs = 12000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await sleep(400);
+    try {
+      const q = await getQuote(client);
+      if (q?.last && q.last > 0) return q;
+    } catch {}
+  }
+  throw new Error('Timed out waiting for price data to load');
+}
+
 // ─── Quote ───────────────────────────────────────────────────────────────────
 
 const QUOTE_EXPR = `(function(){
@@ -327,6 +382,7 @@ module.exports = {
   cdpConnect, cdpEval,
   getSymbol, setSymbol,
   getTimeframe, setTimeframe,
+  switchLayout, waitForPrice,
   getQuote, getStudyValues,
   getPineBoxes, getPineLabels,
   getOHLCV, calcATR,

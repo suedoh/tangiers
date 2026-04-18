@@ -26,7 +26,7 @@ const { spawnSync } = require('child_process');
 const { loadEnv, ROOT }  = require('../lib/env');
 const { acquireLock, releaseLock } = require('../lib/lock');
 const {
-  cdpConnect, getSymbol, setSymbol, setTimeframe,
+  cdpConnect, getSymbol, setSymbol, setTimeframe, switchLayout, waitForPrice,
   getQuote, getStudyValues, getPineBoxes,
   getOHLCV, calcATR, sleep,
 } = require('../lib/cdp');
@@ -45,6 +45,8 @@ if (process.env.PRIMARY === 'false') {
 }
 
 const BZ_SYMBOL       = 'NYMEX:BZ1!';
+const BZ_LAYOUT_ID    = process.env.BZ_LAYOUT_ID  || null;
+const ACE_LAYOUT_ID   = process.env.ACE_LAYOUT_ID || null;
 const BZ_SIGNALS_HOOK = process.env.BZ_DISCORD_SIGNALS_WEBHOOK;
 const STATE_FILE      = path.join(ROOT, '.bz-trigger-state.json');
 const ANALYZE_SCRIPT  = path.join(__dirname, 'analyze.js');
@@ -174,6 +176,7 @@ async function main() {
 
   let client;
   let originalSymbol;
+  let switchedLayout = false;
 
   try {
     const state = readState();
@@ -187,17 +190,27 @@ async function main() {
     client = await cdpConnect();
     originalSymbol = await getSymbol(client);
 
-    await setSymbol(client, BZ_SYMBOL);
+    const alreadyOnBZ = originalSymbol === BZ_SYMBOL || (originalSymbol || '').endsWith('BZ1!');
+    if (!alreadyOnBZ) {
+      if (BZ_LAYOUT_ID) {
+        await client.Page.enable();
+        await switchLayout(client, BZ_LAYOUT_ID, BZ_SYMBOL);
+        switchedLayout = true;
+      } else {
+        await setSymbol(client, BZ_SYMBOL);
+      }
+    }
+
     await setTimeframe(client, '240');
 
-    const [quote, studies, boxes, ohlcv] = await Promise.all([
-      getQuote(client),
+    const quote  = await waitForPrice(client);
+    const [studies, boxes, ohlcv] = await Promise.all([
       getStudyValues(client),
       getPineBoxes(client, 'LuxAlgo'),
       getOHLCV(client, 20),
     ]);
 
-    const price = quote?.last;
+    const price = quote.last;
     if (!price) throw new Error('Could not read price');
 
     const { atr14, buffer } = calcATR(ohlcv);
@@ -276,8 +289,13 @@ async function main() {
     }
   } finally {
     try {
-      if (client && originalSymbol && originalSymbol !== BZ_SYMBOL) {
-        await setSymbol(client, originalSymbol);
+      if (client) {
+        if (switchedLayout && ACE_LAYOUT_ID) {
+          await client.Page.enable();
+          await switchLayout(client, ACE_LAYOUT_ID);
+        } else if (!switchedLayout && originalSymbol && originalSymbol !== BZ_SYMBOL) {
+          await setSymbol(client, originalSymbol);
+        }
       }
     } catch {}
     try { if (client) await client.close(); } catch {}
