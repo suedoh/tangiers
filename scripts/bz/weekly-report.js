@@ -4,7 +4,7 @@
 /**
  * BZ! — Weekly War Report
  *
- * Posts an institutional-grade weekly preview to #bz!-weekly-war-report
+ * Posts an institutional-grade weekly preview to ##bz-weekly-war-report
  * every Sunday at 5:00pm ET (before Asia open).
  *
  * Data sources:
@@ -210,7 +210,7 @@ function buildReport({ price, ind, boxes4h, boxes1h, labels4h, atr14, buffer, in
     `• RSS feeds:      Active (7 feeds, 60-second polling)`,
     `• Geopolitical:   ${GEO_FLAG ? '🔴 ACTIVE — long catalyst premium on' : '⚪ Inactive'}`,
     '',
-    `*Type \`!analyze\` in #bz!-signals at any time for a fresh MTF read.*`,
+    `*Type \`!analyze\` in ##bz-signals at any time for a fresh MTF read.*`,
     `*Type \`!report\` to regenerate this report on demand.*`,
   ].filter(l => l !== null && l !== undefined);
 
@@ -282,13 +282,13 @@ async function main() {
 
     const footer = `BZ! • Weekly War Report • ${new Date().toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
     await postWebhook(WAR_HOOK, 'info', report, footer);
-    log('Weekly war report posted to #bz!-weekly-war-report');
+    log('Weekly war report posted to ##bz-weekly-war-report');
 
     // Also post a summary card to signals channel
     if (SIGNALS_HOOK) {
       const summary = [
         `📋 **BZ! Weekly War Report Posted**`,
-        `See **#bz!-weekly-war-report** for the full institutional preview.`,
+        `See **##bz-weekly-war-report** for the full institutional preview.`,
         `Price: $${price.toFixed(2)} | Bias: ${ind.vwap ? (price > ind.vwap ? '🟢 Bullish' : '🔴 Bearish') : '⚪ Neutral'}`,
         GEO_FLAG ? `⚠️ Geopolitical flag ACTIVE — active conflict, elevated volatility` : '',
       ].filter(Boolean).join('\n');

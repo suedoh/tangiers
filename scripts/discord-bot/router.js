@@ -8,7 +8,7 @@
  *
  * Convention: channel names must start with the instrument prefix.
  *   btc-signals, btc-backtest, btc-weekly-war-report → btc handler
- *   bz!-signals, bz!-backtest, bz!-weekly-war-report → bz handler
+ *   #bz-signals, #bz-backtest, #bz-weekly-war-report → bz handler
  */
 
 const btcHandler    = require('./handlers/btc');
@@ -26,7 +26,7 @@ const ROUTES = [
  * Resolve the correct handler for a given channel name.
  * Falls back to sharedHandler for commands that work in any channel (!stop, !start).
  *
- * @param {string} channelName  e.g. "bz!-signals", "btc-signals"
+ * @param {string} channelName  e.g. "#bz-signals", "btc-signals"
  * @returns {object}            Handler module with a handle(message, client) method
  */
 function resolve(channelName) {
@@ -41,8 +41,10 @@ function resolve(channelName) {
  */
 function allChannelIds() {
   const ids = [];
-  if (process.env.DISCORD_CHANNEL_ID)     ids.push({ id: process.env.DISCORD_CHANNEL_ID,     prefix: 'btc' });
-  if (process.env.BZ_DISCORD_SIGNALS_CHANNEL_ID) ids.push({ id: process.env.BZ_DISCORD_SIGNALS_CHANNEL_ID, prefix: 'bz' });
+  if (process.env.DISCORD_CHANNEL_ID)              ids.push({ id: process.env.DISCORD_CHANNEL_ID,              prefix: 'btc' });
+  if (process.env.BZ_DISCORD_SIGNALS_CHANNEL_ID)   ids.push({ id: process.env.BZ_DISCORD_SIGNALS_CHANNEL_ID,   prefix: 'bz' });
+  if (process.env.BZ_DISCORD_WAR_REPORT_CHANNEL_ID) ids.push({ id: process.env.BZ_DISCORD_WAR_REPORT_CHANNEL_ID, prefix: 'bz' });
+  if (process.env.BZ_DISCORD_BACKTEST_CHANNEL_ID)  ids.push({ id: process.env.BZ_DISCORD_BACKTEST_CHANNEL_ID,  prefix: 'bz' });
   return ids;
 }
 

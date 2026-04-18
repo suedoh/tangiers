@@ -6,10 +6,10 @@
  *
  * Connects to TradingView via CDP, runs a 4H→1H→30M sweep on NYMEX:BZ1!,
  * synthesizes zones + indicators into a complete trade plan, and posts a
- * Catalyst card to #bz!-signals.
+ * Catalyst card to ##bz-signals.
  *
  * Called by:
- *   discord-bot (via !analyze [context] in #bz!-signals)
+ *   discord-bot (via !analyze [context] in ##bz-signals)
  *   news-watch.js (AIS or RSS trigger, context auto-generated)
  *
  * Args:
@@ -458,7 +458,7 @@ async function main() {
 
       const footer = `BZ! • NYMEX:BZ1! • ${new Date().toUTCString().slice(5, 25)} UTC`;
       const msgId  = await postWebhook(BZ_SIGNALS_HOOK, 'catalyst', card, footer);
-      log(`Catalyst card posted to #bz!-signals${msgId ? ' id=' + msgId : ''}`);
+      log(`Catalyst card posted to ##bz-signals${msgId ? ' id=' + msgId : ''}`);
 
       // Store message ID for 📊 reaction polling
       const state = readState();

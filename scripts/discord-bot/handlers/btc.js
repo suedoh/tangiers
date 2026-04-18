@@ -139,9 +139,9 @@ async function handleStatus(user, api) {
     [
       `📡 **BZ! Channels**`,
       SEP,
-      `**#bz!-signals** — Live alerts + \`!analyze [context]\` manual trigger`,
-      `**#bz!-weekly-war-report** — Sunday 5pm ET + \`!report\` manual trigger`,
-      `**#bz!-backtest** — Auto-logged signals + \`!took\` / \`!exit\` outcome tracking`,
+      `**##bz-signals** — Live alerts + \`!analyze [context]\` manual trigger`,
+      `**##bz-weekly-war-report** — Sunday 5pm ET + \`!report\` manual trigger`,
+      `**##bz-backtest** — Auto-logged signals + \`!took\` / \`!exit\` outcome tracking`,
     ].join('\n'),
   ];
 
