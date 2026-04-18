@@ -56,6 +56,20 @@ if (fs.existsSync(ENV_FILE)) {
     });
 }
 
+// ─── Guard: exit silently on machines without TradingView Desktop ─────────────
+// Set TRADINGVIEW_ENABLED=false in .env on any machine that does not run
+// TradingView Desktop locally (e.g. a collaborator's machine that only shares
+// the Discord webhooks). This prevents spurious CDP error alerts.
+if (process.env.TRADINGVIEW_ENABLED === 'false') {
+  console.log('[trigger-check] TRADINGVIEW_ENABLED=false — skipping run on this machine.');
+  process.exit(0);
+}
+
+if (process.env.PRIMARY === 'false') {
+  console.log('[trigger-check] PRIMARY=false — secondary machine, Discord posting disabled.');
+  process.exit(0);
+}
+
 // ─── Logging ─────────────────────────────────────────────────────────────────
 
 function log(msg) {
@@ -862,11 +876,11 @@ function evaluateSetup(price, trigger, indicators, levels) {
 
   let setupType, probability;
   if (autoPassed === autoTotal && autoTotal >= 3) {
-    setupType = 'A — Full Confluence'; probability = '~70%';
+    setupType = 'A — Full Confluence'; probability = 70;
   } else if (autoPassed >= autoTotal * 0.6) {
-    setupType = 'B — Partial Confluence'; probability = '~60%';
+    setupType = 'B — Partial Confluence'; probability = 60;
   } else {
-    setupType = 'C — Low Confluence'; probability = '~48%';
+    setupType = 'C — Low Confluence'; probability = 48;
   }
 
   return {
@@ -895,7 +909,7 @@ function formatSetupMessage(price, trigger, setup) {
     `$${tp1Price.toLocaleString()} (TP1)`,
   ].join(' | ');
 
-  const probNum = parseInt(probability, 10);
+  const probNum = typeof probability === 'number' ? probability : parseInt(probability, 10);
   const probLabel = probNum >= 70 ? 'High' : probNum >= 60 ? 'Moderate' : probNum >= 50 ? 'Low' : 'Poor';
 
   const criteriaLines = criteria.map(c => {
@@ -909,7 +923,7 @@ function formatSetupMessage(price, trigger, setup) {
     `${dirLabel} SIGNAL | BINANCE:BTCUSDT.P | ${ts} UTC`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
     `**Price** $${Math.round(price).toLocaleString()} | **${levelType}** ${levelStr}`,
-    `**Setup** ${setupType} | **Win Rate** ${probability} (${probLabel})`,
+    `**Setup** ${setupType} | **Win Rate** ~${probNum}% (${probLabel})`,
     ``,
     `**ENTRY**  $${entry.toLocaleString()}`,
     `**STOP**   $${stop.toLocaleString()}`,
@@ -1591,13 +1605,26 @@ async function main() {
     const { client: c } = await cdpConnect();
     client = c;
     log('CDP connected to TradingView');
+    // Clear any stale CDP error cooldown so next outage alerts immediately
+    const ts = readState(); delete ts._cdpErrorLastAlerted; writeState(ts);
   } catch (err) {
     if (err.code === 'CDP_UNAVAILABLE') {
-      errorAlert(
-        'Cannot reach TradingView Desktop (CDP port 9222 not responding)',
-        'CDP connection attempt',
-        'Open TradingView Desktop. If already open, restart it. Ensure Claude Desktop is running (it starts the MCP server).'
-      );
+      // Rate-limit this alert to once every 4 hours — prevents spam when TradingView
+      // stays closed (e.g. on a collaborator's machine that has no TradingView).
+      const ts = readState();
+      const lastAlerted = ts._cdpErrorLastAlerted || 0;
+      const CDP_ERROR_COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4 hours
+      if (Date.now() - lastAlerted >= CDP_ERROR_COOLDOWN_MS) {
+        ts._cdpErrorLastAlerted = Date.now();
+        writeState(ts);
+        errorAlert(
+          'Cannot reach TradingView Desktop (CDP port 9222 not responding)',
+          'CDP connection attempt',
+          'Open TradingView Desktop. If already open, restart it. Ensure Claude Desktop is running (it starts the MCP server).'
+        );
+      } else {
+        log('CDP unavailable — error cooldown active, skipping Discord alert');
+      }
     } else if (err.code === 'NO_TARGET') {
       errorAlert(
         'TradingView is running but no chart page found',
@@ -1691,9 +1718,7 @@ async function main() {
     process.exit(1);
   }
 
-  await client.close();
-
-  // 6. Parse indicators
+  // 6. Parse indicators (pure JS — no CDP needed)
   const indicators = parseStudies(studies);
   indicators.oiTrend     = getOITrend(indicators.oi);
   indicators.macd4h      = studies._macd4h     ?? null;
@@ -1703,11 +1728,12 @@ async function main() {
   indicators.vrvpLevels  = computeVRVPLevels(studies._vrvpRaw);
   log(`CVD: ${indicators.cvd} | OI: ${indicators.oi} (${indicators.oiTrend ?? 'no trend yet'}) | VWAP: ${indicators.vwap} | Weekly: ${indicators.weeklyTrend ?? 'n/a'}`);
 
-  // Always update outcomes on open trades (bar-accurate — uses CDP)
+  // Update outcomes and confirmations BEFORE closing the CDP connection —
+  // both functions use the client to fetch OHLCV bars from TradingView.
   await updateOutcomes(client);
-
-  // Track 30M confirmation closes for unconfirmed open trades
   await checkConfirmation(client, indicators);
+
+  await client.close();
 
   // 7. Check if any alerted levels have been broken
   const invalidations = checkInvalidations(price, indicators);

@@ -31,6 +31,7 @@
  *   !stop             → pause all Discord notifications (signals, errors, alerts)
  *   !start            → resume notifications
  *   !trades           → list open trades from trades.json with current status
+ *   !status           → post system briefing (what's built, channels, how to trade) to #general
  *
  * Phase 2 commands (wired, activate once Phase 1 data is validated):
  *   !took <id>        → log that you entered on a system signal (writes my-trades.json)
@@ -69,8 +70,14 @@ if (fs.existsSync(ENV_FILE)) {
     .forEach(l => { const i = l.indexOf('='); if (i > 0) process.env[l.slice(0,i).trim()] = l.slice(i+1).trim(); });
 }
 
-const BOT_TOKEN  = process.env.DISCORD_BOT_TOKEN;
-const CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
+const BOT_TOKEN      = process.env.DISCORD_BOT_TOKEN;
+const CHANNEL_ID     = process.env.DISCORD_CHANNEL_ID;
+const HELPER_WEBHOOK = process.env.DISCORD_HELPER;
+
+if (process.env.PRIMARY === 'false') {
+  console.log('[discord-bot] PRIMARY=false — secondary machine, Discord posting disabled.');
+  process.exit(0);
+}
 
 if (!BOT_TOKEN || BOT_TOKEN === 'your_token_here') {
   console.log('[discord-bot] DISCORD_BOT_TOKEN not configured. See setup instructions at top of this file.');
@@ -126,6 +133,34 @@ async function sendTyping() {
 // Post a message directly via bot token (separate from the webhook)
 async function sendMessage(content) {
   await discordRequest('POST', `/channels/${CHANNEL_ID}/messages`, { content });
+}
+
+// Post a message to an arbitrary webhook URL (used for !status → #general)
+function webhookPost(webhookUrl, content) {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify({ content });
+    const u       = new URL(webhookUrl);
+    const req = https.request({
+      hostname: u.hostname,
+      path:     u.pathname + u.search,
+      method:   'POST',
+      headers:  {
+        'Content-Type':   'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+        'User-Agent':     'AceTradingBot/1.0',
+      },
+    }, res => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        if (res.statusCode === 204 || res.statusCode === 200) { resolve(null); return; }
+        try { resolve(JSON.parse(data)); } catch { resolve(null); }
+      });
+    });
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
 }
 
 // ─── Notify (via existing webhook) ───────────────────────────────────────────
@@ -375,6 +410,93 @@ async function handleExit(user, args) {
   */
 }
 
+// ─── !status handler ─────────────────────────────────────────────────────────
+
+async function handleStatus(user) {
+  console.log(`[discord-bot] !status from ${user}`);
+
+  if (!HELPER_WEBHOOK) {
+    await sendMessage('❌ `DISCORD_HELPER` webhook not configured in `.env`');
+    return;
+  }
+
+  const SEP = '━━━━━━━━━━━━━━━━━━━━━━━━━━';
+
+  const msgs = [
+    // ── 1. What's built + roadmap ─────────────────────────────────────────────
+    [
+      `🤖 **Ace Trading System** — BTC/USDT Perpetual Futures`,
+      SEP,
+      `Automated 12H→4H→1H→30M analysis on BINANCE:BTCUSDT.P. No AI — rule-based signal logic reading VRVP levels, CVD, OI, VWAP, MACD, and RSI. Checks for setups every 10 minutes.`,
+      ``,
+      `**Phase 1 — Live ✅**`,
+      `Zone detection → setup scoring → full trade plan (entry / stop / TP1–3 / R:R) → 30M confirmation tracking → bar-accurate outcome logging`,
+      ``,
+      `**Phase 2 — Queued ⏳**`,
+      `\`!took\` / \`!exit\` commands to track personal entries against system signals. Activates once 2+ weeks of Phase 1 data validates signal quality.`,
+      ``,
+      `**Phase 3 — Planned 📋**`,
+      `Per-bar CVD confirmation · Multi-symbol support (ETH/SOL) · Funding rate + order book depth · Historical backtesting engine`,
+    ].join('\n'),
+
+    // ── 2. Channels, commands, crons ─────────────────────────────────────────
+    [
+      `📡 **Channels & Schedule**`,
+      SEP,
+      `**#btc-signals** — Live trade alerts`,
+      `  › Auto every 10 min: zone proximity check → posts when a setup triggers`,
+      `  › React 📊 on any signal → bot replies with a full 4-TF deep-dive analysis`,
+      `  › \`!analyze\` / \`!mtf\` — trigger an on-demand 4-TF sweep immediately`,
+      `  › \`!trades\` — list open signals and last 5 closed outcomes`,
+      `  › \`!stop\` / \`!start\` — pause or resume all automated alerts`,
+      `  › \`!status\` — post this briefing to #general`,
+      ``,
+      `**#btc-backtest** — Weekly performance report`,
+      `  › Auto every **Monday 09:00 UTC**: win rate, R:R distribution, confirmation rate across all signals`,
+      ``,
+      `**#btc-weekly-war-report** — Institutional preview`,
+      `  › Auto every **Sunday 14:00 UTC**: week-ahead bias, key VRVP levels, macro context`,
+      ``,
+      `**#general** — System status and announcements`,
+      `  › \`!status\` (typed in #btc-signals) posts here`,
+    ].join('\n'),
+
+    // ── 3. How to use the signals ─────────────────────────────────────────────
+    [
+      `📈 **How to Trade the Signals**`,
+      SEP,
+      `**1. Read the verdict**`,
+      `🟢 LONG / 🔴 SHORT — setup confirmed, use the trade plan in the alert`,
+      `⚠️ APPROACHING — zone reached, setup not yet confirmed — watch for the 30M close`,
+      `❌ SKIP — criteria failed, do not trade this signal`,
+      ``,
+      `**2. Wait for the entry trigger — do not enter on the alert**`,
+      `The alert fires at zone touch. Enter only once a 30M bar **closes beyond the entry price** in the signal direction. That close is your confirmation.`,
+      ``,
+      `**3. Your levels are pre-calculated in the alert**`,
+      `Entry, Stop, TP1, TP2, TP3, and R:R are all there. Risk 1–2% of account per trade.`,
+      ``,
+      `**4. Scale out**`,
+      `TP1 → take 50%, move stop to entry  ·  TP2 → take 30%  ·  TP3 → close remainder`,
+      ``,
+      `**5. Invalidation**`,
+      `30M close through the zone in the opposite direction = setup failed. Exit immediately regardless of P&L.`,
+      ``,
+      `*Full Confluence ~70% base rate  ·  Partial Confluence ~60%  ·  Low Confluence ~48%*`,
+      `*Prioritise Full Confluence signals. Skip Low Confluence unless R:R is exceptional.*`,
+    ].join('\n'),
+  ];
+
+  for (const content of msgs) {
+    try { await webhookPost(HELPER_WEBHOOK, content); }
+    catch(e) { console.error('[discord-bot] !status webhook post failed:', e.message); }
+    await new Promise(r => setTimeout(r, 600)); // pace webhook posts
+  }
+
+  await sendMessage(`📬 Status briefing posted to **#general** by **${user}**`);
+  console.log('[discord-bot] !status posted to #general');
+}
+
 // ─── Emoji Reaction Polling ───────────────────────────────────────────────────
 //
 // Each poll cycle: scan _signal_messages in .trigger-state.json for any message
@@ -464,8 +586,11 @@ async function checkEmojiReactions() {
 
   const now = Date.now();
   let changed = false;
+  let checksThisRun = 0;
+  const MAX_CHECKS_PER_RUN = 8; // 8 × 350ms = ~3s per cron run, well within rate limits
 
-  for (const entry of signalMsgs) {
+  // Check newest messages first — reactions are most likely on recent signals
+  for (const entry of [...signalMsgs].reverse()) {
     // Skip already analyzed or expired entries
     if (entry.analyzed) continue;
     if (now - entry.firedAt > SIGNAL_MSG_MAX_AGE) {
@@ -474,7 +599,13 @@ async function checkEmojiReactions() {
       continue;
     }
 
-    // Fetch reactions for this emoji on this message
+    // Limit API calls per run to avoid rate limiting (8 × 1.1s ≈ 9s per cron run)
+    if (checksThisRun >= MAX_CHECKS_PER_RUN) break;
+    checksThisRun++;
+
+    // Spacing between requests — stay under Discord's per-route rate limit
+    await new Promise(r => setTimeout(r, 1100));
+
     let reactors;
     try {
       reactors = await discordRequest(
@@ -488,6 +619,21 @@ async function checkEmojiReactions() {
         changed = true;
       }
       continue;
+    }
+
+    // Rate limited — respect retry_after then retry once before giving up for this run
+    if (reactors && typeof reactors === 'object' && reactors.retry_after) {
+      const waitMs = Math.ceil(reactors.retry_after * 1000) + 500;
+      console.log(`[discord-bot] Rate limited on reactions — waiting ${waitMs}ms then retrying`);
+      await new Promise(r => setTimeout(r, waitMs));
+      try {
+        reactors = await discordRequest('GET', `/channels/${CHANNEL_ID}/messages/${entry.id}/reactions/${REACT_EMOJI_ENC}?limit=5`);
+      } catch(e2) { continue; }
+      // If still rate limited after retry, stop for this run
+      if (reactors && typeof reactors === 'object' && reactors.retry_after) {
+        console.log(`[discord-bot] Still rate limited — stopping reaction checks for this run`);
+        break;
+      }
     }
 
     if (!Array.isArray(reactors) || reactors.length === 0) continue;
@@ -570,6 +716,11 @@ async function main() {
 
     if (/^!exit\b/i.test(text)) {
       await handleExit(user, text.split(/\s+/).slice(1));
+      break;
+    }
+
+    if (/^!status\b/i.test(text)) {
+      await handleStatus(user);
       break;
     }
 

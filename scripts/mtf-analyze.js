@@ -233,9 +233,18 @@ function computeRSI(closes, period=14) {
 
 async function fetchTF(client, tf, closeCount) {
   await cdpEval(client, buildSetTFExpr(tf));
-  await new Promise(r => setTimeout(r, 1500));
-  const rawStudies = await cdpEval(client, STUDY_VALUES_EXPR) || [];
-  const parsed     = parseStudies(Array.isArray(rawStudies) ? rawStudies : []);
+  await new Promise(r => setTimeout(r, 2500)); // 2.5s — gives indicators time to recalculate after TF switch
+
+  let rawStudies = await cdpEval(client, STUDY_VALUES_EXPR) || [];
+  let parsed     = parseStudies(Array.isArray(rawStudies) ? rawStudies : []);
+
+  // If core indicators (VWAP, CVD) are still null after the first read, the chart
+  // hasn't finished loading. Retry up to 2× with increasing delays.
+  for (let retry = 0; retry < 2 && (parsed.vwap == null || parsed.cvd == null); retry++) {
+    await new Promise(r => setTimeout(r, 1500 + retry * 1000));
+    rawStudies = await cdpEval(client, STUDY_VALUES_EXPR) || [];
+    parsed     = parseStudies(Array.isArray(rawStudies) ? rawStudies : []);
+  }
 
   let macd = parsed.macdFromChart ?? null;
   let rsi  = parsed.rsiFromChart  ?? null;
@@ -331,6 +340,42 @@ function evaluateSetupA(tfs, price, oiDelta, vrvpLevels) {
   const failed  = criteria.filter(c => c.pass === false).length;
   const unknown = criteria.filter(c => c.pass === null).length;
   return { criteria, passed, failed, unknown, nearLevel };
+}
+
+// ─── Direction Engine ────────────────────────────────────────────────────────
+// Determines LONG or SHORT bias by scoring all available indicators.
+// Used to label WAIT and SKIP verdicts so the user always knows which
+// direction the setup is pointing — even when criteria aren't all confirmed.
+
+function evaluateDirection(tfs, price, vrvpLevels) {
+  let bullish = 0, bearish = 0;
+
+  // VRVP nearest level direction (primary structural anchor)
+  const near = nearestVRVPLevel(vrvpLevels, price);
+  if (near?.dir === 'long') bullish += 2;
+  else if (near?.dir === 'short') bearish += 2;
+
+  // CVD across all TFs (order flow)
+  for (const k of ['720','240','60','30']) {
+    const cvd = tfs[k]?.cvd;
+    if (cvd != null) { cvd > 0 ? bullish++ : bearish++; }
+  }
+
+  // VWAP position across all TFs (institutional benchmark)
+  for (const k of ['720','240','60','30']) {
+    const vwap = tfs[k]?.vwap;
+    if (vwap != null) { price > vwap ? bullish++ : bearish++; }
+  }
+
+  // 4H MACD (trend momentum)
+  const macd = tfs['240']?.macd;
+  if (macd) { macd.bullish ? bullish++ : bearish++; }
+
+  // 12H RSI (macro bias)
+  const rsi = tfs['720']?.rsi;
+  if (rsi != null) { rsi > 50 ? bullish++ : bearish++; }
+
+  return bullish >= bearish ? 'long' : 'short';
 }
 
 // ─── Probability Engine ───────────────────────────────────────────────────────
@@ -474,17 +519,22 @@ function buildReport(tfs, price, oiDelta, vrvpLevels) {
                   : probability >= 50 ? 'Low'
                   : 'Poor';
 
+  // Direction — always determined so WAIT/SKIP verdicts have a clear bias label
+  const direction = evaluateDirection(tfs, price, vrvpLevels);
+  const dirEmoji  = direction === 'long' ? '🟢' : '🔴';
+  const dirLabel  = direction === 'long' ? 'LONG' : 'SHORT';
+
   // Verdict
   const confirmedDenominator = setupA.criteria.length - setupA.unknown;
   let verdict, vType;
   if (setupA.failed === 0 && setupA.passed >= 5) {
-    verdict = `🟢 **LONG — Setup A confirmed** | **${probability}% probability** (${probLabel}) | ${setupA.passed}/${confirmedDenominator} criteria`;
-    vType = 'long';
+    verdict = `${dirEmoji} **${dirLabel} — Setup A confirmed** | **${probability}% probability** (${probLabel}) | ${setupA.passed}/${confirmedDenominator} criteria`;
+    vType = direction;
   } else if (setupA.failed >= 3) {
-    verdict = `⛔ **SKIP** | **${probability}% probability** (${probLabel}) | ${setupA.failed} criteria failing`;
+    verdict = `⛔ **SKIP — ${dirLabel} setup** | **${probability}% probability** (${probLabel}) | ${setupA.failed} criteria failing`;
     vType = 'info';
   } else {
-    verdict = `⚠️ **WAIT — setup forming** | **${probability}% probability** (${probLabel}) | ${setupA.passed}/${confirmedDenominator} confirmed`;
+    verdict = `⚠️ **WAIT — ${dirLabel} setup forming** | **${probability}% probability** (${probLabel}) | ${setupA.passed}/${confirmedDenominator} confirmed`;
     vType = 'approaching';
   }
 
@@ -528,41 +578,71 @@ function buildReport(tfs, price, oiDelta, vrvpLevels) {
       reasoning = `*${pieces.join(' · ')}*`;
   }
 
-  // ─── Trade plan — VRVP levels primary, VWAP anchor fallback ─────────────────
+  // ─── Trade plan — always shown (SKIP shows as "watch levels", WAIT/LONG/SHORT show full plan)
   let plan = '';
-  if (vType !== 'info') {
+  {
     let entry, stop, risk, tp1, tp2, tp3, anchor;
+    const isLong = direction === 'long';
 
     // Primary: use nearest VRVP level as structural anchor
     if (vrvpLevels) {
       const nearLevel = setupA.nearLevel;
-      const entryLevel = nearLevel?.type === 'HVN' ? nearLevel.lo
-                       : nearLevel?.type === 'VAL' ? nearLevel.price
-                       : nearLevel?.type === 'POC' ? nearLevel.price
-                       : null;
-      if (entryLevel) {
-        anchor = `${nearLevel.type} ${fmt$(Math.round(entryLevel))}`;
-        entry  = Math.round(entryLevel * 1.001);
-        stop   = Math.round(entryLevel * 0.997);
-        risk   = Math.max(entry - stop, 1);
-        const hvnsAbove = (vrvpLevels.hvns || []).filter(h => h.lo > price + 50).sort((a,b) => a.lo - b.lo);
-        tp1 = hvnsAbove[0] ? Math.round(hvnsAbove[0].lo) : entry + risk;
-        tp2 = vrvpLevels.vah && vrvpLevels.vah > price + 50 ? Math.round(vrvpLevels.vah) : entry + risk * 2;
-        tp3 = entry + risk * 3;
+      if (isLong) {
+        // Long: enter above the level, stop below it
+        const entryLevel = nearLevel?.type === 'HVN' ? nearLevel.lo
+                         : nearLevel?.type === 'VAL' ? nearLevel.price
+                         : nearLevel?.type === 'POC' ? nearLevel.price
+                         : nearLevel?.type === 'VAH' ? nearLevel.price  // breakout above VAH
+                         : null;
+        if (entryLevel) {
+          anchor = `${nearLevel.type} ${fmt$(Math.round(entryLevel))}`;
+          entry  = Math.round(entryLevel * 1.001);
+          stop   = Math.round(entryLevel * 0.997);
+          risk   = Math.max(entry - stop, 1);
+          const hvnsAbove = (vrvpLevels.hvns || []).filter(h => h.lo > price + 50).sort((a,b) => a.lo - b.lo);
+          tp1 = hvnsAbove[0] ? Math.round(hvnsAbove[0].lo) : entry + risk;
+          tp2 = vrvpLevels.vah && vrvpLevels.vah > price + 50 ? Math.round(vrvpLevels.vah) : entry + risk * 2;
+          tp3 = entry + risk * 3;
+        }
+      } else {
+        // Short: enter below the level, stop above it
+        const entryLevel = nearLevel?.type === 'HVN' ? nearLevel.hi
+                         : nearLevel?.type === 'VAH' ? nearLevel.price
+                         : nearLevel?.type === 'POC' ? nearLevel.price
+                         : nearLevel?.type === 'VAL' ? nearLevel.price  // breakdown below VAL
+                         : null;
+        if (entryLevel) {
+          anchor = `${nearLevel.type} ${fmt$(Math.round(entryLevel))}`;
+          entry  = Math.round(entryLevel * 0.999);
+          stop   = Math.round(entryLevel * 1.003);
+          risk   = Math.max(stop - entry, 1);
+          const hvnsBelow = (vrvpLevels.hvns || []).filter(h => h.hi < price - 50).sort((a,b) => b.hi - a.hi);
+          tp1 = hvnsBelow[0] ? Math.round(hvnsBelow[0].hi) : entry - risk;
+          tp2 = vrvpLevels.val && vrvpLevels.val < price - 50 ? Math.round(vrvpLevels.val) : entry - risk * 2;
+          tp3 = entry - risk * 3;
+        }
       }
     }
 
-    // Fallback: VWAP as structural anchor (VRVP unavailable or no near level found)
+    // Fallback: VWAP as structural anchor
     if (!entry) {
       const vwap30 = tfs['30']?.vwap;
-      if (vwap30 && price > vwap30) {
+      if (isLong && vwap30 && price > vwap30) {
         anchor = `VWAP ${fmt$(Math.round(vwap30))} (fallback)`;
         entry  = Math.round(price);
-        stop   = Math.round(vwap30 * 0.997); // 0.3% below VWAP
+        stop   = Math.round(vwap30 * 0.997);
         risk   = Math.max(entry - stop, 1);
         tp1    = entry + risk;
         tp2    = entry + risk * 2;
         tp3    = entry + risk * 3;
+      } else if (!isLong && vwap30 && price < vwap30) {
+        anchor = `VWAP ${fmt$(Math.round(vwap30))} (fallback)`;
+        entry  = Math.round(price);
+        stop   = Math.round(vwap30 * 1.003);
+        risk   = Math.max(stop - entry, 1);
+        tp1    = entry - risk;
+        tp2    = entry - risk * 2;
+        tp3    = entry - risk * 3;
       }
     }
 
@@ -573,12 +653,18 @@ function buildReport(tfs, price, oiDelta, vrvpLevels) {
       const p     = probability / 100;
       const ev2   = ((p * rr2) - ((1 - p) * 1.0)).toFixed(2);
       const evStr = parseFloat(ev2) > 0 ? `+${ev2}R` : `${ev2}R`;
+      const triggerDir = isLong ? 'bullish' : 'bearish';
+      const triggerWord = isLong ? 'above' : 'below';
+      // SKIP verdict: label the plan as "watch levels" to signal it's not a confirmed setup
+      const planHeader = vType === 'info'
+        ? `**WATCH LEVELS** (anchor: ${anchor}) | EV if setup confirms: **${evStr}**`
+        : `**TRADE PLAN** (anchor: ${anchor}) | EV @ TP2: **${evStr}**`;
       plan = [
         ``,
-        `**TRADE PLAN** (anchor: ${anchor}) | EV @ TP2: **${evStr}**`,
+        planHeader,
         `**Entry** ${fmt$(entry)} | **Stop** ${fmt$(stop)} | Risk ${fmt$(risk)}/contract`,
         `**TP1** ${fmt$(tp1)} (1:${rr1.toFixed(1)}) | **TP2** ${fmt$(tp2)} (1:${rr2.toFixed(1)}) | **TP3** ${fmt$(tp3)} (1:${rr3.toFixed(1)})`,
-        `**Trigger** 30M bullish close above ${fmt$(entry)} with CVD confirmation`,
+        `**Trigger** 30M ${triggerDir} close ${triggerWord} ${fmt$(entry)} with CVD confirmation`,
       ].join('\n');
     }
   }
@@ -624,6 +710,18 @@ async function runMTFAnalysis() {
     const price = quoteInitial?.last;
     if (!price) throw new Error('Could not read price from chart — is the 🕵Ace layout loaded?');
 
+    // Read VRVP BEFORE any TF switches — the Visible Range histogram is calculated
+    // from the currently visible price range. After switching to 12H and back, TradingView
+    // has to re-fetch all 30M bars and recalculate the histogram, which takes many seconds
+    // and often returns empty data. Reading it in the chart's original stable state is reliable.
+    let vrvpRaw = await cdpEval(client, VRVP_EXPR);
+    if (!vrvpRaw?.rows?.length) {
+      // Chart may be mid-load — retry once
+      await new Promise(r => setTimeout(r, 1500));
+      vrvpRaw = await cdpEval(client, VRVP_EXPR);
+    }
+    const vrvpLevels = computeVRVPLevels(vrvpRaw);
+
     // Sweep all four timeframes
     //   12H: 30 closes for RSI-14 (with warm-up)
     //   4H:  60 closes for MACD (26 EMA + signal + buffer)
@@ -633,16 +731,6 @@ async function runMTFAnalysis() {
     tfs['240'] = await fetchTF(client, '240', 60);
     tfs['60']  = await fetchTF(client, '60',  0);
     tfs['30']  = await fetchTF(client, '30',  0);
-
-    // Restore to 30M for VRVP read (VRVP reads the visible range on 30M)
-    const currentTF = await cdpEval(client, GET_TF_EXPR) || '30';
-    if (currentTF !== '30') {
-      await cdpEval(client, buildSetTFExpr('30'));
-      await new Promise(r => setTimeout(r, 1200));
-    }
-
-    const vrvpRaw  = await cdpEval(client, VRVP_EXPR);
-    const vrvpLevels = computeVRVPLevels(vrvpRaw);
 
     const currentOI = tfs['30'].oi;
     const oiDelta   = (prevOI != null && currentOI != null) ? currentOI - prevOI : null;
