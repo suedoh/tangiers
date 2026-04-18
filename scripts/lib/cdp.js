@@ -72,10 +72,39 @@ function buildSetTFExpr(tf) {
   })()`;
 }
 
-async function getSymbol(client)         { return cdpEval(client, GET_SYMBOL_EXPR); }
-async function setSymbol(client, sym)    { await cdpEval(client, buildSetSymbolExpr(sym)); await sleep(1800); }
-async function getTimeframe(client)      { return cdpEval(client, GET_TF_EXPR); }
-async function setTimeframe(client, tf)  { await cdpEval(client, buildSetTFExpr(tf));  await sleep(1200); }
+async function getSymbol(client)      { return cdpEval(client, GET_SYMBOL_EXPR); }
+async function getTimeframe(client)   { return cdpEval(client, GET_TF_EXPR); }
+
+/**
+ * Switch symbol and wait until TradingView confirms it loaded.
+ * Polls getSymbol() every 300ms — much more reliable than a fixed sleep.
+ */
+async function setSymbol(client, sym, timeoutMs = 8000) {
+  await cdpEval(client, buildSetSymbolExpr(sym));
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await sleep(300);
+    const current = await getSymbol(client);
+    // TradingView may return "NYMEX:BZ1!" or just "BZ1!" depending on version
+    if (current && (current === sym || current.endsWith(sym.split(':')[1]))) return;
+  }
+  throw new Error(`Symbol switch to ${sym} timed out after ${timeoutMs}ms`);
+}
+
+/**
+ * Switch timeframe and wait until TradingView confirms it loaded.
+ */
+async function setTimeframe(client, tf, timeoutMs = 5000) {
+  await cdpEval(client, buildSetTFExpr(tf));
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await sleep(300);
+    const current = await getTimeframe(client);
+    if (current === tf || String(current) === String(tf)) return;
+  }
+  // Non-fatal — some TF representations differ (e.g. '60' vs '1H'), just add a safety pause
+  await sleep(800);
+}
 
 // ─── Quote ───────────────────────────────────────────────────────────────────
 
