@@ -38,8 +38,13 @@ async function cdpConnect(symbolHint) {
     // Match on tab title (e.g. "BZ1! — TradingView") or URL containing the layout ID
     target = chartTargets.find(t => (t.title || '').toUpperCase().includes(hint))
           || chartTargets.find(t => (t.url  || '').toUpperCase().includes(hint));
+    // If hint given but no matching tab found — throw rather than falling back to a wrong tab
+    if (!target) throw Object.assign(
+      new Error(`No TradingView tab found matching "${symbolHint}" — open the ${symbolHint} chart tab`),
+      { code: 'NO_TARGET' }
+    );
   }
-  // Fall back to first chart tab if no hint or no match
+  // No hint — use first chart tab
   target = target || chartTargets.find(t => /chart/i.test(t.url)) || chartTargets[0];
 
   const client = await CDP({ host: 'localhost', port: CDP_PORT, target: target.id });
