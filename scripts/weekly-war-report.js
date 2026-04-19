@@ -264,9 +264,16 @@ function buildBoxesExpr(filter) {
 async function fetchHTFBars(client, tf, count, originalTF) {
   try {
     await cdpEval(client, buildSetTFExpr(tf));
-    await new Promise(r => setTimeout(r, 1500));
-    const bars = await cdpEval(client, buildBarsExpr(count));
-    return Array.isArray(bars) ? bars : [];
+    // Poll until bars load — fixed sleep was too short for monthly/weekly TF switches
+    const deadline = Date.now() + 12000;
+    let bars = [];
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 500));
+      const result = await cdpEval(client, buildBarsExpr(count));
+      if (Array.isArray(result) && result.length >= 2) { bars = result; break; }
+    }
+    if (!bars.length) log(`fetchHTFBars(${tf}): bars still empty after 12s timeout`);
+    return bars;
   } catch (e) {
     log(`fetchHTFBars(${tf}) error: ${e.message}`);
     return [];
