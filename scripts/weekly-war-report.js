@@ -260,19 +260,32 @@ function buildBoxesExpr(filter) {
 })()`;
 }
 
-// Switch TF → wait → fetch bars → restore TF
+// Expected bar spacing in seconds per timeframe — used to validate bars loaded correctly
+const TF_SPACING = { 'W': 604800, '1M': 2419200, '240': 14400, '60': 3600, '30': 1800 };
+
+// Switch TF → poll until bars with correct spacing load → restore TF
 async function fetchHTFBars(client, tf, count, originalTF) {
   try {
     await cdpEval(client, buildSetTFExpr(tf));
-    // Poll until bars load — fixed sleep was too short for monthly/weekly TF switches
-    const deadline = Date.now() + 12000;
+    const expected = TF_SPACING[tf];
+    const deadline = Date.now() + 15000;
     let bars = [];
     while (Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 500));
       const result = await cdpEval(client, buildBarsExpr(count));
-      if (Array.isArray(result) && result.length >= 2) { bars = result; break; }
+      if (!Array.isArray(result) || result.length < 2) continue;
+      if (expected) {
+        // Validate bar spacing — stale TF data has wrong spacing
+        const spacing = result[result.length - 1].t - result[result.length - 2].t;
+        if (spacing < expected * 0.8 || spacing > expected * 1.35) {
+          log(`fetchHTFBars(${tf}): spacing ${spacing}s != expected ~${expected}s — still loading`);
+          continue;
+        }
+      }
+      bars = result;
+      break;
     }
-    if (!bars.length) log(`fetchHTFBars(${tf}): bars still empty after 12s timeout`);
+    if (!bars.length) log(`fetchHTFBars(${tf}): bars invalid/empty after 15s timeout`);
     return bars;
   } catch (e) {
     log(`fetchHTFBars(${tf}) error: ${e.message}`);
