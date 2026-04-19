@@ -29,24 +29,50 @@ async function cdpConnect(symbolHint) {
     throw Object.assign(new Error(e.message), { code: 'CDP_UNAVAILABLE' });
   }
 
-  const chartTargets = targets.filter(t => t.type === 'page' && /tradingview/i.test(t.url));
-  if (!chartTargets.length) throw Object.assign(new Error('No TradingView chart page found'), { code: 'NO_TARGET' });
+  // Desktop app may use different types/URLs — cast a wide net
+  const chartTargets = targets.filter(t =>
+    /tradingview/i.test(t.url) || /tradingview/i.test(t.title)
+  );
 
-  let target;
+  if (!chartTargets.length) {
+    // Log all targets so we can diagnose Desktop app CDP structure
+    console.error('[cdp] All CDP targets:', JSON.stringify(targets.map(t => ({ type: t.type, title: t.title, url: t.url })), null, 2));
+    throw Object.assign(new Error('No TradingView target found'), { code: 'NO_TARGET' });
+  }
+
   if (symbolHint) {
     const hint = symbolHint.toUpperCase();
-    // Match on tab title (e.g. "BZ1! — TradingView") or URL containing the layout ID
-    target = chartTargets.find(t => (t.title || '').toUpperCase().includes(hint))
-          || chartTargets.find(t => (t.url  || '').toUpperCase().includes(hint));
-    // If hint given but no matching tab found — throw rather than falling back to a wrong tab
-    if (!target) throw Object.assign(
-      new Error(`No TradingView tab found matching "${symbolHint}" — open the ${symbolHint} chart tab`),
+
+    // First try cheap title/URL match (works in browser; Desktop app may have generic titles)
+    const byMeta = chartTargets.find(t => (t.title || '').toUpperCase().includes(hint))
+                || chartTargets.find(t => (t.url  || '').toUpperCase().includes(hint));
+
+    if (byMeta) {
+      const client = await CDP({ host: 'localhost', port: CDP_PORT, target: byMeta.id });
+      await client.Runtime.enable();
+      return client;
+    }
+
+    // Desktop app fallback: probe each tab by reading its active symbol
+    for (const t of chartTargets) {
+      let probe;
+      try {
+        probe = await CDP({ host: 'localhost', port: CDP_PORT, target: t.id });
+        await probe.Runtime.enable();
+        const sym = await cdpEval(probe, GET_SYMBOL_EXPR);
+        if (sym && sym.toUpperCase().includes(hint)) return probe;
+        await probe.close();
+      } catch { try { await probe?.close(); } catch {} }
+    }
+
+    throw Object.assign(
+      new Error(`No TradingView tab found with symbol matching "${symbolHint}" — is the ${symbolHint} tab open?`),
       { code: 'NO_TARGET' }
     );
   }
-  // No hint — use first chart tab
-  target = target || chartTargets.find(t => /chart/i.test(t.url)) || chartTargets[0];
 
+  // No hint — use first chart tab
+  const target = chartTargets[0];
   const client = await CDP({ host: 'localhost', port: CDP_PORT, target: target.id });
   await client.Runtime.enable();
   return client;
