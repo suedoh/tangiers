@@ -24,7 +24,7 @@ const fs   = require('fs');
 const { loadEnv, ROOT }  = require('../lib/env');
 const { acquireLock, releaseLock } = require('../lib/lock');
 const {
-  cdpConnect, getSymbol, setSymbol, setTimeframe, switchLayout, waitForPrice,
+  cdpConnect, getSymbol, setSymbol, setTimeframe, waitForPrice,
   getQuote, getStudyValues, getPineBoxes, getPineLabels,
   getOHLCV, calcATR, sleep,
 } = require('../lib/cdp');
@@ -35,8 +35,6 @@ const { postWebhook }        = require('../lib/discord');
 loadEnv();
 
 const BZ_SYMBOL         = 'NYMEX:BZ1!';
-const BZ_LAYOUT_ID      = process.env.BZ_LAYOUT_ID  || null;
-const ACE_LAYOUT_ID     = process.env.ACE_LAYOUT_ID || null;
 const BZ_SIGNALS_HOOK   = process.env.BZ_DISCORD_SIGNALS_WEBHOOK;
 const BZ_BACKTEST_HOOK  = process.env.BZ_DISCORD_BACKTEST_WEBHOOK;
 const GEO_FLAG          = process.env.BZ_GEOPOLITICAL_FLAG === 'active';
@@ -382,32 +380,20 @@ async function main() {
   }
 
   let client;
-  let originalSymbol;
-  let switchedLayout = false;
 
   try {
     client = await cdpConnect('BZ');
-    originalSymbol = await getSymbol(client);
-    log(`Connected to TradingView. Current symbol: ${originalSymbol}`);
+    const currentSymbol = await getSymbol(client);
+    log(`Connected to BZ tab. Symbol: ${currentSymbol}`);
 
-    // Switch to dedicated BZ! layout (preferred) or fall back to symbol switch
-    const alreadyOnBZ = originalSymbol === BZ_SYMBOL || (originalSymbol || '').endsWith('BZ1!');
-    if (!alreadyOnBZ) {
-      if (BZ_LAYOUT_ID) {
-        log(`Switching to BZ! layout (${BZ_LAYOUT_ID})...`);
-        await client.Page.enable();
-        await switchLayout(client, BZ_LAYOUT_ID, BZ_SYMBOL);
-        switchedLayout = true;
-        log('BZ! layout loaded');
-      } else {
-        await setSymbol(client, BZ_SYMBOL);
-        log(`Switched symbol to ${BZ_SYMBOL}`);
-      }
+    // If somehow not on BZ1!, switch symbol only (never navigate — breaks Desktop)
+    if (currentSymbol !== BZ_SYMBOL && !(currentSymbol || '').endsWith('BZ1!')) {
+      await setSymbol(client, BZ_SYMBOL);
+      log(`Switched symbol to ${BZ_SYMBOL}`);
     }
 
     // ── 4H sweep ──────────────────────────────────────────────────────────────
     await setTimeframe(client, '240');
-    // Wait until bars are loaded — prevents "Could not read price" on fresh layout switch
     const quote4h = await waitForPrice(client);
     const [studies4h, boxes4h, labels4h, ohlcv4h] = await Promise.all([
       getStudyValues(client),
@@ -435,16 +421,8 @@ async function main() {
       getPineLabels(client, 'LuxAlgo'),
     ]);
 
-    // Restore Ace layout (or original symbol if no layout IDs configured)
+    // Restore to 4H — leave symbol alone, BZ tab stays on BZ1!
     await setTimeframe(client, '240');
-    if (switchedLayout && ACE_LAYOUT_ID) {
-      await client.Page.enable();
-      await switchLayout(client, ACE_LAYOUT_ID);
-      log(`Restored Ace layout (${ACE_LAYOUT_ID})`);
-    } else if (!switchedLayout && !alreadyOnBZ && originalSymbol) {
-      await setSymbol(client, originalSymbol);
-      log(`Restored symbol to ${originalSymbol}`);
-    }
 
     // 3. Await sentiment
     const sentiment = await sentimentPromise;

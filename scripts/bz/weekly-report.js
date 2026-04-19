@@ -26,7 +26,7 @@ const https = require('https');
 const { loadEnv }     = require('../lib/env');
 const { acquireLock, releaseLock } = require('../lib/lock');
 const {
-  cdpConnect, getSymbol, setSymbol, setTimeframe, switchLayout, waitForPrice,
+  cdpConnect, getSymbol, setSymbol, setTimeframe, waitForPrice,
   getQuote, getStudyValues, getPineBoxes, getPineLabels,
   getOHLCV, calcATR, sleep,
 } = require('../lib/cdp');
@@ -36,8 +36,6 @@ const { postWebhook } = require('../lib/discord');
 loadEnv();
 
 const BZ_SYMBOL      = 'NYMEX:BZ1!';
-const BZ_LAYOUT_ID   = process.env.BZ_LAYOUT_ID  || null;
-const ACE_LAYOUT_ID  = process.env.ACE_LAYOUT_ID || null;
 const WAR_HOOK       = process.env.BZ_DISCORD_WAR_REPORT_WEBHOOK;
 const SIGNALS_HOOK   = process.env.BZ_DISCORD_SIGNALS_WEBHOOK;
 const FORCE          = process.argv.includes('--force');
@@ -238,27 +236,17 @@ async function main() {
   if (!lock) { log('Could not acquire lock'); return; }
 
   let client;
-  let originalSymbol;
-  let switchedLayout = false;
 
   try {
     // Fetch inventory in parallel with CDP connect
     const inventoryPromise = fetchEIA();
 
     client = await cdpConnect('BZ');
-    originalSymbol = await getSymbol(client);
+    const currentSymbol = await getSymbol(client);
 
-    const alreadyOnBZ = originalSymbol === BZ_SYMBOL || (originalSymbol || '').endsWith('BZ1!');
-    if (!alreadyOnBZ) {
-      if (BZ_LAYOUT_ID) {
-        await client.Page.enable();
-        await switchLayout(client, BZ_LAYOUT_ID, BZ_SYMBOL);
-        switchedLayout = true;
-        log(`Switched to BZ! layout (${BZ_LAYOUT_ID})`);
-      } else {
-        await setSymbol(client, BZ_SYMBOL);
-        log(`Switched symbol to ${BZ_SYMBOL}`);
-      }
+    if (currentSymbol !== BZ_SYMBOL && !(currentSymbol || '').endsWith('BZ1!')) {
+      await setSymbol(client, BZ_SYMBOL);
+      log(`Switched symbol to ${BZ_SYMBOL}`);
     }
 
     // 4H sweep
@@ -278,15 +266,7 @@ async function main() {
     const boxes1h = await getPineBoxes(client, 'LuxAlgo');
 
     await setTimeframe(client, '240');
-
-    // Restore layout/symbol
-    if (switchedLayout && ACE_LAYOUT_ID) {
-      await client.Page.enable();
-      await switchLayout(client, ACE_LAYOUT_ID);
-      log(`Restored Ace layout`);
-    } else if (!switchedLayout && !alreadyOnBZ && originalSymbol) {
-      await setSymbol(client, originalSymbol);
-    }
+    // BZ tab stays on BZ1! — no restoration needed
 
     const { atr14, buffer } = calcATR(ohlcv);
     const ind               = parseStudies(studies);
@@ -319,12 +299,7 @@ async function main() {
         'BZ! • Weekly Report');
     }
   } finally {
-    try {
-      if (client) {
-        if (switchedLayout && ACE_LAYOUT_ID) { await client.Page.enable(); await switchLayout(client, ACE_LAYOUT_ID); }
-        else if (!switchedLayout && originalSymbol && originalSymbol !== BZ_SYMBOL) await setSymbol(client, originalSymbol);
-      }
-    } catch {}
+    // BZ tab stays on BZ1! — no restoration needed
     try { if (client) await client.close(); } catch {}
     releaseLock('bz-weekly');
     log('Done');
