@@ -386,7 +386,7 @@ async function main() {
   let switchedLayout = false;
 
   try {
-    client = await cdpConnect();
+    client = await cdpConnect('BZ');
     originalSymbol = await getSymbol(client);
     log(`Connected to TradingView. Current symbol: ${originalSymbol}`);
 

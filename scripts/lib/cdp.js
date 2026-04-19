@@ -15,7 +15,13 @@ const BARS_PATH = `${CHART_API}._chartWidget.model().mainSeries().bars()`;
 
 // ─── Connection ──────────────────────────────────────────────────────────────
 
-async function cdpConnect() {
+/**
+ * Connect to TradingView Desktop via CDP.
+ * @param {string} [symbolHint]  Optional substring to match against tab title/URL
+ *                               e.g. 'BZ' targets the BZ1! tab, 'BTC' targets the BTC tab.
+ *                               If omitted, connects to the first TradingView chart found.
+ */
+async function cdpConnect(symbolHint) {
   let targets;
   try {
     targets = await CDP.List({ host: 'localhost', port: CDP_PORT });
@@ -23,10 +29,18 @@ async function cdpConnect() {
     throw Object.assign(new Error(e.message), { code: 'CDP_UNAVAILABLE' });
   }
 
-  const target = targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
-              || targets.find(t => t.type === 'page' && /tradingview/i.test(t.url));
+  const chartTargets = targets.filter(t => t.type === 'page' && /tradingview/i.test(t.url));
+  if (!chartTargets.length) throw Object.assign(new Error('No TradingView chart page found'), { code: 'NO_TARGET' });
 
-  if (!target) throw Object.assign(new Error('No TradingView chart page found'), { code: 'NO_TARGET' });
+  let target;
+  if (symbolHint) {
+    const hint = symbolHint.toUpperCase();
+    // Match on tab title (e.g. "BZ1! — TradingView") or URL containing the layout ID
+    target = chartTargets.find(t => (t.title || '').toUpperCase().includes(hint))
+          || chartTargets.find(t => (t.url  || '').toUpperCase().includes(hint));
+  }
+  // Fall back to first chart tab if no hint or no match
+  target = target || chartTargets.find(t => /chart/i.test(t.url)) || chartTargets[0];
 
   const client = await CDP({ host: 'localhost', port: CDP_PORT, target: target.id });
   await client.Runtime.enable();

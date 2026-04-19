@@ -187,7 +187,7 @@ async function main() {
       return;
     }
 
-    client = await cdpConnect();
+    client = await cdpConnect('BZ');
     originalSymbol = await getSymbol(client);
 
     const alreadyOnBZ = originalSymbol === BZ_SYMBOL || (originalSymbol || '').endsWith('BZ1!');
