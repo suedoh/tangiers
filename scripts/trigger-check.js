@@ -129,16 +129,33 @@ async function cdpConnect() {
     throw { code: 'CDP_UNAVAILABLE', message: e.message };
   }
 
-  const target = targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
-              || targets.find(t => t.type === 'page' && /tradingview/i.test(t.url));
+  const chartTargets = targets.filter(t =>
+    /tradingview\.com\/chart/i.test(t.url) || /tradingview/i.test(t.url)
+  );
 
-  if (!target) {
+  if (!chartTargets.length) {
     throw { code: 'NO_TARGET', message: 'No TradingView chart page found in CDP targets.' };
   }
 
-  const client = await CDP({ host: 'localhost', port: CDP_PORT, target: target.id });
+  // Probe each tab by symbol — Desktop app gives all tabs the same title,
+  // so we must connect and read the symbol to find the BTC tab.
+  const GET_SYM = `(function(){ try { return window.TradingViewApi._activeChartWidgetWV.value().symbol(); } catch(e) { return null; } })()`;
+  for (const t of chartTargets) {
+    let probe;
+    try {
+      probe = await CDP({ host: 'localhost', port: CDP_PORT, target: t.id });
+      await probe.Runtime.enable();
+      const r = await probe.Runtime.evaluate({ expression: GET_SYM, returnByValue: true });
+      const sym = r.result?.value;
+      if (sym && sym.includes('BTCUSDT')) return { client: probe, target: t };
+      await probe.close();
+    } catch { try { await probe?.close(); } catch {} }
+  }
+
+  // Fallback: use first tab (single-tab setup)
+  const client = await CDP({ host: 'localhost', port: CDP_PORT, target: chartTargets[0].id });
   await client.Runtime.enable();
-  return { client, target };
+  return { client, target: chartTargets[0] };
 }
 
 async function cdpEval(client, expression) {
