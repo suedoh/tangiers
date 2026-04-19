@@ -41,10 +41,12 @@ function resolve(channelName) {
  */
 function allChannelIds() {
   const ids = [];
-  if (process.env.DISCORD_CHANNEL_ID)              ids.push({ id: process.env.DISCORD_CHANNEL_ID,              prefix: 'btc' });
-  if (process.env.BZ_DISCORD_SIGNALS_CHANNEL_ID)   ids.push({ id: process.env.BZ_DISCORD_SIGNALS_CHANNEL_ID,   prefix: 'bz' });
-  if (process.env.BZ_DISCORD_WAR_REPORT_CHANNEL_ID) ids.push({ id: process.env.BZ_DISCORD_WAR_REPORT_CHANNEL_ID, prefix: 'bz' });
-  if (process.env.BZ_DISCORD_BACKTEST_CHANNEL_ID)  ids.push({ id: process.env.BZ_DISCORD_BACKTEST_CHANNEL_ID,  prefix: 'bz' });
+  if (process.env.DISCORD_CHANNEL_ID)                   ids.push({ id: process.env.DISCORD_CHANNEL_ID,                   prefix: 'btc' });
+  if (process.env.DISCORD_BTC_WAR_REPORT_CHANNEL_ID)    ids.push({ id: process.env.DISCORD_BTC_WAR_REPORT_CHANNEL_ID,    prefix: 'btc' });
+  if (process.env.DISCORD_BTC_BACKTEST_CHANNEL_ID)      ids.push({ id: process.env.DISCORD_BTC_BACKTEST_CHANNEL_ID,      prefix: 'btc' });
+  if (process.env.BZ_DISCORD_SIGNALS_CHANNEL_ID)        ids.push({ id: process.env.BZ_DISCORD_SIGNALS_CHANNEL_ID,        prefix: 'bz' });
+  if (process.env.BZ_DISCORD_WAR_REPORT_CHANNEL_ID)     ids.push({ id: process.env.BZ_DISCORD_WAR_REPORT_CHANNEL_ID,     prefix: 'bz' });
+  if (process.env.BZ_DISCORD_BACKTEST_CHANNEL_ID)       ids.push({ id: process.env.BZ_DISCORD_BACKTEST_CHANNEL_ID,       prefix: 'bz' });
   return ids;
 }
 
