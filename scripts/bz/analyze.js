@@ -475,12 +475,7 @@ async function main() {
         `BZ! • ${session}`);
     }
   } finally {
-    // Always restore symbol and release lock
-    try {
-      if (client && originalSymbol && originalSymbol !== BZ_SYMBOL) {
-        await setSymbol(client, originalSymbol);
-      }
-    } catch {}
+    // BZ tab stays on BZ1! permanently — no symbol restoration needed
     try { if (client) await client.close(); } catch {}
     releaseLock(lockHolder);
     log('Done');

@@ -32,7 +32,7 @@ const path    = require('path');
 const fs      = require('fs');
 const { spawnSync } = require('child_process');
 
-const WS      = require('/Users/vpm/trading/tradingview-mcp/node_modules/ws');
+const WS      = require(require('path').resolve(__dirname, '../../tradingview-mcp/node_modules/ws'));
 const { loadEnv, ROOT } = require('../lib/env');
 const { postWebhook }   = require('../lib/discord');
 
@@ -74,7 +74,7 @@ function triggerAnalysis(source, context) {
 // ─── ────────────────────────────────────────────────────────────────────────
 
 const RSS_FEEDS = [
-  { name: 'Reuters',      url: 'https://feeds.reuters.com/reuters/businessNews' },
+  { name: 'AP Energy',    url: 'https://feedx.net/rss/ap.xml' },
   { name: 'S&P Platts',   url: 'https://www.spglobal.com/energy/en/news-research/rss-feed' },
   { name: 'OilPrice',     url: 'https://feeds.feedburner.com/oilpricecom' },
   { name: 'EIA Energy',   url: 'https://www.eia.gov/tools/rssfeeds/rss.cfm?t=jpt' },
