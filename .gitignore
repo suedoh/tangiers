@@ -3,6 +3,9 @@
 .discord-paused
 .discord-bot-state.json
 trades.json
+bz-trades.json
+.bz-trigger-state.json
+.bz-news-state.json
 node_modules/
 tradingview-mcp/node_modules/
 tradingview-mcp/screenshots/
