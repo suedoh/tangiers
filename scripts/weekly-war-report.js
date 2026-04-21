@@ -17,7 +17,7 @@
 
 'use strict';
 
-const CDP   = require('/Users/vpm/trading/tradingview-mcp/node_modules/chrome-remote-interface');
+const CDP   = require(require('path').resolve(__dirname, '../tradingview-mcp/node_modules/chrome-remote-interface'));
 const path  = require('path');
 const fs    = require('fs');
 const https = require('https');

@@ -366,7 +366,7 @@ async function main() {
   };
 
   await postToDiscord(payload);
-  console.log(`Report posted to #backtest-btc (${stats.closed} closed trades analysed)`);
+  console.log(`Report posted to #backtest-btc (${stats.allTrack.count} closed trades analysed)`);
 }
 
 function readTrades() {

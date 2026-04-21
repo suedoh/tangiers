@@ -13,7 +13,7 @@
  *   node mtf-analyze.js --json   → prints raw JSON data object
  */
 
-const CDP  = require('/Users/vpm/trading/tradingview-mcp/node_modules/chrome-remote-interface');
+const CDP  = require(require('path').resolve(__dirname, '../tradingview-mcp/node_modules/chrome-remote-interface'));
 const path = require('path');
 const fs   = require('fs');
 const { execFileSync } = require('child_process');

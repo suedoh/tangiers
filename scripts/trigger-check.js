@@ -23,7 +23,7 @@
 
 'use strict';
 
-const CDP  = require('/Users/vpm/trading/tradingview-mcp/node_modules/chrome-remote-interface');
+const CDP  = require(require('path').resolve(__dirname, '../tradingview-mcp/node_modules/chrome-remote-interface'));
 const path = require('path');
 const fs   = require('fs');
 const { execFileSync } = require('child_process');
@@ -754,7 +754,19 @@ function evaluateSetup(price, trigger, indicators, levels) {
     VAH: direction === 'long' ? `VAH $${Math.round(trigger.mid).toLocaleString()} — breakout above value area, bullish expansion` : `VAH $${Math.round(trigger.mid).toLocaleString()} — value area high, institutional supply zone`,
     POC: `POC $${Math.round(trigger.mid).toLocaleString()} — mean reversion to fair value`,
   }[trigger.type] || `Level at $${Math.round(trigger.mid).toLocaleString()}`;
-  criteria.push({ label: levelDesc, pass: true, auto: true });
+  const plainLevel = {
+    HVN: direction === 'long'
+      ? 'Price is at a high-volume support level — buyers have defended this area before'
+      : 'Price is at a high-volume resistance level — sellers have defended this area before',
+    VAL: 'Price is at the bottom of the fair-value zone — buyers typically step in here',
+    VAH: direction === 'long'
+      ? 'Price broke above the fair-value zone — buyers expanding upward (breakout)'
+      : 'Price is at the top of the fair-value zone — sellers typically defend here',
+    POC: direction === 'long'
+      ? 'Price returned to the most-traded price level — acts as a support magnet'
+      : 'Price returned to the most-traded price level — acts as a resistance magnet',
+  }[trigger.type] || `Price near key level at $${Math.round(trigger.mid).toLocaleString()}`;
+  criteria.push({ label: levelDesc, plain: plainLevel, pass: true, auto: true });
 
   // 2. VRVP delta at the level (up vol vs down vol)
   if (trigger.type === 'HVN' && trigger.upVol != null) {
@@ -765,6 +777,7 @@ function evaluateSetup(price, trigger, indicators, levels) {
     const aligned = (direction === 'long' && levelBullish) || (direction === 'short' && levelBearish);
     criteria.push({
       label: `HVN delta: ${upPct}% bull / ${100 - upPct}% bear — ${levelBullish ? 'buyers dominated' : levelBearish ? 'sellers dominated' : 'balanced'}`,
+      plain: `${upPct}% of trading at this level was buying — ${aligned ? 'supports this trade' : 'works against this trade'}`,
       pass: aligned ? true : (levelBullish || levelBearish) ? false : null,
       auto: !!aligned || levelBullish || levelBearish,
     });
@@ -775,6 +788,9 @@ function evaluateSetup(price, trigger, indicators, levels) {
     const aligned = direction === 'short' ? cvd < 0 : cvd > 0;
     criteria.push({
       label: `CVD ${cvd > 0 ? '+' : ''}${Math.round(cvd)} (${cvd < 0 ? 'bearish' : 'bullish'})`,
+      plain: aligned
+        ? `${cvd > 0 ? 'More buyers than sellers' : 'More sellers than buyers'} right now — confirms this trade`
+        : `${cvd > 0 ? 'More buyers than sellers' : 'More sellers than buyers'} right now — works against this ${direction}`,
       pass: aligned, auto: true,
     });
   } else {
@@ -788,6 +804,9 @@ function evaluateSetup(price, trigger, indicators, levels) {
     const aligned = direction === 'short' ? sessionBearish : sessionBullish;
     criteria.push({
       label: `Session VP ${sessionVP.up}↑ / ${sessionVP.down}↓ (${sessionBearish ? 'bearish' : sessionBullish ? 'bullish' : 'neutral'})`,
+      plain: aligned
+        ? `Today's session has more ${direction === 'long' ? 'buyers' : 'sellers'} — confirms direction`
+        : `Today's session leans ${sessionBullish ? 'bullish' : 'bearish'} — works against this ${direction}`,
       pass: aligned, auto: true,
     });
   }
@@ -798,6 +817,9 @@ function evaluateSetup(price, trigger, indicators, levels) {
     const aligned = direction === 'short' ? belowVwap : !belowVwap;
     criteria.push({
       label: `VWAP $${Math.round(vwap).toLocaleString()} — price is ${belowVwap ? 'below' : 'above'}`,
+      plain: aligned
+        ? `Price is ${belowVwap ? 'below' : 'above'} the institutional average price — ${direction === 'long' ? 'bullish' : 'bearish'} bias confirmed`
+        : `Price is on the wrong side of the institutional average — works against this trade`,
       pass: aligned, auto: true,
     });
   }
@@ -808,6 +830,9 @@ function evaluateSetup(price, trigger, indicators, levels) {
     const aligned = direction === 'long' ? oiRising : !oiRising;
     criteria.push({
       label: `OI ${oiTrend} — ${oiRising ? 'conviction' : 'caution/liquidation'}`,
+      plain: aligned
+        ? `New positions are being opened — traders have conviction in this move`
+        : `${oiRising ? 'New positions opening' : 'Positions being closed'} — works against this trade`,
       pass: aligned, auto: true,
     });
   } else if (oiTrend === 'flat') {
@@ -821,6 +846,9 @@ function evaluateSetup(price, trigger, indicators, levels) {
     const aligned = direction === 'long' ? macd4h.bullish : !macd4h.bullish;
     criteria.push({
       label: `4H MACD ${macd4h.bullish ? 'bullish' : 'bearish'} (hist ${macd4h.histogram > 0 ? '+' : ''}${Math.round(macd4h.histogram)})`,
+      plain: aligned
+        ? `4-hour trend confirms ${direction === 'long' ? 'buyers' : 'sellers'} are in control`
+        : `4-hour trend is against this trade — momentum not aligned`,
       pass: aligned, auto: true,
     });
   } else {
@@ -833,6 +861,9 @@ function evaluateSetup(price, trigger, indicators, levels) {
     const aligned = direction === 'long' ? aboveMid : !aboveMid;
     criteria.push({
       label: `12H RSI ${Math.round(rsi12h)} (${aboveMid ? 'above' : 'below'} 50)`,
+      plain: aligned
+        ? `12-hour momentum supports this trade (on the ${aboveMid ? 'bullish' : 'bearish'} side)`
+        : `12-hour momentum does not support this trade direction`,
       pass: aligned, auto: true,
     });
   } else {
@@ -845,6 +876,9 @@ function evaluateSetup(price, trigger, indicators, levels) {
                       || (direction === 'short' && weeklyTrend === 'downtrend');
     criteria.push({
       label: `Weekly trend: ${weeklyTrend} — ${trendAligned ? 'with trend ✓' : 'COUNTER-TREND ⚠'}`,
+      plain: trendAligned
+        ? `Going WITH the weekly ${weeklyTrend} — higher probability setup`
+        : `Going AGAINST the weekly ${weeklyTrend} — higher risk, consider sizing down`,
       pass: trendAligned, auto: true,
     });
   } else if (weeklyTrend === 'neutral') {
@@ -912,13 +946,30 @@ function evaluateSetup(price, trigger, indicators, levels) {
 function formatSetupMessage(price, trigger, setup) {
   const { direction, entry, stop, tp1Price, tp2Price, tp3Price, rr1, rr2, rr3,
           criteria, autoPassed, autoTotal, levelType, setupType, probability } = setup;
+
+  const isSetupA = autoPassed === autoTotal && autoTotal >= 3;
+  const isSetupB = !isSetupA && autoPassed >= Math.ceil(autoTotal * 0.6);
   const dirLabel = direction === 'short' ? '🔴 SHORT' : '🟢 LONG';
-  const triggerLine = direction === 'short'
-    ? 'Wait for 30M bearish confirmation below level'
-    : 'Wait for 30M bullish confirmation above level';
+  const headerPrefix = isSetupA ? '💰 ' : '';
+
+  // Verdict — plain-English at-a-glance guidance
+  let verdictLine, verdictBody;
+  if (isSetupA) {
+    verdictLine = '💰 **TAKE THIS TRADE** — every signal is green';
+    verdictBody = direction === 'long'
+      ? `Every indicator agrees buyers are in control. Price is at a key support level. Wait for a 30-min candle to close above $${entry.toLocaleString()} before entering.`
+      : `Every indicator agrees sellers are in control. Price is at a key resistance level. Wait for a 30-min candle to close below $${entry.toLocaleString()} before entering.`;
+  } else if (isSetupB) {
+    verdictLine = `⚠️ **WATCHLIST** — ${autoPassed} of ${autoTotal} signals green`;
+    verdictBody = `Most signals line up but a few are against you. Only enter if you get a strong ${direction === 'long' ? 'bullish' : 'bearish'} 30-min candle close ${direction === 'long' ? 'above' : 'below'} $${entry.toLocaleString()}. Consider a smaller position.`;
+  } else {
+    verdictLine = `🚫 **SKIP THIS ONE** — only ${autoPassed} of ${autoTotal} signals green`;
+    verdictBody = `Too many signals are against this trade. The odds are not in your favor. Let this one pass and wait for a cleaner setup.`;
+  }
+
   const invalidation = direction === 'short'
-    ? `4H close above $${stop.toLocaleString()}`
-    : `4H close below $${stop.toLocaleString()}`;
+    ? `4H candle closes above $${stop.toLocaleString()} — exit immediately`
+    : `4H candle closes below $${stop.toLocaleString()} — exit immediately`;
   const levelStr = `$${Math.round(trigger.lo).toLocaleString()}–$${Math.round(trigger.hi).toLocaleString()}`;
   const alertLevels = [
     `$${Math.round(trigger.mid).toLocaleString()} (${levelType})`,
@@ -931,16 +982,19 @@ function formatSetupMessage(price, trigger, setup) {
 
   const criteriaLines = criteria.map(c => {
     const icon = c.pass === true ? '✅' : c.pass === false ? '❌' : '⚠️';
-    return `${icon} ${c.label}`;
+    return `${icon} ${c.plain || c.label}`;
   }).join('\n');
 
   const ts = new Date().toLocaleString('en-US', { timeZone: 'UTC', hour12: false, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
   return [
-    `${dirLabel} SIGNAL | BINANCE:BTCUSDT.P | ${ts} UTC`,
+    `${headerPrefix}${dirLabel} SIGNAL | BINANCE:BTCUSDT.P | ${ts} UTC`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
     `**Price** $${Math.round(price).toLocaleString()} | **${levelType}** ${levelStr}`,
     `**Setup** ${setupType} | **Win Rate** ~${probNum}% (${probLabel})`,
+    ``,
+    verdictLine,
+    verdictBody,
     ``,
     `**ENTRY**  $${entry.toLocaleString()}`,
     `**STOP**   $${stop.toLocaleString()}`,
@@ -948,16 +1002,14 @@ function formatSetupMessage(price, trigger, setup) {
     `**TP2**    $${tp2Price.toLocaleString()} — 1:${rr2}`,
     `**TP3**    $${tp3Price.toLocaleString()} — 1:${rr3}`,
     ``,
-    `**TRIGGER**  ${triggerLine}`,
-    ``,
-    `**CRITERIA** (${autoPassed}/${autoTotal} auto-confirmed)`,
+    `**SIGNALS** (${autoPassed}/${autoTotal} confirmed)`,
     criteriaLines,
     ``,
     `**INVALIDATION**  ${invalidation}`,
     ``,
     `**SET ALERTS**  ${alertLevels}`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-    `📊 React with 📊 for deep MTF analysis`,
+    `📊 React with 📊 for live MTF analysis`,
   ].join('\n');
 }
 
@@ -1304,16 +1356,21 @@ function checkPendingConfirmation(price, indicators) {
     const oiConfirmed = oi != null && baselineOI != null && baselineOI > 0
       && (oi - baselineOI) / baselineOI >= OI_CONFIRM_PCT;
 
-    // CVD confirmation: must be directionally aligned, grown ≥ 1.5× AND grown
-    // by at least CVD_CONFIRM_MIN absolute units (prevents trivial passes when
-    // baseline CVD is near zero)
-    const cvdAligned  = direction === 'long' ? (cvd != null && cvd > 0) : (cvd != null && cvd < 0);
-    const cvdDelta    = cvd != null && baselineCVD != null ? Math.abs(cvd - baselineCVD) : 0;
-    const cvdGrown    = cvdAligned
-      && cvdDelta >= CVD_CONFIRM_MIN
-      && Math.abs(cvd ?? 0) >= Math.abs(baselineCVD ?? 0) * CVD_CONFIRM_MULT;
+    // CVD confirmation — direction-aware:
+    //   Long:  CVD must be positive, risen ≥ CVD_CONFIRM_MIN from baseline, AND ≥ 1.5× baseline absolute.
+    //          (baseline is typically positive when a long fires; we need it to keep growing)
+    //   Short: CVD must have DECLINED ≥ CVD_CONFIRM_MIN from baseline.
+    //          We do NOT require CVD to flip negative — shorts fire when CVD is still bullish
+    //          (price was bid up to resistance). A meaningful drop in CVD (sellers absorbing buyers)
+    //          is the correct confirmation signal, not a full sign flip.
+    const cvdDelta = cvd != null && baselineCVD != null ? cvd - baselineCVD : null;
+    const cvdGrown = direction === 'long'
+      ? (cvd != null && cvd > 0 && cvdDelta != null
+          && cvdDelta >= CVD_CONFIRM_MIN
+          && Math.abs(cvd) >= Math.abs(baselineCVD ?? 0) * CVD_CONFIRM_MULT)
+      : (cvdDelta != null && cvdDelta <= -CVD_CONFIRM_MIN);
 
-    log(`Pending ${key}: OI ${baselineOI}→${oi} confirmed=${oiConfirmed} | CVD ${baselineCVD}→${cvd} delta=${Math.round(cvdDelta)} confirmed=${cvdGrown}`);
+    log(`Pending ${key}: OI ${baselineOI}→${oi} confirmed=${oiConfirmed} | CVD ${baselineCVD}→${cvd} delta=${cvdDelta != null ? Math.round(cvdDelta) : 'n/a'} confirmed=${cvdGrown}`);
 
     if (!oiConfirmed || !cvdGrown) continue;
 
@@ -1323,7 +1380,14 @@ function checkPendingConfirmation(price, indicators) {
     const oiPct    = baselineOI > 0 ? ((oi - baselineOI) / baselineOI * 100).toFixed(2) : '?';
     const cvdBase  = baselineCVD != null ? (baselineCVD > 0 ? '+' : '') + Math.round(baselineCVD) : 'n/a';
     const cvdNow   = cvd        != null ? (cvd        > 0 ? '+' : '') + Math.round(cvd)        : 'n/a';
-    const cvdDeltaStr = cvdDelta > 0 ? `+${Math.round(cvdDelta)}` : Math.round(cvdDelta);
+    const cvdDeltaNum = cvdDelta != null ? Math.round(cvdDelta) : 0;
+    const cvdDeltaStr = cvdDeltaNum >= 0 ? `+${cvdDeltaNum}` : `${cvdDeltaNum}`;
+    const entryLine = direction === 'long'
+      ? `**ENTRY**  Pullback to zone top $${Math.round(high).toLocaleString()} or aggressive at market`
+      : `**ENTRY**  Bounce to zone bottom $${Math.round(low).toLocaleString()} or aggressive at market`;
+    const stopLine = direction === 'long'
+      ? `**STOP**   $${Math.round(low * (1 - 0.002)).toLocaleString()} (below zone low)`
+      : `**STOP**   $${Math.round(high * (1 + 0.002)).toLocaleString()} (above zone high)`;
 
     const msg = [
       `${dirLabel} TRIGGER CONFIRMED | BINANCE:BTCUSDT.P`,
@@ -1333,10 +1397,10 @@ function checkPendingConfirmation(price, indicators) {
       ``,
       `**CONFIRMATION ORDER FLOW**`,
       `✅ OI: ${baselineOI?.toFixed(2)}K → ${oi?.toFixed(2)}K (+${oiPct}%) — new ${direction} positions opening`,
-      `✅ CVD: ${cvdBase} → ${cvdNow} (Δ ${cvdDeltaStr}) — conviction surge confirmed`,
+      `✅ CVD: ${cvdBase} → ${cvdNow} (Δ ${cvdDeltaStr}) — conviction ${direction === 'long' ? 'surge' : 'drop'} confirmed`,
       ``,
-      `**ENTRY**  Pullback to zone top $${Math.round(high).toLocaleString()} or aggressive at market`,
-      `**STOP**   $${Math.round(low * (1 - 0.002)).toLocaleString()} (below zone low)`,
+      entryLine,
+      stopLine,
       `**ACTION** Check 30M for CHoCH — if not fired yet, it is imminent`,
       `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
       `📊 React with 📊 for deep MTF analysis`,
