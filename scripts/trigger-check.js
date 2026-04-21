@@ -915,6 +915,15 @@ function evaluateSetup(price, trigger, indicators, levels) {
     tp3Price = Math.round(entry + riskPts * 3);
   }
 
+  // Ensure TPs are ordered correctly regardless of which targets were available:
+  // long  → ascending  (TP1 closest/lowest, TP3 furthest/highest)
+  // short → descending (TP1 closest/highest, TP3 furthest/lowest)
+  if (direction === 'long') {
+    [tp1Price, tp2Price, tp3Price] = [tp1Price, tp2Price, tp3Price].sort((a, b) => a - b);
+  } else {
+    [tp1Price, tp2Price, tp3Price] = [tp1Price, tp2Price, tp3Price].sort((a, b) => b - a);
+  }
+
   const riskPts = Math.abs(entry - stop);
   const rr1 = riskPts > 0 ? (Math.abs(tp1Price - entry) / riskPts).toFixed(1) : '?';
   const rr2 = riskPts > 0 ? (Math.abs(tp2Price - entry) / riskPts).toFixed(1) : '?';
