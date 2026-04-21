@@ -1038,12 +1038,24 @@ function writeState(state) {
   try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); } catch {}
 }
 
-function isCoolingDown(zoneKey) {
+function isCoolingDown(zoneKey, incomingDir, cvd) {
   try {
     const entry = readState()[zoneKey];
     if (!entry) return false;
     const ts = typeof entry === 'number' ? entry : entry.ts; // handle legacy format
-    return (Date.now() - ts) < COOLDOWN_MS;
+    if ((Date.now() - ts) >= COOLDOWN_MS) return false;
+
+    // Direction-aware bypass: if the cooldown was set for a long and the new
+    // trigger is a short with negative CVD, the level has likely failed as
+    // support and flipped to resistance — allow the short to fire.
+    if (incomingDir && entry.direction && incomingDir !== entry.direction) {
+      if (incomingDir === 'short' && cvd != null && cvd < 0) {
+        log(`Cooldown bypass: ${zoneKey} was locked as long, short re-entry with CVD ${Math.round(cvd)} — failed-breakout pattern`);
+        return false;
+      }
+    }
+
+    return true;
   } catch { return false; }
 }
 
@@ -1851,7 +1863,7 @@ async function main() {
   if (trigger) {
     const levelKey = `${trigger.type.toLowerCase()}-${Math.round(trigger.mid)}`;
 
-    if (isCoolingDown(levelKey)) {
+    if (isCoolingDown(levelKey, trigger.direction, indicators.cvd)) {
       log(`Level ${levelKey} triggered but cooling down — skipping`);
     } else {
       log(`TRIGGER: ${trigger.type} $${Math.round(trigger.lo).toLocaleString()}–$${Math.round(trigger.hi).toLocaleString()} | direction: ${trigger.direction} | dist $${Math.round(trigger.dist).toLocaleString()}`);
@@ -1910,13 +1922,42 @@ async function main() {
         triggered = true;
 
       } else {
-        // Fire the signal — storeMessageId() is called automatically inside notify()
-        const message = formatSetupMessage(price, trigger, setup);
-        notify(setup.direction, message);
-        markAlerted(levelKey, setup.direction, trigger);
-        logTrade(price, trigger, setup);
-        if (!indicators.oiTrend || indicators.oiTrend === 'flat') {
-          markPending(levelKey, setup.direction, trigger, indicators);
+        // Gate: suppress C-type shorts with near-zero CVD while price is above VWAP.
+        // Historically these are coin-flips (50% win rate). Allow through if CVD ≥ 50
+        // (strong directional flow) or price is already below VWAP (bearish context).
+        const isCShortCoinFlip = setup.direction === 'short'
+          && setup.setupType.startsWith('C')
+          && (indicators.cvd ?? 0) < 50
+          && indicators.vwap != null
+          && price >= indicators.vwap;
+
+        if (isCShortCoinFlip) {
+          log(`C-short gate: suppressing ${levelKey} — CVD ${Math.round(indicators.cvd ?? 0)} near-zero + price above VWAP $${Math.round(indicators.vwap)}`);
+          const levelStr = `$${Math.round(trigger.lo).toLocaleString()}–$${Math.round(trigger.hi).toLocaleString()}`;
+          notify('info', [
+            `📊 ${trigger.type} APPROACHED — SIGNAL SUPPRESSED | BTCUSDT.P`,
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+            `**Price** $${Math.round(price).toLocaleString()} | **${trigger.type}** ${levelStr}`,
+            ``,
+            `**C-SHORT SUPPRESSED — WEAK ORDER FLOW**`,
+            `CVD near-zero (${Math.round(indicators.cvd ?? 0)}) with price above VWAP $${Math.round(indicators.vwap).toLocaleString()} — historically 50% win rate.`,
+            ``,
+            `**FLIP TRIGGER**  CVD turns negative AND price drops below VWAP → short viable`,
+            ``,
+            `**CRITERIA**`,
+            setup.criteria.map(c => `${c.pass === true ? '✅' : c.pass === false ? '❌' : '⚠️'} ${c.label}`).join('\n'),
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+          ].join('\n'));
+          markAlerted(levelKey, setup.direction, trigger);
+        } else {
+          // Fire the signal — storeMessageId() is called automatically inside notify()
+          const message = formatSetupMessage(price, trigger, setup);
+          notify(setup.direction, message);
+          markAlerted(levelKey, setup.direction, trigger);
+          logTrade(price, trigger, setup);
+          if (!indicators.oiTrend || indicators.oiTrend === 'flat') {
+            markPending(levelKey, setup.direction, trigger, indicators);
+          }
         }
         triggered = true;
       }
