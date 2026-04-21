@@ -310,6 +310,15 @@ See `TODO.md` for full list. Key items:
 
 ---
 
+## Workflow
+
+- **Commit and push after every significant change.** Bug fixes, new features, refactors — stage the relevant files and push to `main`. Don't wait to be asked.
+- **Never hardcode absolute paths.** Use `__dirname`-relative `path.resolve()` so the code works on both the primary machine (`/Users/vpm/trading/`) and the partner's Windows install.
+- **Partner machine** (`PRIMARY=false`, `TRADINGVIEW_ENABLED=false`): does not run crons, does not use TradingView Desktop or the MCP server. All CDP/TradingView code must be guarded by those flags or be in scripts that are never called on non-primary machines.
+- **Only work within `~/trading/`.** Do not read or modify files outside this directory.
+
+---
+
 ## Adding a New Instrument
 
 1. Create `scripts/{ticker}/trigger-check.js` and `scripts/{ticker}/analyze.js` (model on `scripts/bz/`)
