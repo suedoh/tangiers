@@ -278,7 +278,10 @@ async function main() {
         parsed.date,
         parsed.thresholdF,
         parsed.direction,
-        { includeNWS: !!parsed.coords.nwsStation }
+        {
+          includeNWS:  !!parsed.coords.nwsStation,
+          ghcnStation: parsed.coords.ghcnStation || null,
+        }
       );
     } catch (err) {
       log(`Forecast error for ${conditionId}: ${err.message}`);

@@ -47,47 +47,51 @@ function httpGet(hostname, path, timeoutMs = 12_000) {
 
 /**
  * Common Polymarket weather market cities.
- * nwsStation: nearest ASOS station used by NWS (for US cities).
- * tz: IANA timezone for the city.
+ * nwsStation:  nearest ASOS station used by NWS (for US cities).
+ * ghcnStation: NOAA GHCN-Daily station ID (without 'GHCND:' prefix).
+ *              This is the same underlying station data Polymarket uses to
+ *              settle US temperature markets. Register for a free NCEI token
+ *              at ncei.noaa.gov to enable station-matched historical base rates.
+ * tz:          IANA timezone.
  */
 const CITY_COORDS = {
   // United States
-  'new york':       { lat: 40.7128, lon: -74.0060, tz: 'America/New_York',    nwsStation: 'KNYC' },
-  'nyc':            { lat: 40.7128, lon: -74.0060, tz: 'America/New_York',    nwsStation: 'KNYC' },
-  'new york city':  { lat: 40.7128, lon: -74.0060, tz: 'America/New_York',    nwsStation: 'KNYC' },
-  'los angeles':    { lat: 34.0522, lon: -118.2437, tz: 'America/Los_Angeles', nwsStation: 'KLAX' },
-  'la':             { lat: 34.0522, lon: -118.2437, tz: 'America/Los_Angeles', nwsStation: 'KLAX' },
-  'chicago':        { lat: 41.8781, lon: -87.6298,  tz: 'America/Chicago',    nwsStation: 'KORD' },
-  'miami':          { lat: 25.7617, lon: -80.1918,  tz: 'America/New_York',   nwsStation: 'KMIA' },
-  'phoenix':        { lat: 33.4484, lon: -112.0740, tz: 'America/Phoenix',    nwsStation: 'KPHX' },
-  'las vegas':      { lat: 36.1699, lon: -115.1398, tz: 'America/Los_Angeles', nwsStation: 'KLAS' },
-  'seattle':        { lat: 47.6062, lon: -122.3321, tz: 'America/Los_Angeles', nwsStation: 'KSEA' },
-  'boston':         { lat: 42.3601, lon: -71.0589,  tz: 'America/New_York',   nwsStation: 'KBOS' },
-  'atlanta':        { lat: 33.7490, lon: -84.3880,  tz: 'America/New_York',   nwsStation: 'KATL' },
-  'houston':        { lat: 29.7604, lon: -95.3698,  tz: 'America/Chicago',    nwsStation: 'KHOU' },
-  'dallas':         { lat: 32.7767, lon: -96.7970,  tz: 'America/Chicago',    nwsStation: 'KDFW' },
-  'denver':         { lat: 39.7392, lon: -104.9903, tz: 'America/Denver',     nwsStation: 'KDEN' },
-  'minneapolis':    { lat: 44.9778, lon: -93.2650,  tz: 'America/Chicago',    nwsStation: 'KMSP' },
-  'washington':     { lat: 38.9072, lon: -77.0369,  tz: 'America/New_York',   nwsStation: 'KDCA' },
-  'dc':             { lat: 38.9072, lon: -77.0369,  tz: 'America/New_York',   nwsStation: 'KDCA' },
-  'san francisco':  { lat: 37.7749, lon: -122.4194, tz: 'America/Los_Angeles', nwsStation: 'KSFO' },
-  'sf':             { lat: 37.7749, lon: -122.4194, tz: 'America/Los_Angeles', nwsStation: 'KSFO' },
-  'new orleans':    { lat: 29.9511, lon: -90.0715,  tz: 'America/Chicago',    nwsStation: 'KMSY' },
-  'detroit':        { lat: 42.3314, lon: -83.0458,  tz: 'America/Detroit',    nwsStation: 'KDTW' },
-  'portland':       { lat: 45.5231, lon: -122.6765, tz: 'America/Los_Angeles', nwsStation: 'KPDX' },
-  'nashville':      { lat: 36.1627, lon: -86.7816,  tz: 'America/Chicago',    nwsStation: 'KBNA' },
-  'charlotte':      { lat: 35.2271, lon: -80.8431,  tz: 'America/New_York',   nwsStation: 'KCLT' },
-  'tampa':          { lat: 27.9506, lon: -82.4572,  tz: 'America/New_York',   nwsStation: 'KTPA' },
-  'orlando':        { lat: 28.5383, lon: -81.3792,  tz: 'America/New_York',   nwsStation: 'KMCO' },
-  // International
-  'london':         { lat: 51.5074, lon: -0.1278,   tz: 'Europe/London',      nwsStation: null },
-  'paris':          { lat: 48.8566, lon: 2.3522,    tz: 'Europe/Paris',       nwsStation: null },
-  'tokyo':          { lat: 35.6762, lon: 139.6503,  tz: 'Asia/Tokyo',         nwsStation: null },
-  'hong kong':      { lat: 22.3193, lon: 114.1694,  tz: 'Asia/Hong_Kong',     nwsStation: null },
-  'sydney':         { lat: -33.8688, lon: 151.2093, tz: 'Australia/Sydney',   nwsStation: null },
-  'dubai':          { lat: 25.2048, lon: 55.2708,   tz: 'Asia/Dubai',         nwsStation: null },
-  'toronto':        { lat: 43.6532, lon: -79.3832,  tz: 'America/Toronto',    nwsStation: null },
-  'chicago o\'hare': { lat: 41.9742, lon: -87.9073, tz: 'America/Chicago',    nwsStation: 'KORD' },
+  'new york':       { lat: 40.7128,  lon: -74.0060,  tz: 'America/New_York',    nwsStation: 'KNYC', ghcnStation: 'USW00094728' }, // Central Park
+  'nyc':            { lat: 40.7128,  lon: -74.0060,  tz: 'America/New_York',    nwsStation: 'KNYC', ghcnStation: 'USW00094728' },
+  'new york city':  { lat: 40.7128,  lon: -74.0060,  tz: 'America/New_York',    nwsStation: 'KNYC', ghcnStation: 'USW00094728' },
+  'los angeles':    { lat: 34.0522,  lon: -118.2437, tz: 'America/Los_Angeles', nwsStation: 'KLAX', ghcnStation: 'USW00023174' }, // LAX
+  'la':             { lat: 34.0522,  lon: -118.2437, tz: 'America/Los_Angeles', nwsStation: 'KLAX', ghcnStation: 'USW00023174' },
+  'chicago':        { lat: 41.8781,  lon: -87.6298,  tz: 'America/Chicago',     nwsStation: 'KORD', ghcnStation: 'USW00094846' }, // O'Hare
+  'miami':          { lat: 25.7617,  lon: -80.1918,  tz: 'America/New_York',    nwsStation: 'KMIA', ghcnStation: 'USW00012839' },
+  'phoenix':        { lat: 33.4484,  lon: -112.0740, tz: 'America/Phoenix',     nwsStation: 'KPHX', ghcnStation: 'USW00023183' },
+  'las vegas':      { lat: 36.1699,  lon: -115.1398, tz: 'America/Los_Angeles', nwsStation: 'KLAS', ghcnStation: 'USW00023169' },
+  'seattle':        { lat: 47.6062,  lon: -122.3321, tz: 'America/Los_Angeles', nwsStation: 'KSEA', ghcnStation: 'USW00024233' },
+  'boston':         { lat: 42.3601,  lon: -71.0589,  tz: 'America/New_York',    nwsStation: 'KBOS', ghcnStation: 'USW00014739' },
+  'atlanta':        { lat: 33.7490,  lon: -84.3880,  tz: 'America/New_York',    nwsStation: 'KATL', ghcnStation: 'USW00013874' },
+  'houston':        { lat: 29.7604,  lon: -95.3698,  tz: 'America/Chicago',     nwsStation: 'KHOU', ghcnStation: 'USW00012918' }, // Hobby
+  'dallas':         { lat: 32.7767,  lon: -96.7970,  tz: 'America/Chicago',     nwsStation: 'KDFW', ghcnStation: 'USW00003927' },
+  'denver':         { lat: 39.7392,  lon: -104.9903, tz: 'America/Denver',      nwsStation: 'KDEN', ghcnStation: 'USW00003017' },
+  'minneapolis':    { lat: 44.9778,  lon: -93.2650,  tz: 'America/Chicago',     nwsStation: 'KMSP', ghcnStation: 'USW00014922' },
+  'washington':     { lat: 38.9072,  lon: -77.0369,  tz: 'America/New_York',    nwsStation: 'KDCA', ghcnStation: 'USW00013743' }, // Reagan
+  'dc':             { lat: 38.9072,  lon: -77.0369,  tz: 'America/New_York',    nwsStation: 'KDCA', ghcnStation: 'USW00013743' },
+  'san francisco':  { lat: 37.7749,  lon: -122.4194, tz: 'America/Los_Angeles', nwsStation: 'KSFO', ghcnStation: 'USW00023234' },
+  'sf':             { lat: 37.7749,  lon: -122.4194, tz: 'America/Los_Angeles', nwsStation: 'KSFO', ghcnStation: 'USW00023234' },
+  'new orleans':    { lat: 29.9511,  lon: -90.0715,  tz: 'America/Chicago',     nwsStation: 'KMSY', ghcnStation: 'USW00012916' },
+  'detroit':        { lat: 42.3314,  lon: -83.0458,  tz: 'America/Detroit',     nwsStation: 'KDTW', ghcnStation: 'USW00094847' },
+  'portland':       { lat: 45.5231,  lon: -122.6765, tz: 'America/Los_Angeles', nwsStation: 'KPDX', ghcnStation: 'USW00024229' },
+  'nashville':      { lat: 36.1627,  lon: -86.7816,  tz: 'America/Chicago',     nwsStation: 'KBNA', ghcnStation: 'USW00013897' },
+  'charlotte':      { lat: 35.2271,  lon: -80.8431,  tz: 'America/New_York',    nwsStation: 'KCLT', ghcnStation: 'USW00013881' },
+  'tampa':          { lat: 27.9506,  lon: -82.4572,  tz: 'America/New_York',    nwsStation: 'KTPA', ghcnStation: 'USW00012842' },
+  'orlando':        { lat: 28.5383,  lon: -81.3792,  tz: 'America/New_York',    nwsStation: 'KMCO', ghcnStation: 'USW00012815' },
+  // International — GHCN IDs where available (no NWS/GHCN for non-US)
+  'london':         { lat: 51.5074,  lon: -0.1278,   tz: 'Europe/London',       nwsStation: null, ghcnStation: null },
+  'paris':          { lat: 48.8566,  lon: 2.3522,    tz: 'Europe/Paris',        nwsStation: null, ghcnStation: null },
+  'tokyo':          { lat: 35.6762,  lon: 139.6503,  tz: 'Asia/Tokyo',          nwsStation: null, ghcnStation: null },
+  'hong kong':      { lat: 22.3193,  lon: 114.1694,  tz: 'Asia/Hong_Kong',      nwsStation: null, ghcnStation: null },
+  'sydney':         { lat: -33.8688, lon: 151.2093,  tz: 'Australia/Sydney',    nwsStation: null, ghcnStation: null },
+  'dubai':          { lat: 25.2048,  lon: 55.2708,   tz: 'Asia/Dubai',          nwsStation: null, ghcnStation: null },
+  'toronto':        { lat: 43.6532,  lon: -79.3832,  tz: 'America/Toronto',     nwsStation: null, ghcnStation: null },
+  'chicago o\'hare': { lat: 41.9742, lon: -87.9073,  tz: 'America/Chicago',     nwsStation: 'KORD', ghcnStation: 'USW00094846' },
 };
 
 /**

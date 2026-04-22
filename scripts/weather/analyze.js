@@ -134,7 +134,10 @@ async function analyze(opts) {
     parsed.date,
     parsed.thresholdF,
     parsed.direction,
-    { includeNWS: !!parsed.coords.nwsStation }
+    {
+      includeNWS:  !!parsed.coords.nwsStation,
+      ghcnStation: parsed.coords.ghcnStation || null,
+    }
   );
 
   const { ensemble: e, models: m, historical: h, nws, consensus } = forecast;
@@ -236,6 +239,12 @@ async function analyze(opts) {
   }
   lines.push(`  ${'─'.repeat(44)}`);
   lines.push(`  **FINAL CONSENSUS   ${bar(consensus, 10)} ${pct(consensus)}**`);
+  if (forecast.extremeThreshold) {
+    const pctile = forecast.thresholdPercentile != null
+      ? ` (${(forecast.thresholdPercentile * 100).toFixed(0)}th percentile)`
+      : '';
+    lines.push(`  ⚠️ *Extreme threshold${pctile} — AI models downweighted, IFS upweighted*`);
+  }
   lines.push('');
 
   // ── Market vs Model ───────────────────────────────────────────────────────

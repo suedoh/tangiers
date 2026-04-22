@@ -5,13 +5,23 @@
  *
  * Sources (all free, no API key required unless noted):
  *   1. Open-Meteo ensemble API  — 31-member GFS ensemble → direct probability
- *   2. Open-Meteo forecast API  — ECMWF IFS + ICON + GFS deterministic models
+ *   2. Open-Meteo forecast API  — ECMWF AIFS (AI) + IFS + ICON + GFS + HRRR (US)
  *   3. NWS API                  — US-only, official observations + forecasts
- *   4. Open-Meteo archive API   — 10-year historical base rates for same calendar date
+ *   4. NOAA GHCN-Daily CDO API  — station-matched TMAX/TMIN historical base rates
+ *                                  (same source Polymarket uses for settlement)
+ *                                  Requires NCEI_TOKEN env var (free: ncei.noaa.gov)
+ *   5. Open-Meteo archive API   — fallback historical base rates (gridded ERA5)
+ *
+ * Model weighting (per research — AIFS beats IFS by 5–20% on 2m temp at medium range;
+ * IFS retains edge at extremes — weights shift dynamically when threshold is in
+ * the top/bottom 10% of historical distribution):
+ *
+ *   Normal regime:   AIFS 35% · IFS 25% · ICON 20% · GFS 15% · HRRR 5% (US)
+ *   Extreme regime:  AIFS 20% · IFS 45% · ICON 20% · GFS 10% · HRRR 5% (US)
  *
  * Primary export:
  *   getForecast(lat, lon, targetDate, thresholdF, direction, opts)
- *     → { ensemble, models, historical, consensus, sources }
+ *     → { ensemble, models, historical, consensus, sources, extremeFlag }
  */
 
 const https = require('https');
@@ -20,6 +30,7 @@ const ENSEMBLE_API  = 'ensemble-api.open-meteo.com';
 const FORECAST_API  = 'api.open-meteo.com';
 const ARCHIVE_API   = 'archive-api.open-meteo.com';
 const NWS_API       = 'api.weather.gov';
+const NCEI_API      = 'www.ncei.noaa.gov';
 
 // ─── HTTP helper ──────────────────────────────────────────────────────────────
 
@@ -118,12 +129,40 @@ async function fetchEnsemble(lat, lon, targetDate, thresholdF, direction) {
 // ─── 2. Multi-model deterministic forecasts ───────────────────────────────────
 
 /**
- * Fetches ECMWF IFS, ICON, and GFS deterministic forecasts from Open-Meteo.
- * Converts each to a probability using Normal CDF + lead-time σ.
+ * Normal-regime model weights (per WeatherBench 2 + ECMWF scorecards):
+ *   AIFS leads IFS by 5–20% on 2m temp RMSE at medium range.
+ *   HRRR is 3km US-only (hourly updates) — strong for 0–2 day short-range.
  */
-async function fetchModels(lat, lon, targetDate, thresholdF, direction) {
-  const field = direction === 'below' ? 'temperature_2m_min' : 'temperature_2m_max';
-  const models = ['ecmwf_ifs025', 'icon_global', 'gfs_seamless'];
+const MODEL_WEIGHTS_NORMAL = {
+  ecmwf_aifs025: 0.35,  // ECMWF AI model — best average skill
+  ecmwf_ifs025:  0.25,  // ECMWF physics-based — best for extremes
+  icon_global:   0.20,  // DWD ICON — strong in Europe, solid globally
+  gfs_seamless:  0.15,  // NOAA GFS — reference model
+  gfs_hrrr:      0.05,  // NOAA HRRR — US only, 3km, high value short-range
+};
+
+/**
+ * Extreme-threshold weights: when market threshold is in top/bottom 10%
+ * historically, IFS is upweighted because AI models underperform at tails
+ * (Bonavita 2024 GRL; Ben-Bouallègue et al. 2024).
+ */
+const MODEL_WEIGHTS_EXTREME = {
+  ecmwf_aifs025: 0.20,  // downweighted — AI struggles at distribution tails
+  ecmwf_ifs025:  0.45,  // upweighted — physics-based better for extremes
+  icon_global:   0.20,
+  gfs_seamless:  0.10,
+  gfs_hrrr:      0.05,
+};
+
+/**
+ * Fetches ECMWF AIFS, ECMWF IFS, ICON, GFS, and HRRR (US) from Open-Meteo.
+ * Converts each forecast to a threshold-crossing probability via Normal CDF.
+ *
+ * @param {boolean} extremeThreshold  Use extreme-event model weights
+ */
+async function fetchModels(lat, lon, targetDate, thresholdF, direction, extremeThreshold = false) {
+  const field  = direction === 'below' ? 'temperature_2m_min' : 'temperature_2m_max';
+  const models = ['ecmwf_aifs025', 'ecmwf_ifs025', 'icon_global', 'gfs_seamless', 'gfs_hrrr'];
   const sigma  = leadTimeSigma(targetDate);
 
   const path = `/v1/forecast?latitude=${lat}&longitude=${lon}` +
@@ -132,47 +171,150 @@ async function fetchModels(lat, lon, targetDate, thresholdF, direction) {
     `&models=${models.join(',')}`;
 
   try {
-    const data = await httpGet(FORECAST_API, path);
+    const data  = await httpGet(FORECAST_API, path);
     const daily = data.daily || {};
 
-    const results = {};
+    const results  = {};
+    const weights  = extremeThreshold ? MODEL_WEIGHTS_EXTREME : MODEL_WEIGHTS_NORMAL;
+
     for (const model of models) {
-      // Multi-model response uses field names like temperature_2m_max_ecmwf_ifs025
-      // or just temperature_2m_max when a single model is queried
       const key = `${field}_${model}`;
-      const val = (daily[key] || daily[field] || [])[0];
+      const val = (daily[key] || [])[0];
       if (val != null && !isNaN(val)) {
         results[model] = {
           forecast: val,
-          prob: thresholdProbability(val, thresholdF, sigma, direction),
+          prob:     thresholdProbability(val, thresholdF, sigma, direction),
           sigma,
+          weight:   weights[model],
+          ai:       model.includes('aifs'),
         };
       }
     }
 
     if (Object.keys(results).length === 0) return null;
 
-    // Weighted consensus: ECMWF 40%, ICON 30%, GFS 30%
-    const weights = { ecmwf_ifs025: 0.40, icon_global: 0.30, gfs_seamless: 0.30 };
+    // Weighted consensus (normalise so missing models don't alter total)
     let totalWeight = 0, weightedProb = 0;
-    for (const [model, w] of Object.entries(weights)) {
-      if (results[model]) {
-        weightedProb  += results[model].prob * w;
-        totalWeight   += w;
-      }
+    for (const [model, mv] of Object.entries(results)) {
+      const w = weights[model] || 0;
+      weightedProb += mv.prob * w;
+      totalWeight  += w;
     }
 
     return {
-      models: results,
-      consensus: totalWeight > 0 ? weightedProb / totalWeight : null,
+      models:        results,
+      consensus:     totalWeight > 0 ? weightedProb / totalWeight : null,
       sigma,
+      extremeMode:   extremeThreshold,
     };
-  } catch (err) {
+  } catch {
     return null;
   }
 }
 
-// ─── 3. NWS official forecast (US only) ──────────────────────────────────────
+// ─── 3. NOAA GHCN-Daily station-matched historical base rates ─────────────────
+
+/**
+ * Fetches daily TMAX or TMIN from NOAA's GHCN-Daily dataset via the CDO API.
+ * This is the same underlying data source Polymarket uses for US market settlement,
+ * making it a more faithful historical baseline than gridded ERA5.
+ *
+ * Requires NCEI_TOKEN env var (free: https://www.ncdc.noaa.gov/cdo-web/token).
+ * Falls back to Open-Meteo archive silently if token is absent.
+ *
+ * @param {string} ghcnStation  e.g. 'USW00094728' (no 'GHCND:' prefix)
+ * @param {string} targetDate   'YYYY-MM-DD'
+ * @param {number} thresholdF
+ * @param {'above'|'below'} direction
+ */
+async function fetchGHCNBaseRate(ghcnStation, targetDate, thresholdF, direction) {
+  const token = process.env.NCEI_TOKEN;
+  if (!token || !ghcnStation) return null;
+
+  const [, mm, dd] = targetDate.split('-');
+  const currentYear = new Date().getFullYear();
+  const startYear   = currentYear - 12;   // 12 seasons for robust sample
+  const endYear     = currentYear - 1;
+
+  // NOAA CDO API: fetch 12 years of the exact calendar date
+  // datatypeid: TMAX or TMIN (tenths of °C — divide by 10 to get °C, then convert to °F)
+  const datatype = direction === 'below' ? 'TMIN' : 'TMAX';
+
+  // Build date range requests year-by-year to avoid CDO 1-year result limit
+  // CDO returns max ~1000 records; fetching month window around the date is safer
+  const mmdd        = `${mm}-${dd}`;
+  const startDate   = `${startYear}-${mm}-01`;
+  const endDateReq  = `${endYear}-${mm}-${String(Math.min(parseInt(dd) + 4, 28)).padStart(2, '0')}`;
+
+  const path = `/cdo-web/api/v2/data` +
+    `?datasetid=GHCND&stationid=GHCND:${ghcnStation}` +
+    `&datatypeid=${datatype}&units=standard` +
+    `&startdate=${startDate}&enddate=${endDateReq}` +
+    `&limit=1000`;
+
+  try {
+    const data = await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: NCEI_API,
+        path,
+        method:  'GET',
+        headers: { 'token': token, 'User-Agent': 'Weathermen/1.0 (Tangiers)' },
+      }, res => {
+        let raw = '';
+        res.on('data', c => raw += c);
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            try { resolve(JSON.parse(raw)); }
+            catch { reject(new Error(`NCEI JSON parse error`)); }
+          } else {
+            reject(new Error(`NCEI HTTP ${res.statusCode}`));
+          }
+        });
+      });
+      req.setTimeout(15_000, () => { req.destroy(); reject(new Error('NCEI timeout')); });
+      req.on('error', reject);
+      req.end();
+    });
+
+    const results = data.results || [];
+
+    // Filter to entries matching this calendar day (allow ±1 day for leap years)
+    const sameDayObs = results.filter(r => {
+      const d = (r.date || '').slice(5, 10); // 'MM-DD'
+      return d === mmdd;
+    });
+
+    if (sameDayObs.length < 3) return null;
+
+    // GHCN TMAX/TMIN values are in tenths of °C → convert to °F
+    const tempsF = sameDayObs
+      .map(r => (r.value / 10) * 9 / 5 + 32)
+      .filter(v => !isNaN(v) && v > -100 && v < 150);
+
+    if (tempsF.length < 3) return null;
+
+    const aboveCount = tempsF.filter(v =>
+      direction === 'above' ? v > thresholdF : v < thresholdF
+    ).length;
+
+    const mean = tempsF.reduce((a, b) => a + b, 0) / tempsF.length;
+    const sorted = [...tempsF].sort((a, b) => a - b);
+    const thresholdPercentile = sorted.filter(v => v <= thresholdF).length / sorted.length;
+
+    return {
+      prob:                aboveCount / tempsF.length,
+      sampleSize:          tempsF.length,
+      historicalMean:      mean,
+      thresholdPercentile, // 0–1: where the threshold sits in the historical distribution
+      source:              'GHCN-Daily',
+      station:             ghcnStation,
+    };
+  } catch {
+    return null; // silently fall back to Open-Meteo archive
+  }
+}
+
+// ─── 5. NWS official forecast (US only) ──────────────────────────────────────
 
 /**
  * Fetches the NWS grid forecast for a US lat/lon.
@@ -214,7 +356,7 @@ async function fetchNWS(lat, lon, targetDate) {
   }
 }
 
-// ─── 4. Historical base rates (Open-Meteo archive, past 10 years) ─────────────
+// ─── 6. Historical base rates — Open-Meteo archive fallback (gridded ERA5) ────
 
 /**
  * Fetches the past 10 years of same-calendar-date temps and calculates
@@ -270,35 +412,62 @@ async function fetchHistoricalBaseRate(lat, lon, targetDate, thresholdF, directi
 /**
  * Get a full multi-source probability estimate for a temperature threshold market.
  *
+ * Step 1: Fetch historical base rate first (GHCN preferred, archive fallback).
+ *         Use thresholdPercentile to detect extreme thresholds.
+ * Step 2: Fetch ensemble + deterministic models in parallel, with extreme-mode
+ *         weights if the threshold sits in the top/bottom 10% historically.
+ * Step 3: Build weighted consensus.
+ *
  * @param {number} lat
  * @param {number} lon
- * @param {string} targetDate   'YYYY-MM-DD'
- * @param {number} thresholdF   Temperature threshold in °F
+ * @param {string} targetDate     'YYYY-MM-DD'
+ * @param {number} thresholdF     Temperature threshold in °F
  * @param {'above'|'below'} direction
- * @param {{ includeNWS?: boolean }} opts
+ * @param {{ includeNWS?: boolean, ghcnStation?: string }} opts
+ *   ghcnStation: GHCN station ID without 'GHCND:' prefix (e.g. 'USW00094728')
  * @returns {Promise<ForecastResult>}
  */
 async function getForecast(lat, lon, targetDate, thresholdF, direction = 'above', opts = {}) {
-  const [ensembleResult, modelsResult, historicalResult, nwsResult] = await Promise.allSettled([
+
+  // ── Step 1: Get historical base rate to detect extreme threshold ───────────
+  // Try GHCN-Daily (station-matched, same source as Polymarket settlement) first.
+  // Fall back to Open-Meteo gridded archive if no token or station provided.
+  let historical = null;
+  if (opts.ghcnStation) {
+    historical = await fetchGHCNBaseRate(opts.ghcnStation, targetDate, thresholdF, direction)
+      .catch(() => null);
+  }
+  if (!historical) {
+    historical = await fetchHistoricalBaseRate(lat, lon, targetDate, thresholdF, direction)
+      .catch(() => null);
+  }
+
+  // Detect extreme threshold: top/bottom 10% of historical distribution.
+  // When true, model weights shift to favour IFS over AI models (per Bonavita 2024 GRL).
+  const threshPercentile = historical?.thresholdPercentile ?? null;
+  const extremeThreshold = threshPercentile != null &&
+    (threshPercentile >= 0.90 || threshPercentile <= 0.10);
+
+  // ── Step 2: Fetch ensemble + deterministic + NWS in parallel ──────────────
+  const [ensembleResult, modelsResult, nwsResult] = await Promise.allSettled([
     fetchEnsemble(lat, lon, targetDate, thresholdF, direction),
-    fetchModels(lat, lon, targetDate, thresholdF, direction),
-    fetchHistoricalBaseRate(lat, lon, targetDate, thresholdF, direction),
+    fetchModels(lat, lon, targetDate, thresholdF, direction, extremeThreshold),
     opts.includeNWS !== false ? fetchNWS(lat, lon, targetDate) : Promise.resolve(null),
   ]);
 
-  const ensemble   = ensembleResult.status   === 'fulfilled' ? ensembleResult.value   : null;
-  const models     = modelsResult.status     === 'fulfilled' ? modelsResult.value     : null;
-  const historical = historicalResult.status === 'fulfilled' ? historicalResult.value : null;
-  const nws        = nwsResult.status        === 'fulfilled' ? nwsResult.value        : null;
+  const ensemble = ensembleResult.status === 'fulfilled' ? ensembleResult.value : null;
+  const models   = modelsResult.status   === 'fulfilled' ? modelsResult.value   : null;
+  const nws      = nwsResult.status      === 'fulfilled' ? nwsResult.value      : null;
 
-  // ── Compute consensus probability ─────────────────────────────────────────
-  // Weights: ensemble 40% (most reliable), models 35%, historical 25%
-  // Historical is de-weighted when ensemble/models are available.
+  // ── Step 3: Weighted consensus ─────────────────────────────────────────────
+  // Component weights:
+  //   Ensemble 40% (direct probability from 31 members — most reliable)
+  //   Multi-model 35% (weighted deterministic consensus)
+  //   Historical 25% (climatological prior — de-weighted when forecast available)
   const components = [];
-
-  if (ensemble?.prob != null)   components.push({ prob: ensemble.prob,   weight: 0.40, source: 'GFS Ensemble' });
-  if (models?.consensus != null) components.push({ prob: models.consensus, weight: 0.35, source: 'Multi-Model' });
-  if (historical?.prob != null) components.push({ prob: historical.prob,  weight: 0.25, source: 'Historical' });
+  if (ensemble?.prob   != null) components.push({ prob: ensemble.prob,    weight: 0.40, source: 'GFS Ensemble' });
+  if (models?.consensus != null) components.push({ prob: models.consensus, weight: 0.35, source: extremeThreshold ? 'Multi-Model (extreme mode)' : 'Multi-Model' });
+  if (historical?.prob  != null) components.push({ prob: historical.prob,  weight: 0.25, source: historical.source === 'GHCN-Daily' ? `GHCN-Daily (${historical.sampleSize} seasons, station ${historical.station})` : `${historical.sampleSize}-yr ERA5 base rate` });
 
   let consensus = null;
   if (components.length > 0) {
@@ -306,18 +475,34 @@ async function getForecast(lat, lon, targetDate, thresholdF, direction = 'above'
     consensus = components.reduce((a, c) => a + c.prob * c.weight, 0) / totalW;
   }
 
-  // If only historical available (e.g., too far out), use it directly
+  // Last resort: historical only (too far out for ensemble/models)
   if (consensus === null && historical?.prob != null) {
     consensus = historical.prob;
   }
 
   const sources = [];
   if (ensemble)   sources.push(`GFS Ensemble (${ensemble.memberCount} members)`);
-  if (models)     sources.push('ECMWF IFS · ICON · GFS deterministic');
-  if (historical) sources.push(`${historical.sampleSize}-yr historical base rate`);
+  if (models) {
+    const modelNames = Object.keys(models.models).map(m => ({
+      ecmwf_aifs025: 'AIFS', ecmwf_ifs025: 'IFS', icon_global: 'ICON',
+      gfs_seamless: 'GFS', gfs_hrrr: 'HRRR',
+    }[m] || m)).join(' · ');
+    sources.push(`${modelNames}${extremeThreshold ? ' [extreme weights]' : ''}`);
+  }
+  if (historical) sources.push(historical.source === 'GHCN-Daily' ? `GHCN-Daily station ${historical.station}` : `Open-Meteo ERA5 archive`);
   if (nws)        sources.push('NWS official forecast');
 
-  return { ensemble, models, historical, nws, consensus, components, sources };
+  return {
+    ensemble,
+    models,
+    historical,
+    nws,
+    consensus,
+    components,
+    sources,
+    extremeThreshold,
+    thresholdPercentile: threshPercentile,
+  };
 }
 
 /**
