@@ -11,15 +11,17 @@
  *   #bz-signals, #bz-backtest, #bz-weekly-war-report → bz handler
  */
 
-const btcHandler    = require('./handlers/btc');
-const bzHandler     = require('./handlers/bz');
-const sharedHandler = require('./handlers/shared');
+const btcHandler     = require('./handlers/btc');
+const bzHandler      = require('./handlers/bz');
+const weatherHandler = require('./handlers/weather');
+const sharedHandler  = require('./handlers/shared');
 
 // Map of channel name prefix → handler module
 // Order matters: first match wins
 const ROUTES = [
-  { prefix: 'bz',  handler: bzHandler  },
-  { prefix: 'btc', handler: btcHandler },
+  { prefix: 'bz',      handler: bzHandler      },
+  { prefix: 'btc',     handler: btcHandler     },
+  { prefix: 'weather', handler: weatherHandler },
 ];
 
 /**
@@ -47,6 +49,8 @@ function allChannelIds() {
   if (process.env.BZ_DISCORD_SIGNALS_CHANNEL_ID)        ids.push({ id: process.env.BZ_DISCORD_SIGNALS_CHANNEL_ID,        prefix: 'bz' });
   if (process.env.BZ_DISCORD_WAR_REPORT_CHANNEL_ID)     ids.push({ id: process.env.BZ_DISCORD_WAR_REPORT_CHANNEL_ID,     prefix: 'bz' });
   if (process.env.BZ_DISCORD_BACKTEST_CHANNEL_ID)       ids.push({ id: process.env.BZ_DISCORD_BACKTEST_CHANNEL_ID,       prefix: 'bz' });
+  if (process.env.WEATHER_DISCORD_SIGNALS_CHANNEL_ID)   ids.push({ id: process.env.WEATHER_DISCORD_SIGNALS_CHANNEL_ID,   prefix: 'weather' });
+  if (process.env.WEATHER_DISCORD_BACKTEST_CHANNEL_ID)  ids.push({ id: process.env.WEATHER_DISCORD_BACKTEST_CHANNEL_ID,  prefix: 'weather' });
   return ids;
 }
 
