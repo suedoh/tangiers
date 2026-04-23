@@ -27,9 +27,11 @@ const TOKEN           = process.env.DISCORD_BOT_TOKEN_STAGING;
 const SIGNALS_CHANNEL = process.env.WEATHER_DISCORD_SIGNALS_CHANNEL_ID_STAGING;
 const BACKTEST_CHANNEL= process.env.WEATHER_DISCORD_BACKTEST_CHANNEL_ID_STAGING;
 
-// --welcome <channel-id> from CLI args
+// --welcome <channel-id> from CLI args, or fall back to env
 const welcomeIdx     = process.argv.indexOf('--welcome');
-const WELCOME_CHANNEL = welcomeIdx !== -1 ? process.argv[welcomeIdx + 1] : null;
+const WELCOME_CHANNEL = welcomeIdx !== -1
+  ? process.argv[welcomeIdx + 1]
+  : process.env.WEATHER_DISCORD_WELCOME_CHANNEL_ID_STAGING || null;
 
 if (!TOKEN) {
   console.error('❌  DISCORD_BOT_TOKEN_STAGING not set in .env');
