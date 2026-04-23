@@ -132,7 +132,7 @@ Signal log + outcome tracking. Every signal is auto-logged here. When a market r
 Every 15 min       →  Scanner checks 50+ cities × 5 days of Polymarket bucket markets
                        Best-edge bucket signalled if edge ≥ 8%
 
-36h after resolve  →  Actual temp fetched → WIN or LOSS posted to #weather-backtest
+24h after resolve  →  Actual temp fetched (GHCN-Daily / NWS METAR) → WIN or LOSS posted to #weather-backtest
 
 Every Sunday       →  Weekly report: win rate, P&L, edge breakdown, open positions
 \`\`\``;
@@ -168,7 +168,15 @@ Use \`manual\` if closing early (e.g. price moved, changed your mind).
 **REPORTS**
 \`!report\`
 Generate the weekly P&L summary right now instead of waiting for Sunday.
-Posts to #weather-backtest: win rate, edge-tier breakdown, city breakdown, open positions.`;
+Posts to #weather-backtest: win rate, edge-tier breakdown, city breakdown, open positions.
+
+**SETTLEMENT**
+\`!settle\`
+Resolve expired trades using official NOAA observations (GHCN-Daily station data → NWS hourly METAR → ERA5 fallback). Runs automatically every 30 min, but use this to resolve immediately after a market date passes.
+→ \`!settle --force\` — use a 6h buffer instead of 24h (NWS data is near real-time)
+→ \`!settle --dry\` — preview what would resolve without writing anything
+→ \`!settle --id wx-abc123\` — resolve one specific trade by ID
+Each resolved trade posts a result card to #weather-backtest showing the observed temperature, data source, and model bias (how far off the forecast was). \`--dry\` and \`--force\` can be combined: \`!settle --dry --force\`.`;
 
 const MSG_WORKFLOW = `## 📋 Paper Trading Workflow
 
@@ -183,9 +191,9 @@ Building a track record. Goal: 20+ resolved signals to evaluate model accuracy b
 2️⃣  **OPTIONAL: log your entry**
     \`!took <id>\` — marks that you paper-traded it.
 
-3️⃣  **AUTO-RESOLUTION** (36h after market resolves)
-    Bot fetches actual observed temp → marks WIN or LOSS → posts to #weather-backtest.
-    Nothing to do — fully automatic.
+3️⃣  **AUTO-RESOLUTION** (24h after market resolves)
+    Bot fetches actual observed temp from NOAA (GHCN-Daily station → NWS METAR → ERA5) → marks WIN or LOSS → posts to #weather-backtest.
+    Or trigger immediately with \`!settle\` (use \`!settle --force\` for same-day resolution via NWS).
 
 4️⃣  **OR: manual close**
     \`!exit <id> win|loss\` — override auto-resolution or close early.
