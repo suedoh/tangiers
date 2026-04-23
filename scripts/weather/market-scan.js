@@ -74,6 +74,34 @@ function bar(p, len = 12) {
   return '█'.repeat(filled) + '░'.repeat(Math.max(0, len - filled));
 }
 
+// ─── Temperature unit helpers ─────────────────────────────────────────────────
+
+function fToC(f) { return (f - 32) * 5 / 9; }
+
+/**
+ * Format a temperature showing both °F and °C.
+ * marketUnit ('F'|'C') determines which appears first — matching the market's native unit.
+ * e.g. US city:            "64.7°F (18.2°C)"
+ *      International city: "18.2°C (64.7°F)"
+ */
+function dualTemp(f, marketUnit = 'F') {
+  const c = fToC(f);
+  return marketUnit === 'C'
+    ? `${c.toFixed(1)}°C (${f.toFixed(1)}°F)`
+    : `${f.toFixed(1)}°F (${c.toFixed(1)}°C)`;
+}
+
+/**
+ * Format a temperature delta (σ) in both units.
+ * Sigma converts by scaling only (×5/9) — no offset.
+ */
+function dualSigma(sigmaF, marketUnit = 'F') {
+  const sigmaC = sigmaF * 5 / 9;
+  return marketUnit === 'C'
+    ? `±${sigmaC.toFixed(1)}°C (±${sigmaF.toFixed(1)}°F)`
+    : `±${sigmaF.toFixed(1)}°F (±${sigmaC.toFixed(1)}°C)`;
+}
+
 /**
  * Compute model probability for a single bucket market given mean+sigma.
  * direction='range' uses the probability mass between thresholdF and thresholdHighF.
@@ -100,29 +128,49 @@ function bucketModelProb(parsed, meanF, sigmaF) {
 }
 
 /**
- * Build a human-readable threshold label for the signal card.
+ * Build a threshold label showing both °F and °C.
+ * marketUnit determines which appears first (primary = the market's native unit).
  */
-function thresholdLabel(parsed, unit = 'F') {
-  const u = `°${unit}`;
-  if (parsed.direction === 'above') return `≥${parsed.thresholdF}${u}`;
-  if (parsed.direction === 'below') return `≤${parsed.thresholdF}${u}`;
-  if (parsed.direction === 'range') return `${parsed.thresholdF}${u}–${parsed.thresholdHighF}${u}`;
-  return `${parsed.thresholdF}${u}`;
+function thresholdLabel(parsed, marketUnit = 'F') {
+  const f1 = parsed.thresholdF;
+  const f2 = parsed.thresholdHighF;
+  const c1 = fToC(f1);
+  const c2 = f2 != null ? fToC(f2) : null;
+
+  if (parsed.direction === 'above') {
+    return marketUnit === 'C'
+      ? `≥${c1.toFixed(1)}°C (≥${f1.toFixed(1)}°F)`
+      : `≥${f1.toFixed(1)}°F (≥${c1.toFixed(1)}°C)`;
+  }
+  if (parsed.direction === 'below') {
+    return marketUnit === 'C'
+      ? `≤${c1.toFixed(1)}°C (≤${f1.toFixed(1)}°F)`
+      : `≤${f1.toFixed(1)}°F (≤${c1.toFixed(1)}°C)`;
+  }
+  if (parsed.direction === 'range' && c2 != null) {
+    return marketUnit === 'C'
+      ? `${c1.toFixed(1)}–${c2.toFixed(1)}°C (${f1.toFixed(1)}–${f2.toFixed(1)}°F)`
+      : `${f1.toFixed(1)}–${f2.toFixed(1)}°F (${c1.toFixed(1)}–${c2.toFixed(1)}°C)`;
+  }
+  return marketUnit === 'C'
+    ? `${c1.toFixed(1)}°C (${f1.toFixed(1)}°F)`
+    : `${f1.toFixed(1)}°F (${c1.toFixed(1)}°C)`;
 }
 
 /**
  * Build the Discord embed body for a weather signal.
  */
 function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id) {
-  const { parsed }  = market;
-  const cityLabel   = parsed.city.replace(/\b\w/g, c => c.toUpperCase());
-  const typeLabel   = parsed.type === 'low' ? 'LOW' : 'HIGH';
-  const bucketLabel = thresholdLabel(parsed);
-  const icon        = side === 'yes' ? '🟢' : '🔴';
-  const sideLabel   = side === 'yes' ? 'BUY YES' : 'BUY NO';
+  const { parsed }   = market;
+  const marketUnit   = parsed.coords?.unit || 'F'; // 'F' for US, 'C' for international
+  const cityLabel    = parsed.city.replace(/\b\w/g, c => c.toUpperCase());
+  const typeLabel    = parsed.type === 'low' ? 'LOW' : 'HIGH';
+  const bucketLabel  = thresholdLabel(parsed, marketUnit);
+  const icon         = side === 'yes' ? '🟢' : '🔴';
+  const sideLabel    = side === 'yes' ? 'BUY YES' : 'BUY NO';
 
-  const meanStr  = forecast.meanF != null ? `${forecast.meanF.toFixed(1)}°F` : 'N/A';
-  const sigmaStr = `±${forecast.sigmaF.toFixed(1)}°F`;
+  const meanStr  = forecast.meanF != null ? dualTemp(forecast.meanF, marketUnit) : 'N/A';
+  const sigmaStr = dualSigma(forecast.sigmaF, marketUnit);
 
   const lines = [
     `## 🌡️ WEATHER SIGNAL — ${cityLabel} ${typeLabel} TEMP`,
@@ -134,11 +182,12 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id) {
 
   if (forecast.historical) {
     const h = forecast.historical;
-    lines.push(`GHCN climatology: hist mean ${h.mean.toFixed(1)}°F · hist σ ${h.sigma.toFixed(1)}°F (${h.sampleSize} seasons, station ${h.station})`);
+    lines.push(`GHCN climatology: hist mean ${dualTemp(h.mean, marketUnit)} · hist σ ${dualSigma(h.sigma, marketUnit)} (${h.sampleSize} seasons, station ${h.station})`);
   }
   if (forecast.ensemble) {
     const e = forecast.ensemble;
-    lines.push(`GFS Ensemble:    ${bar(e.prob)}  **${pct(e.prob)}** above 72°F ref (${e.memberCount} members)`);
+    const refTemp = dualTemp(72, marketUnit);
+    lines.push(`GFS Ensemble:    ${bar(e.prob)}  **${pct(e.prob)}** above ${refTemp} ref (${e.memberCount} members)`);
   }
   if (forecast.models?.models) {
     for (const [model, mv] of Object.entries(forecast.models.models)) {
@@ -149,7 +198,7 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id) {
         gfs_seamless:  'GFS    ',
         gfs_hrrr:      'HRRR   ',
       }[model] || model;
-      lines.push(`${label}         fcst ${mv.forecast.toFixed(1)}°F`);
+      lines.push(`${label}         fcst ${dualTemp(mv.forecast, marketUnit)}`);
     }
   }
 
