@@ -304,10 +304,14 @@ async function fetchGHCNBaseRate(ghcnStation, targetDate, thresholdF, direction)
     const sorted = [...tempsF].sort((a, b) => a - b);
     const thresholdPercentile = sorted.filter(v => v <= thresholdF).length / sorted.length;
 
+    const variance = tempsF.reduce((a, v) => a + (v - mean) ** 2, 0) / tempsF.length;
+    const historicalSigma = Math.sqrt(variance);
+
     return {
       prob:                aboveCount / tempsF.length,
       sampleSize:          tempsF.length,
       historicalMean:      mean,
+      historicalSigma,     // std dev of TMAX across same calendar date — use as sigma fallback
       thresholdPercentile, // 0–1: where the threshold sits in the historical distribution
       source:              'GHCN-Daily',
       station:             ghcnStation,
@@ -315,6 +319,28 @@ async function fetchGHCNBaseRate(ghcnStation, targetDate, thresholdF, direction)
   } catch {
     return null; // silently fall back to Open-Meteo archive
   }
+}
+
+/**
+ * Fetch raw historical temperature statistics for a GHCN station/date,
+ * without committing to a specific threshold.
+ * Used by getTemperatureForecast() to calibrate sigma for bucket markets.
+ *
+ * @param {string} ghcnStation  e.g. 'USW00094728' (no 'GHCND:' prefix)
+ * @param {string} targetDate   'YYYY-MM-DD'
+ * @returns {Promise<{ mean: number, sigma: number, sampleSize: number, source: string, station: string } | null>}
+ */
+async function fetchGHCNStats(ghcnStation, targetDate) {
+  // Use a mid-range dummy threshold that won't skew the fetch
+  const result = await fetchGHCNBaseRate(ghcnStation, targetDate, 60, 'above').catch(() => null);
+  if (!result) return null;
+  return {
+    mean:       result.historicalMean,
+    sigma:      result.historicalSigma,
+    sampleSize: result.sampleSize,
+    source:     result.source,
+    station:    result.station,
+  };
 }
 
 // ─── 5. NWS official forecast (US only) ──────────────────────────────────────
@@ -537,30 +563,37 @@ async function getObserved(lat, lon, date, direction = 'above') {
  * group (multiple bucket markets sharing the same city+date).
  *
  * Returns:
- *   meanF   — ensemble mean temperature in °F (null if ensemble unavailable)
- *   sigmaF  — ensemble spread in °F, or leadTimeSigma fallback
- *   ensemble — raw ensemble result (may be null)
- *   models  — raw models result (may be null)
- *   sources — string array of active data sources
+ *   meanF      — ensemble mean temperature in °F (null if ensemble unavailable)
+ *   sigmaF     — sigma in °F: ensemble spread → GHCN historical σ → leadTimeSigma fallback
+ *   ensemble   — raw ensemble result (may be null)
+ *   models     — raw models result (may be null)
+ *   historical — GHCN station stats (mean, sigma, sampleSize) — null if token/station absent
+ *   sources    — string array of active data sources
  *
  * @param {number} lat
  * @param {number} lon
  * @param {string} targetDate  'YYYY-MM-DD'
- * @returns {Promise<{ meanF: number|null, sigmaF: number, ensemble: object|null, models: object|null, sources: string[] }>}
+ * @param {{ ghcnStation?: string }} opts
+ *   ghcnStation: NOAA GHCN-Daily station ID (no 'GHCND:' prefix, e.g. 'USW00094728').
+ *   When provided and NCEI_TOKEN is set, fetches 12-season historical sigma for this
+ *   calendar date — more accurate than leadTimeSigma() heuristic for US cities.
+ * @returns {Promise<{ meanF: number|null, sigmaF: number, ensemble: object|null, models: object|null, historical: object|null, sources: string[] }>}
  */
-async function getTemperatureForecast(lat, lon, targetDate) {
+async function getTemperatureForecast(lat, lon, targetDate, opts = {}) {
   // Use a dummy threshold + direction just to trigger the API calls;
   // we only care about mean/spread, not a specific probability.
   const dummyThreshold  = 72;
   const dummyDirection  = 'above';
 
-  const [ensembleRes, modelsRes] = await Promise.allSettled([
+  const [ensembleRes, modelsRes, ghcnRes] = await Promise.allSettled([
     fetchEnsemble(lat, lon, targetDate, dummyThreshold, dummyDirection),
     fetchModels(lat, lon, targetDate, dummyThreshold, dummyDirection, false),
+    opts.ghcnStation ? fetchGHCNStats(opts.ghcnStation, targetDate) : Promise.resolve(null),
   ]);
 
-  const ensemble = ensembleRes.status === 'fulfilled' ? ensembleRes.value : null;
-  const models   = modelsRes.status   === 'fulfilled' ? modelsRes.value   : null;
+  const ensemble   = ensembleRes.status === 'fulfilled' ? ensembleRes.value : null;
+  const models     = modelsRes.status   === 'fulfilled' ? modelsRes.value   : null;
+  const historical = ghcnRes.status     === 'fulfilled' ? ghcnRes.value     : null;
 
   // Mean: prefer ensemble mean (31 members), fall back to multi-model average
   let meanF = null;
@@ -573,10 +606,18 @@ async function getTemperatureForecast(lat, lon, targetDate) {
     }
   }
 
-  // Sigma: use ensemble spread if available, else lead-time heuristic
-  const sigmaF = (ensemble?.spread != null && ensemble.spread > 0)
-    ? ensemble.spread
-    : leadTimeSigma(targetDate);
+  // Sigma priority:
+  //   1. Ensemble spread (31-member GFS — direct sample σ)
+  //   2. GHCN historical σ (12-season station obs — best when ensemble unavailable)
+  //   3. Lead-time heuristic (fallback)
+  let sigmaF;
+  if (ensemble?.spread != null && ensemble.spread > 0.5) {
+    sigmaF = ensemble.spread;
+  } else if (historical?.sigma != null && historical.sigma > 0.5) {
+    sigmaF = historical.sigma;
+  } else {
+    sigmaF = leadTimeSigma(targetDate);
+  }
 
   const sources = [];
   if (ensemble) sources.push(`GFS Ensemble (${ensemble.memberCount} members)`);
@@ -587,8 +628,9 @@ async function getTemperatureForecast(lat, lon, targetDate) {
     }[m] || m)).join(' · ');
     sources.push(modelNames);
   }
+  if (historical) sources.push(`GHCN-Daily station ${historical.station} (${historical.sampleSize} seasons)`);
 
-  return { meanF, sigmaF, ensemble, models, sources };
+  return { meanF, sigmaF, ensemble, models, historical, sources };
 }
 
-module.exports = { getForecast, getObserved, fetchNWS, normalCDF, thresholdProbability, getTemperatureForecast, leadTimeSigma };
+module.exports = { getForecast, getObserved, fetchNWS, normalCDF, thresholdProbability, getTemperatureForecast, fetchGHCNStats, leadTimeSigma };

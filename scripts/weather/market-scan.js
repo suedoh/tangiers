@@ -132,6 +132,10 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id) {
     `Model mean:      **${meanStr}** ${sigmaStr} uncertainty`,
   ];
 
+  if (forecast.historical) {
+    const h = forecast.historical;
+    lines.push(`GHCN climatology: hist mean ${h.mean.toFixed(1)}°F · hist σ ${h.sigma.toFixed(1)}°F (${h.sampleSize} seasons, station ${h.station})`);
+  }
   if (forecast.ensemble) {
     const e = forecast.ensemble;
     lines.push(`GFS Ensemble:    ${bar(e.prob)}  **${pct(e.prob)}** above 72°F ref (${e.memberCount} members)`);
@@ -319,16 +323,25 @@ async function main() {
       continue;
     }
 
-    // Fetch temperature forecast ONCE per event group
+    // Fetch temperature forecast ONCE per event group.
+    // Pass ghcnStation so GHCN-Daily historical σ is used for sigma calibration
+    // when NCEI_TOKEN is set (US cities only; international silently falls back).
     let forecast;
     try {
-      forecast = await getTemperatureForecast(coords.lat, coords.lon, parsed.date);
+      forecast = await getTemperatureForecast(coords.lat, coords.lon, parsed.date, {
+        ghcnStation: coords.ghcnStation || null,
+      });
     } catch (err) {
       log(`Forecast error for ${groupKey}: ${err.message}`);
       continue;
     }
 
-    log(`${groupKey}: mean=${forecast.meanF != null ? forecast.meanF.toFixed(1) + '°F' : 'N/A'} σ=${forecast.sigmaF.toFixed(1)}°F (${forecast.sources.join(', ')})`);
+    const sigmaSource = forecast.historical
+      ? `GHCN-Daily ${forecast.historical.station} (${forecast.historical.sampleSize}yr σ)`
+      : forecast.ensemble
+        ? 'GFS ensemble spread'
+        : 'lead-time heuristic';
+    log(`${groupKey}: mean=${forecast.meanF != null ? forecast.meanF.toFixed(1) + '°F' : 'N/A'} σ=${forecast.sigmaF.toFixed(1)}°F [${sigmaSource}] (${forecast.sources.join(', ')})`);
 
     // Score each bucket market in this group
     let bestMarket    = null;
