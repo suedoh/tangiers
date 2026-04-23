@@ -16,8 +16,8 @@
 
 const path = require('path');
 const fs   = require('fs');
-const { loadEnv, ROOT } = require('../lib/env');
-const { postWebhook }   = require('../lib/discord');
+const { loadEnv, ROOT, resolveWebhook } = require('../lib/env');
+const { postWebhook }                   = require('../lib/discord');
 
 loadEnv();
 
@@ -26,7 +26,7 @@ if (process.env.PRIMARY === 'false' && !process.argv.includes('--force')) {
   process.exit(0);
 }
 
-const BACKTEST_HOOK = process.env.WEATHER_DISCORD_BACKTEST_WEBHOOK;
+const BACKTEST_HOOK = resolveWebhook('WEATHER_DISCORD_BACKTEST_WEBHOOK');
 const TRADES_FILE   = path.join(ROOT, 'weather-trades.json');
 
 function log(msg) { console.log(`[${new Date().toISOString()}] [weather-report] ${msg}`); }
@@ -113,28 +113,60 @@ async function main() {
     `Total paper P&L: **${usd(allPnl)}**`,
   );
 
-  // Source breakdown
-  const sourceCount = {};
-  for (const t of allResolved) {
-    for (const s of (t.sources || [])) {
-      sourceCount[s] = (sourceCount[s] || 0) + 1;
-    }
+  // Edge tier breakdown (all-time): how do high-edge signals perform vs medium-edge?
+  const edgeTiers = [
+    { label: 'High (≥25%)',   min: 0.25, max: Infinity },
+    { label: 'Medium (15-25%)', min: 0.15, max: 0.25 },
+    { label: 'Min (8-15%)',   min: 0.08, max: 0.15 },
+  ];
+  const tierLines = [];
+  for (const tier of edgeTiers) {
+    const tierTrades = allResolved.filter(t => {
+      const e = (t.edge || 0) / 100;
+      return e >= tier.min && e < tier.max;
+    });
+    if (tierTrades.length === 0) continue;
+    const tierWins = tierTrades.filter(t => t.signalResult === 'win');
+    const tierWR   = (tierWins.length / tierTrades.length * 100).toFixed(0);
+    const tierPnl  = tierTrades.reduce((a, t) => a + (t.pnlDollars || 0), 0);
+    tierLines.push(`  ${tier.label.padEnd(18)} ${tierWins.length}W/${tierTrades.length - tierWins.length}L (${tierWR}% WR) ${usd(tierPnl)}`);
   }
-  if (Object.keys(sourceCount).length > 0) {
-    lines.push('', '**Forecast sources used:**');
-    for (const [src, cnt] of Object.entries(sourceCount)) {
-      lines.push(`  ${src}: ${cnt}x`);
+  if (tierLines.length > 0) {
+    lines.push('', '**Edge tier breakdown (all-time):**');
+    lines.push(...tierLines);
+  }
+
+  // City breakdown (this week resolved)
+  if (resolved.length > 0) {
+    const cityMap = {};
+    for (const t of resolved) {
+      const city = t.parsed?.city || 'unknown';
+      if (!cityMap[city]) cityMap[city] = { w: 0, l: 0, pnl: 0 };
+      if (t.signalResult === 'win') cityMap[city].w++;
+      else cityMap[city].l++;
+      cityMap[city].pnl += t.pnlDollars || 0;
+    }
+    const cityEntries = Object.entries(cityMap).sort((a, b) => b[1].pnl - a[1].pnl);
+    if (cityEntries.length > 1) {
+      lines.push('', '**This week by city:**');
+      for (const [city, stat] of cityEntries.slice(0, 6)) {
+        const label = city.replace(/\b\w/g, c => c.toUpperCase()).slice(0, 16).padEnd(16);
+        lines.push(`  ${label} ${stat.w}W/${stat.l}L  ${usd(stat.pnl)}`);
+      }
     }
   }
 
   // Open positions
   if (open.length > 0) {
     lines.push('', `### 🟡 OPEN POSITIONS (${open.length})`);
-    for (const t of open.slice(0, 5)) {
-      lines.push(`  ${t.side === 'yes' ? '🟢' : '🔴'} ${t.side.toUpperCase()} | ${t.question.slice(0, 55)}...`);
-      lines.push(`     Edge ${t.edge}% | Market ${pct(t.yesPrice)} YES | Resolves ${t.parsed?.date}`);
+    // Sort by resolution date
+    const sortedOpen = [...open].sort((a, b) => new Date(a.parsed?.date) - new Date(b.parsed?.date));
+    for (const t of sortedOpen.slice(0, 8)) {
+      const cityLabel = (t.parsed?.city || '').replace(/\b\w/g, c => c.toUpperCase()).slice(0, 18);
+      lines.push(`  ${t.side === 'yes' ? '🟢' : '🔴'} **${t.side.toUpperCase()}** ${cityLabel} — ${t.question.slice(0, 45)}...`);
+      lines.push(`     Edge **${t.edge}%** | Market ${pct(t.yesPrice)} YES | Resolves **${t.parsed?.date}** | Bet ${usd(t.betDollars)}`);
     }
-    if (open.length > 5) lines.push(`  …and ${open.length - 5} more`);
+    if (open.length > 8) lines.push(`  …and ${open.length - 8} more`);
   }
 
   lines.push('', `*📌 Paper trades only — Phase A signal validation*`);
