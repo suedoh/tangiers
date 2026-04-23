@@ -116,8 +116,9 @@ async function handleReport(user, api) {
   if (result.error || result.status !== 0) {
     const err = result.error?.message || result.stderr?.trim() || 'Unknown error';
     await api.sendMessage(`❌ **Report failed:** ${err.slice(0, 200)}`);
+  } else {
+    await api.sendMessage(`✅ **Report posted to #weather-backtest**`);
   }
-  // weekly-report.js posts its own card
 }
 
 // ─── !trades ─────────────────────────────────────────────────────────────────
@@ -130,7 +131,23 @@ async function handleTrades(user, api) {
     return;
   }
 
-  const open   = trades.filter(t => t.outcome === null);
+  // Sort open signals: soonest resolving first, then highest edge
+  const allOpen = trades
+    .filter(t => t.outcome === null)
+    .sort((a, b) => {
+      const dA = new Date(a.parsed?.date) - Date.now();
+      const dB = new Date(b.parsed?.date) - Date.now();
+      // Prefer positive daysLeft (not yet expired); among those, soonest first
+      if (dA > 0 && dB <= 0) return -1;
+      if (dB > 0 && dA <= 0) return 1;
+      if (Math.abs(dA - dB) > 86_400_000) return dA - dB; // >1 day apart: soonest first
+      return (b.edge || 0) - (a.edge || 0);               // same day: highest edge first
+    });
+
+  const SHOW_OPEN = 8;
+  const open      = allOpen.slice(0, SHOW_OPEN);
+  const hiddenCnt = allOpen.length - open.length;
+
   const recent = trades
     .filter(t => t.signalResult != null)
     .sort((a, b) => new Date(b.firedAt) - new Date(a.firedAt))
@@ -139,14 +156,16 @@ async function handleTrades(user, api) {
   const lines = [];
 
   if (open.length) {
-    lines.push(`**OPEN WEATHER SIGNALS (${open.length})**`);
+    lines.push(`**OPEN WEATHER SIGNALS (${allOpen.length} total — top ${open.length} shown)**`);
     for (const t of open) {
       const daysLeft = ((new Date(t.parsed?.date) - Date.now()) / 86_400_000).toFixed(1);
       const icon     = t.side === 'yes' ? '🟢' : '🔴';
-      lines.push(`${icon} **${t.side.toUpperCase()}** | ${(t.question || '').slice(0, 55)}...`);
-      lines.push(`   Edge ${t.edge}% | Mkt ${pct(t.yesPrice)} YES | Resolves ${t.parsed?.date} (${daysLeft}d)`);
-      lines.push(`   Suggested: ${usd(t.betDollars)} | Model: ${pct(t.modelProb / 100)}`);
+      lines.push(`${icon} **${t.side.toUpperCase()}** | ${(t.question || '').slice(0, 48)}…`);
+      lines.push(`   Edge **${t.edge}%** | ${t.parsed?.date} (${daysLeft}d) | ${usd(t.betDollars)} suggested`);
       lines.push(`   \`${t.id}\``);
+    }
+    if (hiddenCnt > 0) {
+      lines.push(`   *...and ${hiddenCnt} more open signals*`);
     }
   } else {
     lines.push('**OPEN SIGNALS** — none');
@@ -167,14 +186,18 @@ async function handleTrades(user, api) {
   // Summary stats
   const resolved = trades.filter(t => t.signalResult != null);
   if (resolved.length > 0) {
-    const wins    = resolved.filter(t => t.signalResult === 'win');
+    const wins     = resolved.filter(t => t.signalResult === 'win');
     const totalPnl = resolved.reduce((a, t) => a + (t.pnlDollars || 0), 0);
-    const wr      = Math.round(100 * wins.length / resolved.length);
+    const wr       = Math.round(100 * wins.length / resolved.length);
     lines.push('', `*${resolved.length} resolved — Win rate: ${wr}% | Paper P&L: ${totalPnl >= 0 ? '+' : ''}${usd(totalPnl)}*`);
-    lines.push(`*Run \`!took <id>\` to log a paper entry, \`!exit <id> win|loss\` to close.*`);
+    lines.push(`*Use \`!took <id>\` to log a paper entry, \`!exit <id> win|loss\` to close.*`);
+  } else {
+    lines.push('', `*No resolved signals yet — use \`!took <id>\` to log a paper entry.*`);
   }
 
-  await api.sendMessage(lines.join('\n'));
+  // Guard: Discord 2000-char limit — truncate gracefully if somehow still too long
+  const msg = lines.join('\n');
+  await api.sendMessage(msg.length <= 1950 ? msg : msg.slice(0, 1947) + '...');
 }
 
 // ─── !took ───────────────────────────────────────────────────────────────────
