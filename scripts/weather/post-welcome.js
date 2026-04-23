@@ -202,6 +202,52 @@ Live execution via Polymarket CLOB API — the bot places orders automatically.
 
 *Staging only · Billy Sherbert bot · all signals are paper trades*`;
 
+// Split across two messages to stay under Discord's 2000-char limit
+const MSG_BUCKET_1 = `## 🪣 Understanding Model P(bucket)
+
+**How Polymarket temperature markets are structured**
+For each city and date, Polymarket doesn't run one market ("will NYC hit 65°F?"). They run ~11 markets covering every possible outcome as non-overlapping buckets:
+\`\`\`
+Will NYC high be 47°F or below?     ← floor bucket
+Will NYC high be between 48–49°F?
+Will NYC high be between 50–51°F?
+      ... (middle buckets) ...
+Will NYC high be between 64–65°F?
+Will NYC high be 66°F or higher?    ← ceiling bucket
+\`\`\`
+Exactly one bucket resolves YES. The rest resolve NO.
+
+**What Model P(bucket) means**
+The scanner builds a bell curve centred on the forecast mean temperature, with a spread (σ) from the GFS ensemble + ECMWF models. For each bucket it calculates what fraction of that bell curve falls inside the bucket's range.
+
+For a **range bucket** like 62–63°F:
+> P(bucket) = P(temp > 62°F) − P(temp > 63°F)
+
+For the **ceiling bucket** (≥ 66°F):
+> P(bucket) = P(temp > 66°F)   ← area in the right tail
+
+For the **floor bucket** (≤ 47°F):
+> P(bucket) = P(temp < 47°F)   ← area in the left tail`;
+
+const MSG_BUCKET_2 = `**A concrete example**
+Model forecasts NYC at **64°F ± 3.6°F** on April 25:
+\`\`\`
+Bucket       Model P  Market price  Edge
+─────────────────────────────────────────
+≥ 66°F         16%     45% YES    → 🔴 BUY NO (+29%) ← fires
+64–65°F        21%     20% YES    → tiny edge, skip
+62–63°F        21%     20% YES    → tiny edge, skip
+60–61°F        16%     20% YES    → below 8% min
+≤ 47°F         <1%      5% YES    → below 8% min
+\`\`\`
+The scanner picks **one signal per city/date** — the bucket with the highest edge above 8%.
+
+**Why tails get mispriced**
+Traders anchor to round numbers and overprice ceiling/floor buckets. The scanner finds where the market's implied probability diverges most from the model's bell curve.
+
+**What σ (sigma) means on the signal card**
+σ = how wide the bell curve is. Tight σ (±1.5°F for tomorrow) = confident forecast, large edges possible on individual buckets. Wide σ (±5°F for 7 days out) = more uncertainty, probability spreads across many buckets, smaller individual edges.`;
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -211,6 +257,8 @@ async function main() {
   console.log(`   Backtest channel: ${BACKTEST_CHANNEL}`);
 
   await post(WELCOME_CHANNEL,  '#welcome',          MSG_OVERVIEW);
+  await post(WELCOME_CHANNEL,  '#welcome',          MSG_BUCKET_1);
+  await post(WELCOME_CHANNEL,  '#welcome',          MSG_BUCKET_2);
   await post(SIGNALS_CHANNEL,  '#weather-signals',  MSG_COMMANDS);
   await post(BACKTEST_CHANNEL, '#weather-backtest', MSG_WORKFLOW);
 
