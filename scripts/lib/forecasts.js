@@ -71,8 +71,11 @@ function normalCDF(z) {
  * direction: 'above' → P(X > threshold); 'below' → P(X < threshold)
  */
 function thresholdProbability(forecastTemp, thresholdF, sigmaF, direction) {
+  // z = (mean - threshold) / sigma
+  // P(temp > threshold) = P(Z > -z) = normalCDF(z)  [since z is mean-relative, not threshold-relative]
+  // P(temp < threshold) = 1 - normalCDF(z)
   const z = (forecastTemp - thresholdF) / sigmaF;
-  return direction === 'above' ? 1 - normalCDF(z) : normalCDF(z);
+  return direction === 'above' ? normalCDF(z) : 1 - normalCDF(z);
 }
 
 /**
@@ -528,4 +531,64 @@ async function getObserved(lat, lon, date, direction = 'above') {
   }
 }
 
-module.exports = { getForecast, getObserved, fetchNWS, normalCDF, thresholdProbability };
+/**
+ * Get raw temperature mean and spread for a location/date without committing
+ * to a specific threshold or direction. Useful for evaluating an entire event
+ * group (multiple bucket markets sharing the same city+date).
+ *
+ * Returns:
+ *   meanF   — ensemble mean temperature in °F (null if ensemble unavailable)
+ *   sigmaF  — ensemble spread in °F, or leadTimeSigma fallback
+ *   ensemble — raw ensemble result (may be null)
+ *   models  — raw models result (may be null)
+ *   sources — string array of active data sources
+ *
+ * @param {number} lat
+ * @param {number} lon
+ * @param {string} targetDate  'YYYY-MM-DD'
+ * @returns {Promise<{ meanF: number|null, sigmaF: number, ensemble: object|null, models: object|null, sources: string[] }>}
+ */
+async function getTemperatureForecast(lat, lon, targetDate) {
+  // Use a dummy threshold + direction just to trigger the API calls;
+  // we only care about mean/spread, not a specific probability.
+  const dummyThreshold  = 72;
+  const dummyDirection  = 'above';
+
+  const [ensembleRes, modelsRes] = await Promise.allSettled([
+    fetchEnsemble(lat, lon, targetDate, dummyThreshold, dummyDirection),
+    fetchModels(lat, lon, targetDate, dummyThreshold, dummyDirection, false),
+  ]);
+
+  const ensemble = ensembleRes.status === 'fulfilled' ? ensembleRes.value : null;
+  const models   = modelsRes.status   === 'fulfilled' ? modelsRes.value   : null;
+
+  // Mean: prefer ensemble mean (31 members), fall back to multi-model average
+  let meanF = null;
+  if (ensemble?.mean != null) {
+    meanF = ensemble.mean;
+  } else if (models?.models) {
+    const vals = Object.values(models.models).map(mv => mv.forecast).filter(v => v != null);
+    if (vals.length > 0) {
+      meanF = vals.reduce((a, b) => a + b, 0) / vals.length;
+    }
+  }
+
+  // Sigma: use ensemble spread if available, else lead-time heuristic
+  const sigmaF = (ensemble?.spread != null && ensemble.spread > 0)
+    ? ensemble.spread
+    : leadTimeSigma(targetDate);
+
+  const sources = [];
+  if (ensemble) sources.push(`GFS Ensemble (${ensemble.memberCount} members)`);
+  if (models) {
+    const modelNames = Object.keys(models.models).map(m => ({
+      ecmwf_aifs025: 'AIFS', ecmwf_ifs025: 'IFS', icon_global: 'ICON',
+      gfs_seamless: 'GFS', gfs_hrrr: 'HRRR',
+    }[m] || m)).join(' · ');
+    sources.push(modelNames);
+  }
+
+  return { meanF, sigmaF, ensemble, models, sources };
+}
+
+module.exports = { getForecast, getObserved, fetchNWS, normalCDF, thresholdProbability, getTemperatureForecast, leadTimeSigma };
