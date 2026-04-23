@@ -32,8 +32,8 @@ Write-Host ''
 # -- Task 1: market-scan every 30 minutes -------------------------------------
 
 $scanAction = New-ScheduledTaskAction `
-    -Execute $NodePath `
-    -Argument ('"' + $ScanScript + '"') `
+    -Execute 'powershell.exe' `
+    -Argument ('-WindowStyle Hidden -NonInteractive -Command "& \"' + $NodePath + '\" \"' + $ScanScript + '\""') `
     -WorkingDirectory $ProjectRoot
 
 $scanTrigger = New-ScheduledTaskTrigger `
@@ -67,8 +67,8 @@ if ($existingScan) {
 # -- Task 2: weekly-report every Sunday at 18:00 local time -------------------
 
 $reportAction = New-ScheduledTaskAction `
-    -Execute $NodePath `
-    -Argument ('"' + $ReportScript + '" --force') `
+    -Execute 'powershell.exe' `
+    -Argument ('-WindowStyle Hidden -NonInteractive -Command "& \"' + $NodePath + '\" \"' + $ReportScript + '\" --force"') `
     -WorkingDirectory $ProjectRoot
 
 $reportTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At '18:00'
@@ -98,8 +98,8 @@ if ($existingReport) {
 # -- Task 3: discord bot every 1 minute ---------------------------------------
 
 $botAction = New-ScheduledTaskAction `
-    -Execute $NodePath `
-    -Argument ('"' + $BotScript + '"') `
+    -Execute 'powershell.exe' `
+    -Argument ('-WindowStyle Hidden -NonInteractive -Command "& \"' + $NodePath + '\" \"' + $BotScript + '\""') `
     -WorkingDirectory $ProjectRoot
 
 $botTrigger = New-ScheduledTaskTrigger `
