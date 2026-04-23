@@ -3,6 +3,7 @@
 # Creates two scheduled tasks:
 #   Weathermen-Scan   - runs market-scan.js every 30 minutes
 #   Weathermen-Report - runs weekly-report.js every Sunday at 18:00 local time
+#   Weathermen-Bot    - runs discord-bot/index.js every minute (handles !commands)
 #
 # Usage (run once as Administrator):
 #   powershell -ExecutionPolicy Bypass -File scripts\weather\schedule-windows.ps1
@@ -15,6 +16,7 @@ $ProjectRoot  = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $NodePath     = (Get-Command node -ErrorAction Stop).Source
 $ScanScript   = Join-Path $ProjectRoot 'scripts\weather\market-scan.js'
 $ReportScript = Join-Path $ProjectRoot 'scripts\weather\weekly-report.js'
+$BotScript    = Join-Path $ProjectRoot 'scripts\discord-bot\index.js'
 $LogDir       = Join-Path $ProjectRoot 'logs'
 
 if (-not (Test-Path $LogDir)) {
@@ -91,6 +93,41 @@ if ($existingReport) {
         -Settings    $reportSettings `
         -RunLevel    Limited | Out-Null
     Write-Host '[created] Weathermen-Report (Sundays at 18:00)'
+}
+
+# -- Task 3: discord bot every 1 minute ---------------------------------------
+
+$botAction = New-ScheduledTaskAction `
+    -Execute $NodePath `
+    -Argument ('"' + $BotScript + '"') `
+    -WorkingDirectory $ProjectRoot
+
+$botTrigger = New-ScheduledTaskTrigger `
+    -RepetitionInterval (New-TimeSpan -Minutes 1) `
+    -Once `
+    -At (Get-Date)
+
+$botSettings = New-ScheduledTaskSettingsSet `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 1) `
+    -StartWhenAvailable `
+    -RunOnlyIfNetworkAvailable
+
+$existingBot = Get-ScheduledTask -TaskName 'Weathermen-Bot' -ErrorAction SilentlyContinue
+if ($existingBot) {
+    Set-ScheduledTask -TaskName 'Weathermen-Bot' `
+        -Action $botAction `
+        -Trigger $botTrigger `
+        -Settings $botSettings | Out-Null
+    Write-Host '[updated] Weathermen-Bot (every 1 minute)'
+} else {
+    Register-ScheduledTask `
+        -TaskName    'Weathermen-Bot' `
+        -Description 'Weathermen Discord bot - handles !commands (every 1 min)' `
+        -Action      $botAction `
+        -Trigger     $botTrigger `
+        -Settings    $botSettings `
+        -RunLevel    Limited | Out-Null
+    Write-Host '[created] Weathermen-Bot (every 1 minute)'
 }
 
 Write-Host ''

@@ -15,16 +15,16 @@
 const fs   = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { ROOT }      = require('../../lib/env');
-const { postWebhook } = require('../../lib/discord');
+const { ROOT, resolveWebhook } = require('../../lib/env');
+const { postWebhook }          = require('../../lib/discord');
 
 const SCAN_SCRIPT    = path.join(ROOT, 'scripts', 'weather', 'market-scan.js');
 const ANALYZE_SCRIPT = path.join(ROOT, 'scripts', 'weather', 'analyze.js');
 const REPORT_SCRIPT  = path.join(ROOT, 'scripts', 'weather', 'weekly-report.js');
 const TRADES_FILE    = path.join(ROOT, 'weather-trades.json');
 
-const SIGNALS_HOOK  = process.env.WEATHER_DISCORD_SIGNALS_WEBHOOK;
-const BACKTEST_HOOK = process.env.WEATHER_DISCORD_BACKTEST_WEBHOOK;
+const SIGNALS_HOOK  = resolveWebhook('WEATHER_DISCORD_SIGNALS_WEBHOOK');
+const BACKTEST_HOOK = resolveWebhook('WEATHER_DISCORD_BACKTEST_WEBHOOK');
 const NODE          = process.execPath;
 
 function readTrades()   { try { return JSON.parse(fs.readFileSync(TRADES_FILE, 'utf8')); } catch { return []; } }

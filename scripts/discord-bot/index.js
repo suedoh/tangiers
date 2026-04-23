@@ -19,12 +19,15 @@ const https  = require('https');
 const fs     = require('fs');
 const path   = require('path');
 
-const { loadEnv, ROOT } = require('../lib/env');
-const router            = require('./router');
+const { loadEnv, ROOT, isStaging } = require('../lib/env');
+const router                        = require('./router');
 
 loadEnv();
 
-const BOT_TOKEN      = process.env.DISCORD_BOT_TOKEN;
+// Use staging bot token when ENVIRONMENT=staging, production token otherwise
+const BOT_TOKEN = isStaging()
+  ? process.env.DISCORD_BOT_TOKEN_STAGING
+  : process.env.DISCORD_BOT_TOKEN;
 const REACT_EMOJI    = '📊';
 const REACT_ENC      = encodeURIComponent(REACT_EMOJI);
 const MSG_MAX_AGE    = 24 * 60 * 60 * 1000; // 24h — expire old signal tracking
@@ -43,8 +46,8 @@ if (process.env.PRIMARY === 'false') {
   process.exit(0);
 }
 
-if (!BOT_TOKEN || BOT_TOKEN === 'your_token_here') {
-  console.log('[discord-bot] DISCORD_BOT_TOKEN not set — see setup instructions in scripts/discord-bot.js');
+if (!BOT_TOKEN || BOT_TOKEN.startsWith('your_')) {
+  console.log('[discord-bot] Bot token not set — configure DISCORD_BOT_TOKEN (production) or DISCORD_BOT_TOKEN_STAGING in .env');
   process.exit(0);
 }
 
