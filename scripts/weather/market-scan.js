@@ -26,7 +26,7 @@ const crypto = require('crypto');
 
 const { loadEnv, ROOT, resolveWebhook } = require('../lib/env');
 const { postWebhook }                   = require('../lib/discord');
-const { getObserved, getTemperatureForecast, normalCDF, thresholdProbability, leadTimeSigma } = require('../lib/forecasts');
+const { getObserved, fetchGHCNObserved, fetchNWSObserved, getTemperatureForecast, normalCDF, thresholdProbability, leadTimeSigma } = require('../lib/forecasts');
 const {
   fetchWeatherMarkets,
   getMarketPrice,
@@ -244,12 +244,30 @@ async function resolveOutcomes(trades) {
     if (now < resDate.getTime() + 36 * 3_600_000) continue;
 
     try {
-      const { value } = await getObserved(
-        trade.parsed.coords.lat,
-        trade.parsed.coords.lon,
-        trade.parsed.date,
-        trade.parsed.direction === 'below' ? 'below' : 'above'
-      );
+      const coords  = trade.parsed.coords || {};
+      const wantHigh = trade.parsed.direction !== 'below';
+
+      // Fetch in priority order: GHCN (Polymarket's source) → NWS METAR → ERA5
+      let value = null, observedSource = null;
+
+      if (coords.ghcnStation) {
+        const ghcn = await fetchGHCNObserved(coords.ghcnStation, trade.parsed.date).catch(() => null);
+        if (ghcn) {
+          const v = wantHigh ? ghcn.tmax : ghcn.tmin;
+          if (v != null) { value = v; observedSource = ghcn.source; }
+        }
+      }
+      if (value == null && coords.nwsStation) {
+        const nws = await fetchNWSObserved(coords.nwsStation, trade.parsed.date, coords.tz).catch(() => null);
+        if (nws) {
+          const v = wantHigh ? nws.high : nws.low;
+          if (v != null) { value = v; observedSource = nws.source; }
+        }
+      }
+      if (value == null && coords.lat != null) {
+        const era5 = await getObserved(coords.lat, coords.lon, trade.parsed.date, wantHigh ? 'above' : 'below').catch(() => null);
+        if (era5?.value != null) { value = era5.value; observedSource = 'Open-Meteo ERA5'; }
+      }
 
       if (value == null) continue;
 
@@ -266,10 +284,12 @@ async function resolveOutcomes(trades) {
 
       const signalWon = (trade.side === 'yes' && hit) || (trade.side === 'no' && !hit);
 
-      trade.outcome      = hit ? 'yes-resolved' : 'no-resolved';
-      trade.observedTemp = value;
-      trade.signalResult = signalWon ? 'win' : 'loss';
-      trade.closedAt     = new Date().toISOString();
+      trade.outcome        = hit ? 'yes-resolved' : 'no-resolved';
+      trade.observedTemp   = value;
+      trade.observedSource = observedSource;
+      trade.signalResult   = signalWon ? 'win' : 'loss';
+      trade.closedAt       = new Date().toISOString();
+      if (trade.meanF != null) trade.modelBiasF = Math.round((value - trade.meanF) * 10) / 10;
 
       if (trade.betDollars > 0) {
         const price = trade.side === 'yes' ? trade.yesPrice : trade.noPrice;

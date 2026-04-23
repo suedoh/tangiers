@@ -539,6 +539,101 @@ async function getForecast(lat, lon, targetDate, thresholdF, direction = 'above'
   };
 }
 
+// ─── Settlement observation helpers ───────────────────────────────────────────
+
+/**
+ * Convert a local calendar date to a UTC time range covering the full local day.
+ * Uses simplified DST detection (April–October = DST for US cities).
+ */
+function localDayUtcRange(date, tz) {
+  const DST = { 'America/New_York': 4, 'America/Chicago': 5, 'America/Denver': 6, 'America/Los_Angeles': 7, 'America/Phoenix': 7, 'America/Anchorage': 8, 'Pacific/Honolulu': 10 };
+  const STD = { 'America/New_York': 5, 'America/Chicago': 6, 'America/Denver': 7, 'America/Los_Angeles': 8, 'America/Phoenix': 7, 'America/Anchorage': 9, 'Pacific/Honolulu': 10 };
+  const [y, m, d] = date.split('-').map(Number);
+  const hoursAhead = (m >= 4 && m <= 10 ? DST : STD)[tz] ?? 5;
+  const startUTC = new Date(Date.UTC(y, m - 1, d, hoursAhead, 0, 0));
+  const endUTC   = new Date(startUTC.getTime() + 24 * 3_600_000);
+  return [
+    startUTC.toISOString().slice(0, 19) + '+00:00',
+    endUTC.toISOString().slice(0, 19) + '+00:00',
+  ];
+}
+
+/**
+ * Fetch actual observed TMAX/TMIN for a specific date from NOAA GHCN-Daily.
+ * Primary settlement data source — same station network Polymarket uses for US markets.
+ * Data is available 1–3 days after the observation date.
+ *
+ * @param {string} ghcnStation  e.g. 'USW00094728' (no 'GHCND:' prefix)
+ * @param {string} date         'YYYY-MM-DD'
+ * @returns {Promise<{tmax: number|null, tmin: number|null, source: string} | null>}
+ */
+async function fetchGHCNObserved(ghcnStation, date) {
+  const token = process.env.NCEI_TOKEN;
+  if (!token || !ghcnStation) return null;
+
+  const path = `/cdo-web/api/v2/data` +
+    `?datasetid=GHCND&stationid=GHCND:${ghcnStation}` +
+    `&datatypeid=TMAX,TMIN&units=standard` +
+    `&startdate=${date}&enddate=${date}&limit=10`;
+
+  return new Promise(resolve => {
+    const req = https.request({
+      hostname: NCEI_API,
+      path,
+      method:  'GET',
+      headers: { token, 'User-Agent': 'Weathermen/1.0 (Tangiers)' },
+    }, res => {
+      let raw = '';
+      res.on('data', c => raw += c);
+      res.on('end', () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) { resolve(null); return; }
+        try {
+          const results = JSON.parse(raw).results || [];
+          let tmax = null, tmin = null;
+          for (const r of results) {
+            if (r.datatype === 'TMAX' && r.value != null) tmax = r.value;
+            if (r.datatype === 'TMIN' && r.value != null) tmin = r.value;
+          }
+          resolve((tmax != null || tmin != null) ? { tmax, tmin, source: `GHCN-Daily/${ghcnStation}` } : null);
+        } catch { resolve(null); }
+      });
+    });
+    req.setTimeout(15_000, () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
+    req.end();
+  });
+}
+
+/**
+ * Fetch daily high/low from NWS hourly METAR observations.
+ * Near-real-time (available within hours of observation). Returns temps in °F.
+ *
+ * @param {string} nwsStation  ICAO code e.g. 'KNYC'
+ * @param {string} date        'YYYY-MM-DD' (local calendar date)
+ * @param {string} timezone    IANA timezone e.g. 'America/New_York'
+ * @returns {Promise<{high: number, low: number, obsCount: number, source: string} | null>}
+ */
+async function fetchNWSObserved(nwsStation, date, timezone = 'America/New_York') {
+  if (!nwsStation) return null;
+  const [startStr, endStr] = localDayUtcRange(date, timezone);
+  const apiPath = `/stations/${nwsStation}/observations` +
+    `?start=${encodeURIComponent(startStr)}&end=${encodeURIComponent(endStr)}`;
+  try {
+    const data   = await httpGet(NWS_API, apiPath, 15_000);
+    const tempsC = (data?.features || [])
+      .map(f => f?.properties?.temperature?.value)
+      .filter(v => v != null && !isNaN(v) && v > -60 && v < 60);
+    if (tempsC.length < 3) return null;
+    const tempsF = tempsC.map(c => c * 9 / 5 + 32);
+    return {
+      high:     Math.max(...tempsF),
+      low:      Math.min(...tempsF),
+      obsCount: tempsF.length,
+      source:   `NWS METAR/${nwsStation}`,
+    };
+  } catch { return null; }
+}
+
 /**
  * Fetch the actual observed temperature for a past date (for outcome resolution).
  * @param {number} lat
@@ -638,4 +733,4 @@ async function getTemperatureForecast(lat, lon, targetDate, opts = {}) {
   return { meanF, sigmaF, ensemble, models, historical, sources };
 }
 
-module.exports = { getForecast, getObserved, fetchNWS, normalCDF, thresholdProbability, getTemperatureForecast, fetchGHCNStats, leadTimeSigma };
+module.exports = { getForecast, getObserved, fetchGHCNObserved, fetchNWSObserved, fetchNWS, normalCDF, thresholdProbability, getTemperatureForecast, fetchGHCNStats, leadTimeSigma };

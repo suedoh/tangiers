@@ -4,12 +4,14 @@
  * handlers/weather.js — All weather channel commands
  *
  * Commands:
- *   !scan               — run market-scan.js immediately
- *   !analyze <url|q>    — deep dive on a specific market or question
- *   !report             — generate weekly report now
- *   !trades             — list open/recent weather signals
- *   !took <id>          — log that you manually entered a paper trade
- *   !exit <id> <outcome> — log manual exit (win|loss|manual)
+ *   !scan                       — run market-scan.js immediately
+ *   !analyze <url|q>            — deep dive on a specific market or question
+ *   !report                     — generate weekly report now
+ *   !trades                     — list open/recent weather signals
+ *   !settle [--force] [--dry] [--id <id>]
+ *                               — resolve expired trades via GHCN-Daily / NWS METAR
+ *   !took <id>                  — log that you manually entered a paper trade
+ *   !exit <id> <outcome>        — log manual exit (win|loss|manual)
  */
 
 const fs   = require('fs');
@@ -21,6 +23,7 @@ const { postWebhook }          = require('../../lib/discord');
 const SCAN_SCRIPT    = path.join(ROOT, 'scripts', 'weather', 'market-scan.js');
 const ANALYZE_SCRIPT = path.join(ROOT, 'scripts', 'weather', 'analyze.js');
 const REPORT_SCRIPT  = path.join(ROOT, 'scripts', 'weather', 'weekly-report.js');
+const SETTLE_SCRIPT  = path.join(ROOT, 'scripts', 'weather', 'settle.js');
 const TRADES_FILE    = path.join(ROOT, 'weather-trades.json');
 
 const SIGNALS_HOOK  = resolveWebhook('WEATHER_DISCORD_SIGNALS_WEBHOOK');
@@ -43,6 +46,7 @@ async function handle(message, api) {
   if (/^!analyze\b/i.test(text)) { await handleAnalyze(user, text, api);     return true; }
   if (/^!report\b/i.test(text))  { await handleReport(user, api);            return true; }
   if (/^!trades\b/i.test(text))  { await handleTrades(user, api);            return true; }
+  if (/^!settle\b/i.test(text))  { await handleSettle(user, text, api);      return true; }
   if (/^!took\b/i.test(text))    { await handleTook(user, args[0], api);     return true; }
   if (/^!exit\b/i.test(text))    { await handleExit(user, args, api);        return true; }
 
@@ -198,6 +202,48 @@ async function handleTrades(user, api) {
   // Guard: Discord 2000-char limit — truncate gracefully if somehow still too long
   const msg = lines.join('\n');
   await api.sendMessage(msg.length <= 1950 ? msg : msg.slice(0, 1947) + '...');
+}
+
+// ─── !settle ─────────────────────────────────────────────────────────────────
+
+async function handleSettle(user, text, api) {
+  await api.sendTyping();
+
+  // Optional flags: !settle --force, !settle --id wx-abc123, !settle --dry
+  const extraArgs = text.replace(/^!settle\s*/i, '').trim().split(/\s+/).filter(Boolean);
+  const force     = extraArgs.includes('--force');
+  const dry       = extraArgs.includes('--dry');
+  const idIdx     = extraArgs.indexOf('--id');
+  const targetId  = idIdx !== -1 ? extraArgs[idIdx + 1] : null;
+
+  const modeStr = [force && '--force', dry && '--dry', targetId && `--id ${targetId}`]
+    .filter(Boolean).join(' ') || 'default';
+
+  await api.sendMessage(`🔍 **Settlement run triggered by ${user}** (${modeStr})\nChecking GHCN-Daily + NWS METAR for expired markets...`);
+
+  const args = [SETTLE_SCRIPT, ...extraArgs];
+  const result = spawnSync(NODE, args, { encoding: 'utf8', timeout: 120_000 });
+
+  if (result.error || result.status !== 0) {
+    const err = result.error?.message || result.stderr?.trim() || 'Unknown error';
+    await api.sendMessage(`❌ **Settlement failed:** ${err.slice(0, 300)}`);
+    return;
+  }
+
+  // Extract summary from last few lines of stdout
+  const lines    = (result.stdout || '').trim().split('\n');
+  const lastLine = lines[lines.length - 1] || '';
+  const match    = lastLine.match(/Resolved: (\d+) \| Skipped[^|]*\| Lifetime: (.+)/);
+
+  if (match) {
+    const [, resolved, lifetime] = match;
+    const msg = dry
+      ? `✅ **[DRY RUN]** Would resolve **${resolved}** trade(s). Re-run without \`--dry\` to commit.`
+      : `✅ **Settlement complete** — **${resolved}** resolved | Lifetime: ${lifetime}\nResolution cards posted to #weather-backtest.`;
+    await api.sendMessage(msg);
+  } else {
+    await api.sendMessage(`✅ **Settlement run complete.** Check #weather-backtest for results.`);
+  }
 }
 
 // ─── !took ───────────────────────────────────────────────────────────────────
