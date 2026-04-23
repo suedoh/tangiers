@@ -1,7 +1,7 @@
 # weather/schedule-windows.ps1 - Windows Task Scheduler setup for Weathermen
 #
 # Creates two scheduled tasks:
-#   Weathermen-Scan   - runs market-scan.js every 15 minutes
+#   Weathermen-Scan   - runs market-scan.js every 30 minutes
 #   Weathermen-Report - runs weekly-report.js every Sunday at 18:00 local time
 #
 # Usage (run once as Administrator):
@@ -27,7 +27,7 @@ Write-Host "Project: $ProjectRoot"
 Write-Host "Node:    $NodePath"
 Write-Host ''
 
-# -- Task 1: market-scan every 15 minutes -------------------------------------
+# -- Task 1: market-scan every 30 minutes -------------------------------------
 
 $scanAction = New-ScheduledTaskAction `
     -Execute $NodePath `
@@ -35,7 +35,7 @@ $scanAction = New-ScheduledTaskAction `
     -WorkingDirectory $ProjectRoot
 
 $scanTrigger = New-ScheduledTaskTrigger `
-    -RepetitionInterval (New-TimeSpan -Minutes 15) `
+    -RepetitionInterval (New-TimeSpan -Minutes 30) `
     -Once `
     -At (Get-Date)
 
@@ -50,16 +50,16 @@ if ($existingScan) {
         -Action $scanAction `
         -Trigger $scanTrigger `
         -Settings $scanSettings | Out-Null
-    Write-Host '[updated] Weathermen-Scan (every 15 minutes)'
+    Write-Host '[updated] Weathermen-Scan (every 30 minutes)'
 } else {
     Register-ScheduledTask `
         -TaskName    'Weathermen-Scan' `
-        -Description 'Polymarket weather edge scanner (every 15 min)' `
+        -Description 'Polymarket weather edge scanner (every 30 min)' `
         -Action      $scanAction `
         -Trigger     $scanTrigger `
         -Settings    $scanSettings `
         -RunLevel    Limited | Out-Null
-    Write-Host '[created] Weathermen-Scan (every 15 minutes)'
+    Write-Host '[created] Weathermen-Scan (every 30 minutes)'
 }
 
 # -- Task 2: weekly-report every Sunday at 18:00 local time -------------------
