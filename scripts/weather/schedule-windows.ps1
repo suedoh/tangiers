@@ -1,16 +1,19 @@
 # weather/schedule-windows.ps1 - Windows Task Scheduler setup for Weathermen
 #
-# Creates two scheduled tasks:
+# Creates three scheduled tasks:
 #   Weathermen-Scan   - runs market-scan.js every 30 minutes
 #   Weathermen-Report - runs weekly-report.js every Sunday at 18:00 local time
 #   Weathermen-Bot    - runs discord-bot/index.js every minute (handles !commands)
 #
+# All tasks run via wscript.exe VBS launchers so no console window ever appears.
+#
 # Usage (run once as Administrator):
-#   powershell -ExecutionPolicy Bypass -File scripts\weather\schedule-windows.ps1
+#   powershell -ExecutionPolicy Bypass -File "D:\path\to\scripts\weather\schedule-windows.ps1"
 #
 # To remove tasks later:
 #   Unregister-ScheduledTask -TaskName "Weathermen-Scan"   -Confirm:$false
 #   Unregister-ScheduledTask -TaskName "Weathermen-Report" -Confirm:$false
+#   Unregister-ScheduledTask -TaskName "Weathermen-Bot"    -Confirm:$false
 
 $ProjectRoot  = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $NodePath     = (Get-Command node -ErrorAction Stop).Source
@@ -23,6 +26,27 @@ if (-not (Test-Path $LogDir)) {
     New-Item -ItemType Directory -Path $LogDir | Out-Null
 }
 
+# -- Generate silent VBS launchers (wscript window style 0 = truly invisible) --
+
+$ScanVbs   = Join-Path $ProjectRoot 'scripts\weather\run-scan.vbs'
+$ReportVbs = Join-Path $ProjectRoot 'scripts\weather\run-report.vbs'
+$BotVbs    = Join-Path $ProjectRoot 'scripts\weather\run-bot.vbs'
+
+@"
+Set oShell = CreateObject("WScript.Shell")
+oShell.Run """$NodePath"" ""$ScanScript""", 0, False
+"@ | Out-File -FilePath $ScanVbs -Encoding ascii
+
+@"
+Set oShell = CreateObject("WScript.Shell")
+oShell.Run """$NodePath"" ""$ReportScript"" --force", 0, False
+"@ | Out-File -FilePath $ReportVbs -Encoding ascii
+
+@"
+Set oShell = CreateObject("WScript.Shell")
+oShell.Run """$NodePath"" ""$BotScript""", 0, False
+"@ | Out-File -FilePath $BotVbs -Encoding ascii
+
 Write-Host ''
 Write-Host 'Weathermen - Windows Task Scheduler Setup'
 Write-Host "Project: $ProjectRoot"
@@ -32,8 +56,8 @@ Write-Host ''
 # -- Task 1: market-scan every 30 minutes -------------------------------------
 
 $scanAction = New-ScheduledTaskAction `
-    -Execute 'powershell.exe' `
-    -Argument ('-WindowStyle Hidden -NonInteractive -Command "& \"' + $NodePath + '\" \"' + $ScanScript + '\""') `
+    -Execute 'wscript.exe' `
+    -Argument ('//NoLogo "' + $ScanVbs + '"') `
     -WorkingDirectory $ProjectRoot
 
 $scanTrigger = New-ScheduledTaskTrigger `
@@ -67,8 +91,8 @@ if ($existingScan) {
 # -- Task 2: weekly-report every Sunday at 18:00 local time -------------------
 
 $reportAction = New-ScheduledTaskAction `
-    -Execute 'powershell.exe' `
-    -Argument ('-WindowStyle Hidden -NonInteractive -Command "& \"' + $NodePath + '\" \"' + $ReportScript + '\" --force"') `
+    -Execute 'wscript.exe' `
+    -Argument ('//NoLogo "' + $ReportVbs + '"') `
     -WorkingDirectory $ProjectRoot
 
 $reportTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At '18:00'
@@ -98,8 +122,8 @@ if ($existingReport) {
 # -- Task 3: discord bot every 1 minute ---------------------------------------
 
 $botAction = New-ScheduledTaskAction `
-    -Execute 'powershell.exe' `
-    -Argument ('-WindowStyle Hidden -NonInteractive -Command "& \"' + $NodePath + '\" \"' + $BotScript + '\""') `
+    -Execute 'wscript.exe' `
+    -Argument ('//NoLogo "' + $BotVbs + '"') `
     -WorkingDirectory $ProjectRoot
 
 $botTrigger = New-ScheduledTaskTrigger `
