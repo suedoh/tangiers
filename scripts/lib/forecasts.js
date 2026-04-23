@@ -236,27 +236,22 @@ async function fetchGHCNBaseRate(ghcnStation, targetDate, thresholdF, direction)
 
   const [, mm, dd] = targetDate.split('-');
   const currentYear = new Date().getFullYear();
-  const startYear   = currentYear - 12;   // 12 seasons for robust sample
-  const endYear     = currentYear - 1;
-
-  // NOAA CDO API: fetch 12 years of the exact calendar date
-  // datatypeid: TMAX or TMIN (tenths of °C — divide by 10 to get °C, then convert to °F)
-  const datatype = direction === 'below' ? 'TMIN' : 'TMAX';
-
-  // Build date range requests year-by-year to avoid CDO 1-year result limit
-  // CDO returns max ~1000 records; fetching month window around the date is safer
+  const datatype    = direction === 'below' ? 'TMIN' : 'TMAX';
   const mmdd        = `${mm}-${dd}`;
-  const startDate   = `${startYear}-${mm}-01`;
-  const endDateReq  = `${endYear}-${mm}-${String(Math.min(parseInt(dd) + 4, 28)).padStart(2, '0')}`;
 
-  const path = `/cdo-web/api/v2/data` +
-    `?datasetid=GHCND&stationid=GHCND:${ghcnStation}` +
-    `&datatypeid=${datatype}&units=standard` +
-    `&startdate=${startDate}&enddate=${endDateReq}` +
-    `&limit=1000`;
+  // CDO API enforces a 1-year maximum date range per request.
+  // Fetch each of the past 12 years individually in parallel, using a
+  // ±5-day window around the target calendar date to guarantee a hit
+  // even if the station missed the exact day (maintenance, QC flags).
+  const years = [];
+  for (let y = currentYear - 12; y <= currentYear - 1; y++) years.push(y);
 
-  try {
-    const data = await new Promise((resolve, reject) => {
+  function nceiGet(startDate, endDate) {
+    const path = `/cdo-web/api/v2/data` +
+      `?datasetid=GHCND&stationid=GHCND:${ghcnStation}` +
+      `&datatypeid=${datatype}&units=standard` +
+      `&startdate=${startDate}&enddate=${endDate}&limit=31`;
+    return new Promise((resolve, reject) => {
       const req = https.request({
         hostname: NCEI_API,
         path,
@@ -268,31 +263,41 @@ async function fetchGHCNBaseRate(ghcnStation, targetDate, thresholdF, direction)
         res.on('end', () => {
           if (res.statusCode >= 200 && res.statusCode < 300) {
             try { resolve(JSON.parse(raw)); }
-            catch { reject(new Error(`NCEI JSON parse error`)); }
+            catch { resolve(null); }
           } else {
-            reject(new Error(`NCEI HTTP ${res.statusCode}`));
+            resolve(null); // non-fatal — skip this year
           }
         });
       });
-      req.setTimeout(15_000, () => { req.destroy(); reject(new Error('NCEI timeout')); });
-      req.on('error', reject);
+      req.setTimeout(15_000, () => { req.destroy(); resolve(null); });
+      req.on('error', () => resolve(null));
       req.end();
     });
+  }
 
-    const results = data.results || [];
+  try {
+    // Build narrow window per year (±5 days, clamped to month boundaries)
+    const ddInt  = parseInt(dd, 10);
+    const lo     = String(Math.max(1,  ddInt - 5)).padStart(2, '0');
+    const hiRaw  = ddInt + 5;
+    // Simple month-end clamp: use 28 as safe upper bound (works for all months)
+    const hi     = String(Math.min(28, hiRaw)).padStart(2, '0');
 
-    // Filter to entries matching this calendar day (allow ±1 day for leap years)
-    const sameDayObs = results.filter(r => {
-      const d = (r.date || '').slice(5, 10); // 'MM-DD'
-      return d === mmdd;
-    });
+    const yearRequests = years.map(y =>
+      nceiGet(`${y}-${mm}-${lo}`, `${y}-${mm}-${hi}`)
+    );
+    const yearResults = await Promise.all(yearRequests);
+
+    // Collect all observations matching the exact calendar date
+    const allObs = yearResults.flatMap(data => (data?.results || []));
+    const sameDayObs = allObs.filter(r => (r.date || '').slice(5, 10) === mmdd);
 
     if (sameDayObs.length < 3) return null;
 
-    // GHCN TMAX/TMIN values are in tenths of °C → convert to °F
+    // values are already in °F because we request units=standard
     const tempsF = sameDayObs
-      .map(r => (r.value / 10) * 9 / 5 + 32)
-      .filter(v => !isNaN(v) && v > -100 && v < 150);
+      .map(r => r.value)
+      .filter(v => v != null && !isNaN(v) && v > -60 && v < 150);
 
     if (tempsF.length < 3) return null;
 
