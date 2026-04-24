@@ -555,7 +555,7 @@ async function main() {
     // ── Stage 2: Sonnet deep analysis (fires on take or reduce only) ──────
     let aiAnalysis = stage1Result;
 
-    if (stage1Result.decision !== 'skip') {
+    if (stage1Result.decision !== 'skip' && process.env.WEATHER_DEEP_ANALYSIS === 'true') {
       const nwsObs = parsed.coords?.nwsStation
         ? await fetchNWSObserved(parsed.coords.nwsStation, mp.date, parsed.coords.tz || 'America/New_York').catch(() => null)
         : null;
