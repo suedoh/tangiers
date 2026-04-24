@@ -28,6 +28,7 @@ const { loadEnv, ROOT, resolveWebhook } = require('../lib/env');
 const { postWebhook }                   = require('../lib/discord');
 const { getObserved, fetchGHCNObserved, fetchNWSObserved, getTemperatureForecast, normalCDF, thresholdProbability, leadTimeSigma } = require('../lib/forecasts');
 const { analyzeSignal } = require('../lib/weather-analysis');
+const { autoExit }      = require('./exit-monitor');
 const {
   fetchWeatherMarkets,
   getMarketPrice,
@@ -366,6 +367,13 @@ async function main() {
   // ── Step 1: resolve any settled positions ─────────────────────────────────
   const resolved = await resolveOutcomes(trades);
   if (resolved) writeTrades(trades);
+
+  // ── Step 1.5: auto-exit open paper trades that hit exit conditions ─────────
+  const exited = await autoExit(trades).catch(err => {
+    log(`[exit-monitor] error: ${err.message}`);
+    return false;
+  });
+  if (exited) writeTrades(trades);
 
   // ── Step 2: fetch active Polymarket weather markets (event-slug based) ────
   let markets;

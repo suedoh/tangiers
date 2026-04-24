@@ -188,13 +188,18 @@ async function postExitCard(trade, result) {
 }
 
 // ---------------------------------------------------------------------------
-// Main
+// Core: autoExit — called by market-scan.js (or standalone via main())
 // ---------------------------------------------------------------------------
 
-async function main() {
-  const trades = readTrades();
-
-  // Only monitor open paper entries that haven't been closed yet
+/**
+ * Check all open paper trades for exit conditions.
+ * Mutates the trades array in place and returns true if any trade was changed.
+ * Callers are responsible for persisting trades if the return value is true.
+ *
+ * @param {Array} trades  — the full trades array (from weather-trades.json)
+ * @returns {Promise<boolean>} dirty — true if any trade was updated
+ */
+async function autoExit(trades) {
   const candidates = trades.filter(t =>
     t.outcome === null &&
     t.signalResult == null &&
@@ -203,10 +208,7 @@ async function main() {
     t.parsed?.date,
   );
 
-  if (candidates.length === 0) {
-    console.log('[exit-monitor] no open paper trades to monitor');
-    return;
-  }
+  if (candidates.length === 0) return false;
 
   console.log(`[exit-monitor] checking ${candidates.length} open trade(s)`);
 
@@ -230,7 +232,7 @@ async function main() {
 
     const { exitReason, peakPrice, currentPrice } = result;
 
-    // Always persist peak price update (needed for trailing stop across runs)
+    // Always persist peak price (trailing stop needs it across runs)
     if (peakPrice !== trade.peakPrice) {
       trades[idx].peakPrice = peakPrice;
       dirty = true;
@@ -247,12 +249,11 @@ async function main() {
     trades[idx].pnlDollars   = pnl;
     trades[idx].closedAt     = new Date().toISOString();
     trades[idx].closedBy     = 'exit-monitor';
-    trades[idx].outcome      = exitReason;   // e.g. 'profit_target', 'stop_loss'
+    trades[idx].outcome      = exitReason;
     dirty = true;
 
     console.log(`[exit-monitor] AUTO-CLOSED ${trade.id}: ${exitReason} @ ${cents(currentPrice)} | P&L ${pnl != null ? '$' + pnl.toFixed(2) : 'N/A'}`);
 
-    // Post exit card to #weather-signals
     try {
       await postExitCard(trade, result);
     } catch (err) {
@@ -260,10 +261,22 @@ async function main() {
     }
   }
 
-  if (dirty) writeTrades(trades);
+  return dirty;
 }
 
-main().catch(err => {
-  console.error('[exit-monitor] fatal:', err.message);
-  process.exit(1);
-});
+module.exports = { autoExit };
+
+// ---------------------------------------------------------------------------
+// Standalone entry point (node scripts/weather/exit-monitor.js)
+// ---------------------------------------------------------------------------
+
+if (require.main === module) {
+  (async () => {
+    const trades = readTrades();
+    const dirty  = await autoExit(trades);
+    if (dirty) writeTrades(trades);
+  })().catch(err => {
+    console.error('[exit-monitor] fatal:', err.message);
+    process.exit(1);
+  });
+}
