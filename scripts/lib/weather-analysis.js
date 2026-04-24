@@ -135,6 +135,19 @@ sizeMultiplier rules:
  * @returns {Promise<{decision, confidence, sizeMultiplier, reasoning, flags, raw}>}
  */
 async function analyzeSignal(signal) {
+  const result = await _analyzeSignal(signal);
+  if (result._parseError) {
+    await new Promise(r => setTimeout(r, 1000));
+    console.log('[weather-analysis] Retrying after parse error...');
+    const retry = await _analyzeSignal(signal);
+    delete retry._parseError;
+    return retry;
+  }
+  delete result._parseError;
+  return result;
+}
+
+async function _analyzeSignal(signal) {
   const fallback = {
     decision:        'take',
     confidence:      null,
@@ -205,20 +218,20 @@ async function analyzeSignal(signal) {
             return;
           }
 
-          const result = JSON.parse(jsonStr);
+          const parsed = JSON.parse(jsonStr);
 
-          const decision       = ['take', 'reduce', 'skip'].includes(result.decision) ? result.decision : 'take';
-          const confidence     = typeof result.confidence === 'number'    ? Math.min(1, Math.max(0, result.confidence)) : null;
-          const sizeMultiplier = [1.0, 0.75, 0.5, 0.25].includes(result.sizeMultiplier) ? result.sizeMultiplier : 1.0;
-          const reasoning      = typeof result.reasoning === 'string'     ? result.reasoning.slice(0, 140)            : null;
-          const flags          = Array.isArray(result.flags)              ? result.flags.filter(f => typeof f === 'string').slice(0, 6) : [];
+          const decision       = ['take', 'reduce', 'skip'].includes(parsed.decision) ? parsed.decision : 'take';
+          const confidence     = typeof parsed.confidence === 'number'    ? Math.min(1, Math.max(0, parsed.confidence)) : null;
+          const sizeMultiplier = [1.0, 0.75, 0.5, 0.25].includes(parsed.sizeMultiplier) ? parsed.sizeMultiplier : 1.0;
+          const reasoning      = typeof parsed.reasoning === 'string'     ? parsed.reasoning.slice(0, 140)            : null;
+          const flags          = Array.isArray(parsed.flags)              ? parsed.flags.filter(f => typeof f === 'string').slice(0, 6) : [];
 
           resolve({ decision, confidence, sizeMultiplier, reasoning, flags, raw: text, skipped: false });
         } catch (e) {
           const resp = (() => { try { return JSON.parse(data); } catch { return null; } })();
           const raw  = resp?.content?.[0]?.text?.slice(0, 300) || data.slice(0, 300);
           console.error('[weather-analysis] Parse error:', e.message, '| raw:', raw);
-          resolve({ ...fallback, reasoning: 'AI parse error — defaulting to take.' });
+          resolve({ ...fallback, reasoning: 'AI parse error — defaulting to take.', _parseError: true });
         }
       });
     });
