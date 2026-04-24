@@ -1,9 +1,10 @@
 # weather/schedule-windows.ps1 - Windows Task Scheduler setup for Weathermen
 #
-# Creates three scheduled tasks:
-#   Weathermen-Scan   - runs market-scan.js every 30 minutes
-#   Weathermen-Report - runs weekly-report.js every Sunday at 18:00 local time
-#   Weathermen-Bot    - runs discord-bot/index.js every minute (handles !commands)
+# Creates four scheduled tasks:
+#   Weathermen-Scan        - runs market-scan.js every 30 minutes
+#   Weathermen-Report      - runs weekly-report.js every Sunday at 18:00 local time
+#   Weathermen-Bot         - runs discord-bot/index.js every minute (handles !commands)
+#   Weathermen-ExitMonitor - runs exit-monitor.js every 5 minutes (auto paper exit)
 #
 # All tasks run via wscript.exe VBS launchers so no console window ever appears.
 #
@@ -11,9 +12,10 @@
 #   powershell -ExecutionPolicy Bypass -File "D:\path\to\scripts\weather\schedule-windows.ps1"
 #
 # To remove tasks later:
-#   Unregister-ScheduledTask -TaskName "Weathermen-Scan"   -Confirm:$false
-#   Unregister-ScheduledTask -TaskName "Weathermen-Report" -Confirm:$false
-#   Unregister-ScheduledTask -TaskName "Weathermen-Bot"    -Confirm:$false
+#   Unregister-ScheduledTask -TaskName "Weathermen-Scan"        -Confirm:$false
+#   Unregister-ScheduledTask -TaskName "Weathermen-Report"      -Confirm:$false
+#   Unregister-ScheduledTask -TaskName "Weathermen-Bot"         -Confirm:$false
+#   Unregister-ScheduledTask -TaskName "Weathermen-ExitMonitor" -Confirm:$false
 
 $ProjectRoot  = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $NodePath     = (Get-Command node -ErrorAction Stop).Source
@@ -28,9 +30,11 @@ if (-not (Test-Path $LogDir)) {
 
 # -- Generate silent VBS launchers (wscript window style 0 = truly invisible) --
 
-$ScanVbs   = Join-Path $ProjectRoot 'scripts\weather\run-scan.vbs'
-$ReportVbs = Join-Path $ProjectRoot 'scripts\weather\run-report.vbs'
-$BotVbs    = Join-Path $ProjectRoot 'scripts\weather\run-bot.vbs'
+$ScanVbs        = Join-Path $ProjectRoot 'scripts\weather\run-scan.vbs'
+$ReportVbs      = Join-Path $ProjectRoot 'scripts\weather\run-report.vbs'
+$BotVbs         = Join-Path $ProjectRoot 'scripts\weather\run-bot.vbs'
+$ExitMonitorVbs = Join-Path $ProjectRoot 'scripts\weather\run-exit-monitor.vbs'
+$ExitMonitorScript = Join-Path $ProjectRoot 'scripts\weather\exit-monitor.js'
 
 @"
 Set oShell = CreateObject("WScript.Shell")
@@ -46,6 +50,11 @@ oShell.Run """$NodePath"" ""$ReportScript"" --force", 0, False
 Set oShell = CreateObject("WScript.Shell")
 oShell.Run """$NodePath"" ""$BotScript""", 0, False
 "@ | Out-File -FilePath $BotVbs -Encoding ascii
+
+@"
+Set oShell = CreateObject("WScript.Shell")
+oShell.Run """$NodePath"" ""$ExitMonitorScript""", 0, False
+"@ | Out-File -FilePath $ExitMonitorVbs -Encoding ascii
 
 Write-Host ''
 Write-Host 'Weathermen - Windows Task Scheduler Setup'
@@ -152,6 +161,41 @@ if ($existingBot) {
         -Settings    $botSettings `
         -RunLevel    Limited | Out-Null
     Write-Host '[created] Weathermen-Bot (every 1 minute)'
+}
+
+# -- Task 4: exit-monitor every 5 minutes -------------------------------------
+
+$exitMonitorAction = New-ScheduledTaskAction `
+    -Execute 'wscript.exe' `
+    -Argument ('//NoLogo "' + $ExitMonitorVbs + '"') `
+    -WorkingDirectory $ProjectRoot
+
+$exitMonitorTrigger = New-ScheduledTaskTrigger `
+    -RepetitionInterval (New-TimeSpan -Minutes 5) `
+    -Once `
+    -At (Get-Date)
+
+$exitMonitorSettings = New-ScheduledTaskSettingsSet `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 2) `
+    -StartWhenAvailable `
+    -RunOnlyIfNetworkAvailable
+
+$existingExitMonitor = Get-ScheduledTask -TaskName 'Weathermen-ExitMonitor' -ErrorAction SilentlyContinue
+if ($existingExitMonitor) {
+    Set-ScheduledTask -TaskName 'Weathermen-ExitMonitor' `
+        -Action $exitMonitorAction `
+        -Trigger $exitMonitorTrigger `
+        -Settings $exitMonitorSettings | Out-Null
+    Write-Host '[updated] Weathermen-ExitMonitor (every 5 minutes)'
+} else {
+    Register-ScheduledTask `
+        -TaskName    'Weathermen-ExitMonitor' `
+        -Description 'Weathermen paper trade exit monitor - 5-layer auto-exit (every 5 min)' `
+        -Action      $exitMonitorAction `
+        -Trigger     $exitMonitorTrigger `
+        -Settings    $exitMonitorSettings `
+        -RunLevel    Limited | Out-Null
+    Write-Host '[created] Weathermen-ExitMonitor (every 5 minutes)'
 }
 
 Write-Host ''
