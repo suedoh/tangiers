@@ -142,45 +142,45 @@ Every Sunday       →  Weekly report: win rate, P&L, edge breakdown, open posit
 const MSG_COMMANDS = `## 🤖 Weathermen Bot Commands
 All commands work in #weather-signals or #weather-backtest.
 
-**SCANNING**
-\`!scan\`
+## 🔭 Scanning
+!scan
 Triggers an immediate market sweep across all cities (~30s). Signals post above.
 
-\`!analyze <url or question>\`
+!analyze <url or question>
 Deep-dive on one specific market. Pass a Polymarket URL or a plain English question.
-→ \`!analyze https://polymarket.com/event/highest-temperature-in-nyc-on-april-28-2026\`
-→ \`!analyze Will Miami's high be above 85°F on April 27?\`
+→ !analyze https://polymarket.com/event/highest-temperature-in-nyc-on-april-28-2026
+→ !analyze Will Miami's high be above 85°F on April 27?
 Posts a full model breakdown to #weather-signals.
 
-**TRACKING**
-\`!trades\`
-Shows all open signals + last 6 resolved. Includes edge %, market price, days to resolution, and suggested bet size. Signal IDs are listed here — needed for \`!took\` and \`!exit\`.
+## 📋 Tracking
+!trades
+Shows all open signals + last 6 resolved. Includes edge %, market price, days to resolution, and suggested bet size. Signal IDs are listed here — needed for !took and !exit.
 
-\`!took <signal-id>\`
+!took <signal-id>
 Log that you entered a paper trade on a signal.
-→ \`!took wx-mob6otqe947e\`
+→ !took wx-mob6otqe947e
 Records who took it and when. Appears in the weekly report.
 
-\`!exit <signal-id> win|loss|manual\`
+!exit <signal-id> win|loss|manual
 Close a paper trade. Calculates P&L and posts to #weather-backtest.
-→ \`!exit wx-mob6otqe947e win\`
-→ \`!exit wx-mob6otqe947e loss\`
-Use \`manual\` if closing early (e.g. price moved, changed your mind).
+→ !exit wx-mob6otqe947e win
+→ !exit wx-mob6otqe947e loss
+Use manual if closing early (e.g. price moved, changed your mind).
 
-**REPORTS**
-\`!report\`
+## 📊 Reports
+!report
 Generate the weekly P&L summary right now instead of waiting for Sunday.
 Posts to #weather-backtest: win rate, edge-tier breakdown, city breakdown, open positions.
 
-**SETTLEMENT**
-\`!settle\`
+## 🔧 Settlement
+!settle
 Resolve expired trades using official NOAA observations (GHCN-Daily station data → NWS hourly METAR → ERA5 fallback). Runs automatically every 30 min, but use this to resolve immediately after a market date passes.
-→ \`!settle --force\` — use a 6h buffer instead of 24h (NWS data is near real-time)
-→ \`!settle --dry\` — preview what would resolve without writing anything
-→ \`!settle --id wx-abc123\` — resolve one specific trade by ID
-Each resolved trade posts a result card to #weather-backtest showing the observed temperature, data source, and model bias (how far off the forecast was). \`--dry\` and \`--force\` can be combined: \`!settle --dry --force\`.
+→ !settle --force — use a 6h buffer instead of 24h (NWS data is near real-time)
+→ !settle --dry — preview what would resolve without writing anything
+→ !settle --id wx-abc123 — resolve one specific trade by ID
+Each resolved trade posts a result card to #weather-backtest showing the observed temperature, data source, and model bias (how far off the forecast was). --dry and --force can be combined: !settle --dry --force.
 
-\`!resolve-status\`
+!resolve-status
 Show the current resolution queue. Lists open/superseded/resolved counts broken down by eligibility tier, plus up to 8 pending trades with their age (hours past target date) and whether a Polymarket condition ID is available.
 → Eligible for Polymarket check = 12h+ past target date (oracle price converged to ~0 or ~1)
 → Eligible for GHCN check = 36h+ past target date (NOAA data typically posted within 36h)
