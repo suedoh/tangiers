@@ -176,9 +176,21 @@ async function analyzeSignal(signal) {
       res.on('data', c => data += c);
       res.on('end', () => {
         try {
-          const resp   = JSON.parse(data);
-          const text   = resp.content?.[0]?.text?.trim() || '';
-          const result = JSON.parse(text);
+          const resp = JSON.parse(data);
+          const text = resp.content?.[0]?.text?.trim() || '';
+
+          // Haiku sometimes wraps output in ```json ... ``` despite being told not to.
+          // Strip fences, then extract the first {...} block as a fallback.
+          let jsonStr = text
+            .replace(/^```(?:json)?\s*/i, '')
+            .replace(/\s*```\s*$/, '')
+            .trim();
+          if (!jsonStr.startsWith('{')) {
+            const match = jsonStr.match(/\{[\s\S]*\}/);
+            jsonStr = match ? match[0] : jsonStr;
+          }
+
+          const result = JSON.parse(jsonStr);
 
           const decision       = ['take', 'reduce', 'skip'].includes(result.decision) ? result.decision : 'take';
           const confidence     = typeof result.confidence === 'number'    ? Math.min(1, Math.max(0, result.confidence)) : null;
@@ -188,7 +200,9 @@ async function analyzeSignal(signal) {
 
           resolve({ decision, confidence, sizeMultiplier, reasoning, flags, raw: text, skipped: false });
         } catch (e) {
-          console.error('[weather-analysis] Parse error:', e.message);
+          const resp = (() => { try { return JSON.parse(data); } catch { return null; } })();
+          const raw  = resp?.content?.[0]?.text?.slice(0, 300) || data.slice(0, 300);
+          console.error('[weather-analysis] Parse error:', e.message, '| raw:', raw);
           resolve({ ...fallback, reasoning: 'AI parse error — defaulting to take.' });
         }
       });
