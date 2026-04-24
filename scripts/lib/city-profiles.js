@@ -268,6 +268,78 @@ const CITY_PROFILES = {
     notes: 'KLIA is 45 miles south of Kuala Lumpur city centre in Sepang — the largest city-to-airport offset in this profile set. Equatorial climate (Af) with year-round high temperatures and very limited variability — similar caution to Singapore for threshold trades. Two monsoon seasons modulate rainfall but cause limited temperature swings: SW monsoon (May–September) and NE monsoon (November–March). Afternoon convection reliably caps highs during wet periods via cloud shading. ECMWF IFS and AIFS both perform better than GFS in equatorial SE Asia. Long-range forecasts (5+ days) have very low skill at temperature thresholds. HRRR does not cover Malaysia.',
   },
 
+  // ─── International cities (Batch 3) ──────────────────────────────────────────
+
+  'taipei': {
+    uhi:       4.0,
+    coastal:   'ocean',    // Taiwan Strait (west) / Pacific (east)
+    elevation: 106,        // RCTP (Taoyuan Intl) — 25 miles SW of downtown Taipei
+    notes: 'RCTP is 25 miles southwest of downtown Taipei in Taoyuan county — outside the Taipei basin that traps heat in summer. Subtropical maritime climate (Cfa). Typhoon season (May–November, peak August–September) causes sharp model divergence; ECMWF IFS outperforms GFS on western Pacific typhoon tracks. Plum rain season (May–June) suppresses temperatures below climatology via persistent stratiform cloud. The Taipei basin topography amplifies UHI in the city core — RCTP reads cooler than central Taipei during calm summer nights. HRRR does not cover Taiwan.',
+  },
+
+  'shanghai': {
+    uhi:       5.0,
+    coastal:   'ocean',    // East China Sea / Yangtze River delta
+    elevation: 13,         // ZSPD (Pudong Intl) — reclaimed land 19 miles east of city centre
+    notes: 'Pudong Intl is on reclaimed land 19 miles east of the Bund at the Yangtze delta — the city core runs 5–6°F warmer due to one of Asia\'s largest urban heat islands. Humid subtropical climate (Cfa). East Asian summer monsoon brings plum rains in June–July followed by an intense heat period in July–August. Typhoon season (May–November) with greatest impact July–September; ECMWF IFS outperforms GFS on western Pacific track prediction. Strong westerly flow from the interior drives summer heat episodes that exceed what the coastal position would suggest. HRRR does not cover China.',
+  },
+
+  'helsinki': {
+    uhi:       3.0,
+    coastal:   'bay',      // Gulf of Finland / Baltic Sea
+    elevation: 179,        // EFHK (Helsinki-Vantaa) — 12 miles north of city centre
+    notes: 'Vantaa airport is 12 miles north of central Helsinki. The highest-latitude city in this profile set — extreme seasonal daylight variation strongly influences temperature patterns. Gulf of Finland moderates coastal temperatures; winter sea ice temporarily reduces the maritime effect. ECMWF IFS has strong skill over Scandinavia. Cold season (November–March) cold waves from the Siberian anticyclone are well-forecast. Summer can bring surprising warmth during blocking high events that models underestimate due to Arctic amplification patterns.',
+  },
+
+  'ankara': {
+    uhi:       4.0,
+    coastal:   null,       // Landlocked Anatolian Plateau
+    elevation: 3127,       // LTAC (Esenboğa Intl) — 18 miles north of city centre
+    notes: 'Esenboğa airport sits at 3,127 ft on the Anatolian Plateau, 18 miles north of central Ankara. Semi-arid continental climate (BSk) with extreme seasonal contrast — hotter than Istanbul in summer, considerably colder in winter. GFS cold bias at elevation (documented at Denver 5,431 ft and Madrid 1,998 ft) applies here. Strong winter cold from the Siberian anticyclone is well-forecast. Summer heat is variable but elevated plateau amplifies diurnal swings. ECMWF IFS performs well over Anatolia. Do not conflate with Istanbul — these are structurally different climates despite being in the same country.',
+  },
+
+  'wellington': {
+    uhi:       2.0,
+    coastal:   'ocean',    // Cook Strait / Tasman Sea / Pacific
+    elevation: 41,         // NZWN (Wellington Intl) — south end of the city, near CBD
+    notes: 'Wellington airport is at the southern tip of the city on Cook Strait — one of the world\'s windiest straits, generating persistent strong winds (the "Windy Wellington" moniker is meteorologically accurate). Persistent wind suppresses temperature extremes making threshold trades structurally higher-risk than other maritime cities. Temperature extremes are rarely reached in either direction. ECMWF IFS outperforms GFS in the Southern Hemisphere. HRRR does not cover New Zealand. Seasonal calendar is reversed relative to Northern Hemisphere — January is midsummer.',
+  },
+
+  'jeddah': {
+    uhi:       3.5,
+    coastal:   'bay',      // Red Sea
+    elevation: 48,         // OEJN (King Abdulaziz Intl) — ~30 miles north of city centre
+    notes: 'King Abdulaziz Intl is ~30 miles north of central Jeddah. Hot desert climate (BWh) with year-round extreme heat — summer temperatures (104–113°F / 40–45°C) are among the most consistently predictable of any city in this profile set due to stable high-pressure dominance. Red Sea proximity adds persistent humidity that distinguishes Jeddah from interior Saudi cities (Riyadh, Mecca) — humid heat rather than purely dry. Haboob (dust storm) events from the Arabian interior occasionally suppress solar heating. GFS and IFS agree closely given synoptic stability. HRRR does not cover Saudi Arabia.',
+  },
+
+  'bangkok': {
+    uhi:       4.5,
+    coastal:   null,       // Gulf of Thailand ~30 miles south
+    elevation: 5,          // VTBS (Suvarnabhumi Intl) — 25 miles east of city centre
+    notes: 'Suvarnabhumi is 25 miles east of central Bangkok — city core runs 4–6°F warmer due to intense urban density and limited green space. Tropical wet/dry climate (Aw) with three seasons: hot dry (March–May), SW monsoon (May–October), cool dry (November–February). Persistent cloud cover during the SW monsoon caps temperature peaks — models frequently overestimate summer highs when active convection initiates earlier than forecast. Cool season (November–February) temperatures are the most predictable. ECMWF IFS performs better than GFS in tropical SE Asia. HRRR does not cover Thailand.',
+  },
+
+  'vienna': {
+    uhi:       3.5,
+    coastal:   null,
+    elevation: 600,        // LOWW (Vienna Intl / Schwechat) — 11 miles SE of city centre
+    notes: 'Vienna Intl (Schwechat) is 11 miles southeast of the Ringstrasse. Humid continental climate (Dfb) with Pannonian plain influence — drier and with greater temperature extremes than western European cities at comparable latitude. Danube valley provides a cold-air drainage corridor in winter that suppresses overnight lows below model predictions. ECMWF IFS and ICON (DWD) both perform very well over Austria. Föhn wind events from the Alps via the Wienerwald can rapidly warm the city in spring — onset timing is the primary model uncertainty, similar to Munich.',
+  },
+
+  'zurich': {
+    uhi:       3.0,
+    coastal:   null,
+    elevation: 1416,       // LSZH (Zurich Airport) — 8 miles NE of city centre
+    notes: 'Zurich airport sits at 1,416 ft on the Swiss Plateau, 8 miles northeast of the city. Alpine continental climate with significant orographic influence. ICON (co-developed with MeteoSchweiz) is the primary model reference for Switzerland and has a documented skill advantage here. IFS also strong. Föhn events from the Alps cause rapid warming of 10–15°F — onset timing is the primary model uncertainty. Winter high-pressure inversions trap cold foggy air on the plateau below 2,000–3,000 ft, suppressing daytime highs significantly below model predictions that do not resolve the inversion layer.',
+  },
+
+  'dubai': {
+    uhi:       4.0,
+    coastal:   'bay',      // Persian Gulf
+    elevation: 62,         // OMDB (Dubai Intl) — embedded in the urban core
+    notes: 'Dubai Intl is embedded within the urban area and captures significant UHI directly, reducing the city-to-airport offset. Hot desert climate (BWh) with summer temperatures among the world\'s most extreme for a major city (113–120°F / 45–49°C). Persian Gulf sea surface temperatures drive elevated humidity that makes Dubai significantly hotter in apparent terms than interior desert cities. Summer high-pressure dominance means model agreement is strong for synoptic-scale patterns. Shamal wind events (dry NW wind from Arabia) occasionally cause rapid temperature rises with dust; haboob-related cooling is underestimated by models. HRRR does not cover UAE.',
+  },
+
 };
 
 // ─── Public API ───────────────────────────────────────────────────────────────
