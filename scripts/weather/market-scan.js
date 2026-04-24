@@ -287,37 +287,94 @@ async function resolveOutcomes(trades) {
   for (const trade of trades) {
     if (trade.outcome !== null) continue;
 
-    const resDate = new Date(trade.parsed.date);
-    if (now < resDate.getTime() + 36 * 3_600_000) continue;
+    const targetMs     = new Date(trade.parsed.date).getTime();
+    const polyEligible = now >= targetMs + 12 * 3_600_000;  // 12h: trading day has ended
+    const obsEligible  = now >= targetMs + 36 * 3_600_000;  // 36h: GHCN data latency window
+
+    if (!polyEligible) continue;
 
     try {
-      const coords  = trade.parsed.coords || {};
+      const coords   = trade.parsed.coords || {};
       const wantHigh = trade.parsed.direction !== 'below';
 
-      // Fetch in priority order: GHCN (Polymarket's source) → NWS METAR → ERA5
+      // Path A: observed temperature — GHCN (Polymarket's source) → NWS METAR → ERA5
+      // Only attempted after 36h to respect GHCN posting latency.
       let value = null, observedSource = null;
 
-      if (coords.ghcnStation) {
-        const ghcn = await fetchGHCNObserved(coords.ghcnStation, trade.parsed.date).catch(() => null);
-        if (ghcn) {
-          const v = wantHigh ? ghcn.tmax : ghcn.tmin;
-          if (v != null) { value = v; observedSource = ghcn.source; }
+      if (obsEligible) {
+        if (coords.ghcnStation) {
+          const ghcn = await fetchGHCNObserved(coords.ghcnStation, trade.parsed.date).catch(() => null);
+          if (ghcn) {
+            const v = wantHigh ? ghcn.tmax : ghcn.tmin;
+            if (v != null) { value = v; observedSource = ghcn.source; }
+          }
+        }
+        if (value == null && coords.nwsStation) {
+          const nws = await fetchNWSObserved(coords.nwsStation, trade.parsed.date, coords.tz).catch(() => null);
+          if (nws) {
+            const v = wantHigh ? nws.high : nws.low;
+            if (v != null) { value = v; observedSource = nws.source; }
+          }
+        }
+        if (value == null && coords.lat != null) {
+          const era5 = await getObserved(coords.lat, coords.lon, trade.parsed.date, wantHigh ? 'above' : 'below').catch(() => null);
+          if (era5?.value != null) { value = era5.value; observedSource = 'Open-Meteo ERA5'; }
         }
       }
-      if (value == null && coords.nwsStation) {
-        const nws = await fetchNWSObserved(coords.nwsStation, trade.parsed.date, coords.tz).catch(() => null);
-        if (nws) {
-          const v = wantHigh ? nws.high : nws.low;
-          if (v != null) { value = v; observedSource = nws.source; }
+
+      // Path B: Polymarket settlement price — fallback when observation data unavailable.
+      // Resolves as soon as the oracle posts (typically 12–24h after the event).
+      if (value == null) {
+        if (trade.conditionId) {
+          const lp = await getMarketPrice(trade.conditionId).catch(() => null);
+          if (lp && (lp.yes > 0.99 || lp.yes < 0.01)) {
+            const hit       = lp.yes > 0.99;
+            const signalWon = (trade.side === 'yes' && hit) || (trade.side === 'no' && !hit);
+
+            trade.outcome        = hit ? 'yes-resolved' : 'no-resolved';
+            trade.observedTemp   = null;
+            trade.observedSource = 'polymarket-settlement';
+            trade.signalResult   = signalWon ? 'win' : 'loss';
+            trade.closedAt       = new Date().toISOString();
+
+            if (trade.betDollars > 0) {
+              const price = trade.side === 'yes' ? trade.yesPrice : trade.noPrice;
+              trade.pnlDollars = signalWon
+                ? Math.round(trade.betDollars * (1 - price) / price * 100) / 100
+                : -trade.betDollars;
+            }
+
+            changed = true;
+            log(`[resolve] ${trade.id}: Polymarket-settled ${hit ? 'YES' : 'NO'} — ${signalWon ? 'WIN' : 'LOSS'}`);
+
+            if (BACKTEST_HOOK) {
+              const icon = signalWon ? '✅' : '❌';
+              const body = [
+                `${icon} **WEATHER SIGNAL RESOLVED — ${signalWon ? 'WIN' : 'LOSS'}**`,
+                `${trade.question}`,
+                `Signal: ${trade.side.toUpperCase()} at ${pct(trade.side === 'yes' ? trade.yesPrice : trade.noPrice)}`,
+                `Settled: Polymarket oracle → **${hit ? 'YES' : 'NO'}**`,
+                trade.betDollars > 0
+                  ? `P&L: **${trade.pnlDollars >= 0 ? '+' : ''}${usd(trade.pnlDollars)}** (bet ${usd(trade.betDollars)})`
+                  : '',
+                `\`ID: ${trade.id}\``,
+              ].filter(Boolean).join('\n');
+              await postWebhook(BACKTEST_HOOK, signalWon ? 'long' : 'error', body, 'Weather • Outcome');
+            }
+            continue;
+          } else if (lp) {
+            log(`[resolve] ${trade.id}: market not settled yet (YES=${lp.yes.toFixed(3)}) — waiting`);
+          } else {
+            log(`[resolve] ${trade.id}: Polymarket price fetch failed — will retry next cycle`);
+          }
         }
-      }
-      if (value == null && coords.lat != null) {
-        const era5 = await getObserved(coords.lat, coords.lon, trade.parsed.date, wantHigh ? 'above' : 'below').catch(() => null);
-        if (era5?.value != null) { value = era5.value; observedSource = 'Open-Meteo ERA5'; }
+
+        const hoursAgo = ((now - targetMs) / 3_600_000).toFixed(1);
+        log(`[resolve] ${trade.id}: no data yet (${hoursAgo}h past date) — GHCN/NWS/ERA5 unavailable`);
+        continue;
       }
 
-      if (value == null) continue;
-
+      // Resolve via observed temperature (Path A)
       let hit;
       if (trade.parsed.direction === 'above') {
         hit = value >= trade.parsed.thresholdF;
@@ -347,7 +404,7 @@ async function resolveOutcomes(trades) {
 
       changed = true;
       const bucketLbl = thresholdLabel(trade.parsed);
-      log(`Resolved ${trade.id}: ${trade.parsed.city} ${trade.parsed.date} ${bucketLbl} — observed ${value.toFixed(1)}°F → ${signalWon ? 'WIN' : 'LOSS'}`);
+      log(`[resolve] ${trade.id}: ${trade.parsed.city} ${trade.parsed.date} ${bucketLbl} — observed ${value.toFixed(1)}°F → ${signalWon ? 'WIN' : 'LOSS'}`);
 
       if (BACKTEST_HOOK) {
         const icon = signalWon ? '✅' : '❌';
@@ -365,7 +422,7 @@ async function resolveOutcomes(trades) {
         await postWebhook(BACKTEST_HOOK, signalWon ? 'long' : 'error', body, 'Weather • Outcome');
       }
     } catch (err) {
-      log(`Error resolving ${trade.id}: ${err.message}`);
+      log(`[resolve] Error on ${trade.id}: ${err.message}`);
     }
   }
 

@@ -42,13 +42,14 @@ async function handle(message, api) {
   const user = message.author?.username || 'unknown';
   const args = text.split(/\s+/).slice(1);
 
-  if (/^!scan\b/i.test(text))    { await handleScan(user, api);              return true; }
-  if (/^!analyze\b/i.test(text)) { await handleAnalyze(user, text, api);     return true; }
-  if (/^!report\b/i.test(text))  { await handleReport(user, api);            return true; }
-  if (/^!trades\b/i.test(text))  { await handleTrades(user, api);            return true; }
-  if (/^!settle\b/i.test(text))  { await handleSettle(user, text, api);      return true; }
-  if (/^!took\b/i.test(text))    { await handleTook(user, args[0], api);     return true; }
-  if (/^!exit\b/i.test(text))    { await handleExit(user, args, api);        return true; }
+  if (/^!scan\b/i.test(text))            { await handleScan(user, api);              return true; }
+  if (/^!analyze\b/i.test(text))         { await handleAnalyze(user, text, api);     return true; }
+  if (/^!report\b/i.test(text))          { await handleReport(user, api);            return true; }
+  if (/^!trades\b/i.test(text))          { await handleTrades(user, api);            return true; }
+  if (/^!settle\b/i.test(text))          { await handleSettle(user, text, api);      return true; }
+  if (/^!resolve-status\b/i.test(text))  { await handleResolveStatus(user, api);     return true; }
+  if (/^!took\b/i.test(text))            { await handleTook(user, args[0], api);     return true; }
+  if (/^!exit\b/i.test(text))            { await handleExit(user, args, api);        return true; }
 
   return false;
 }
@@ -344,6 +345,52 @@ async function handleExit(user, args, api) {
   if (BACKTEST_HOOK) {
     await postWebhook(BACKTEST_HOOK, signalWon ? 'long' : 'error', msg, 'Weather • Paper Trade');
   }
+}
+
+// ─── !resolve-status ─────────────────────────────────────────────────────────
+
+async function handleResolveStatus(user, api) {
+  await api.sendTyping();
+
+  const trades = readTrades();
+  const now    = Date.now();
+
+  const open        = trades.filter(t => t.outcome === null || t.outcome === undefined);
+  const superseded  = trades.filter(t => t.outcome === 'superseded');
+  const resolved    = trades.filter(t => t.signalResult === 'win' || t.signalResult === 'loss');
+  const wins        = resolved.filter(t => t.signalResult === 'win');
+
+  // Classify open trades by resolution eligibility
+  const pending = open.map(t => {
+    const targetMs = new Date(t.parsed?.date || 0).getTime();
+    const hoursAgo = (now - targetMs) / 3_600_000;
+    return { trade: t, hoursAgo };
+  }).sort((a, b) => b.hoursAgo - a.hoursAgo);  // oldest first
+
+  const polyEligible = pending.filter(p => p.hoursAgo >= 12);
+  const obsEligible  = pending.filter(p => p.hoursAgo >= 36);
+  const tooEarly     = pending.filter(p => p.hoursAgo < 12);
+
+  const lines = [
+    `📊 **RESOLUTION STATUS**`,
+    `Open (unresolved): **${open.length}**`,
+    `  • ${obsEligible.length} eligible for GHCN check (36h+ past date)`,
+    `  • ${polyEligible.length - obsEligible.length} eligible for Polymarket check only (12–36h past date)`,
+    `  • ${tooEarly.length} too early (< 12h past date)`,
+    `Superseded: ${superseded.length} | Resolved: ${wins.length}W / ${resolved.length - wins.length}L`,
+  ];
+
+  if (polyEligible.length > 0) {
+    lines.push('', '**Pending (oldest first):**');
+    for (const { trade: t, hoursAgo } of polyEligible.slice(0, 8)) {
+      const hasCondId = t.conditionId ? '✓' : '✗';
+      const age       = hoursAgo >= 36 ? `${hoursAgo.toFixed(0)}h ⚠️` : `${hoursAgo.toFixed(1)}h`;
+      lines.push(`\`${t.id}\` | ${t.parsed?.city || '?'} ${t.parsed?.type || 'high'} | ${t.parsed?.date || '?'} | ${age} | condId ${hasCondId}`);
+    }
+    if (polyEligible.length > 8) lines.push(`  ...and ${polyEligible.length - 8} more`);
+  }
+
+  await api.sendMessage(lines.join('\n').slice(0, 1950));
 }
 
 module.exports = { handle };
