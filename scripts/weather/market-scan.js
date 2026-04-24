@@ -27,6 +27,7 @@ const crypto = require('crypto');
 const { loadEnv, ROOT, resolveWebhook } = require('../lib/env');
 const { postWebhook }                   = require('../lib/discord');
 const { getObserved, fetchGHCNObserved, fetchNWSObserved, getTemperatureForecast, normalCDF, thresholdProbability, leadTimeSigma } = require('../lib/forecasts');
+const { analyzeSignal } = require('../lib/weather-analysis');
 const {
   fetchWeatherMarkets,
   getMarketPrice,
@@ -159,8 +160,9 @@ function thresholdLabel(parsed, marketUnit = 'F') {
 
 /**
  * Build the Discord embed body for a weather signal.
+ * @param {object} [aiAnalysis]  Optional AI assessment from analyzeSignal()
  */
-function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id) {
+function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiAnalysis = null) {
   const { parsed }   = market;
   const marketUnit   = parsed.coords?.unit || 'F'; // 'F' for US, 'C' for international
   const cityLabel    = parsed.city.replace(/\b\w/g, c => c.toUpperCase());
@@ -216,6 +218,30 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id) {
     '**📐 KELLY SIZING**',
     `Kelly: ${kelly.kelly}% → Fractional (${Math.round(KELLY_FRAC * 100)}%): **${usd(kelly.dollars)}** (bankroll ${usd(BANKROLL)})`,
     `Cap: ${usd(MAX_BET)} max per trade`,
+    '',
+  );
+
+  // AI analysis section (only when present and not a plain take with no reasoning)
+  if (aiAnalysis && (aiAnalysis.reasoning || aiAnalysis.flags?.length || aiAnalysis.decision !== 'take' || aiAnalysis.confidence != null)) {
+    const decisionIcon = aiAnalysis.decision === 'take'   ? '✅'
+                       : aiAnalysis.decision === 'reduce' ? '⚠️'
+                       : '🚫';
+    const decisionStr = aiAnalysis.decision === 'take'   ? `TAKE (${aiAnalysis.sizeMultiplier}× Kelly)`
+                      : aiAnalysis.decision === 'reduce' ? `REDUCE → ${aiAnalysis.sizeMultiplier}× Kelly`
+                      : 'SKIP';
+    const confStr = aiAnalysis.confidence != null ? ` | Confidence: ${(aiAnalysis.confidence * 100).toFixed(0)}%` : '';
+    const flagStr = aiAnalysis.flags?.length ? `\n🏷️ ${aiAnalysis.flags.join(' · ')}` : '';
+
+    lines.push(
+      '',
+      `**🤖 AI ANALYSIS**`,
+      `${decisionIcon} ${decisionStr}${confStr}`,
+      aiAnalysis.reasoning ? `*"${aiAnalysis.reasoning}"*` : '',
+      flagStr,
+    );
+  }
+
+  lines.push(
     '',
     `⏱️ Resolves: **${parsed.date}**`,
     `📊 Volume: ${usd(market.volume)} | Liquidity: ${usd(market.liquidity)}`,
@@ -469,9 +495,58 @@ async function main() {
       bestMarket.noPrice  = livePrice.no;
     }
 
-    const kelly = kellySizing(bestModelProb, bestMarket.yesPrice, bestSide, BANKROLL, KELLY_FRAC, MAX_BET);
+    // ── AI signal quality analysis ────────────────────────────────────────
+    const daysToResolution = (new Date(mp.date) - now) / 86_400_000;
+    const marketPrice      = bestSide === 'yes' ? bestMarket.yesPrice : bestMarket.noPrice;
+    const aiAnalysis = await analyzeSignal({
+      question:             bestMarket.question,
+      direction:            mp.direction,
+      bucketLabel:          thresholdLabel(mp),
+      side:                 bestSide,
+      edge:                 bestEdge,
+      marketPrice,
+      modelProb:            bestModelProb,
+      meanF:                forecast.meanF,
+      sigmaF:               forecast.sigmaF,
+      ensembleSpread:       forecast.ensemble?.spread   ?? null,
+      memberCount:          forecast.ensemble?.memberCount ?? null,
+      membersOnSide:        forecast.ensemble
+        ? Math.round((bestSide === 'yes'
+            ? bestModelProb
+            : 1 - bestModelProb) * (forecast.ensemble.memberCount || 0))
+        : null,
+      daysToResolution,
+      historicalMean:       forecast.historical?.historicalMean ?? null,
+      thresholdPercentile:  forecast.historical?.thresholdPercentile ?? null,
+      sources:              forecast.sources,
+    });
+
+    log(`  AI: decision=${aiAnalysis.decision} confidence=${aiAnalysis.confidence != null ? (aiAnalysis.confidence * 100).toFixed(0) + '%' : 'N/A'} size=${aiAnalysis.sizeMultiplier}× | ${aiAnalysis.reasoning || 'no reasoning'}`);
+
+    // If AI says skip, log to backtest but don't post a signal card
+    if (aiAnalysis.decision === 'skip') {
+      log(`  AI suppressed signal for ${groupKey}`);
+      if (BACKTEST_HOOK) {
+        const skipLog = [
+          `🚫 **SIGNAL SUPPRESSED BY AI** | ${bestSide.toUpperCase()} | Edge ${(bestEdge * 100).toFixed(1)}%`,
+          `${bestMarket.question}`,
+          `Reason: ${aiAnalysis.reasoning || 'AI quality filter'}`,
+          aiAnalysis.flags.length ? `Flags: ${aiAnalysis.flags.join(' · ')}` : '',
+          `Model P: ${pct(bestModelProb)} | Market: ${pct(bestMarket.yesPrice)} YES`,
+        ].filter(Boolean).join('\n');
+        await postWebhook(BACKTEST_HOOK, 'info', skipLog, `Weather • AI Skip • ${mp.date}`);
+      }
+      signalsFired++;
+      continue;
+    }
+
+    // Apply size multiplier from AI assessment
+    const baseKelly      = kellySizing(bestModelProb, bestMarket.yesPrice, bestSide, BANKROLL, KELLY_FRAC, MAX_BET);
+    const adjustedDollars = Math.round(baseKelly.dollars * aiAnalysis.sizeMultiplier * 100) / 100;
+    const kelly           = { ...baseKelly, dollars: adjustedDollars };
+
     const id    = signalId();
-    const card  = buildSignalCard(bestMarket, forecast, kelly, bestSide, bestEdge, bestModelProb, id);
+    const card  = buildSignalCard(bestMarket, forecast, kelly, bestSide, bestEdge, bestModelProb, id, aiAnalysis);
     const footer = `Weather • ${mp.city} • ${mp.date} • ${new Date().toISOString().slice(0, 16)} UTC`;
 
     let msgId = null;
@@ -481,12 +556,13 @@ async function main() {
 
     if (BACKTEST_HOOK) {
       const shortLog = [
-        `📋 **SIGNAL LOGGED** | ${bestSide.toUpperCase()} | Edge ${(bestEdge * 100).toFixed(1)}%`,
+        `📋 **SIGNAL LOGGED** | ${bestSide.toUpperCase()} | Edge ${(bestEdge * 100).toFixed(1)}%${aiAnalysis.decision === 'reduce' ? ` | ⚠️ AI REDUCED to ${aiAnalysis.sizeMultiplier}×` : ''}`,
         `${bestMarket.question}`,
         `Model P: ${pct(bestModelProb)} | Market: ${pct(bestMarket.yesPrice)} YES`,
         `Suggested: ${usd(kelly.dollars)} on ${bestSide.toUpperCase()}`,
+        aiAnalysis.reasoning ? `AI: ${aiAnalysis.reasoning}` : '',
         `\`ID: ${id}\``,
-      ].join('\n');
+      ].filter(Boolean).join('\n');
       await postWebhook(BACKTEST_HOOK, 'info', shortLog, `Weather • ${mp.date}`);
     }
 
@@ -495,25 +571,30 @@ async function main() {
     const tradeRecord = {
       id,
       conditionId,
-      question:      bestMarket.question,
-      parsed:        mp,
-      eventSlug:     bestMarket.eventSlug || null,
-      side:          bestSide,
-      edge:          Math.round(bestEdge * 1000) / 10,
-      yesPrice:      bestMarket.yesPrice,
-      noPrice:       bestMarket.noPrice,
-      modelProb:     Math.round(bestModelProb * 1000) / 10,
-      meanF:         forecast.meanF != null ? Math.round(forecast.meanF * 10) / 10 : null,
-      sigmaF:        Math.round(forecast.sigmaF * 10) / 10,
-      betDollars:    kelly.dollars,
-      firedAt:       new Date().toISOString(),
-      discordMsgId:  msgId,
-      sources:       forecast.sources,
-      outcome:       null,
-      observedTemp:  null,
-      signalResult:  null,
-      pnlDollars:    null,
-      closedAt:      null,
+      question:        bestMarket.question,
+      parsed:          mp,
+      eventSlug:       bestMarket.eventSlug || null,
+      side:            bestSide,
+      edge:            Math.round(bestEdge * 1000) / 10,
+      yesPrice:        bestMarket.yesPrice,
+      noPrice:         bestMarket.noPrice,
+      modelProb:       Math.round(bestModelProb * 1000) / 10,
+      meanF:           forecast.meanF != null ? Math.round(forecast.meanF * 10) / 10 : null,
+      sigmaF:          Math.round(forecast.sigmaF * 10) / 10,
+      betDollars:      kelly.dollars,
+      aiDecision:      aiAnalysis.decision,
+      aiConfidence:    aiAnalysis.confidence,
+      aiSizeMultiplier: aiAnalysis.sizeMultiplier,
+      aiReasoning:     aiAnalysis.reasoning,
+      aiFlags:         aiAnalysis.flags,
+      firedAt:         new Date().toISOString(),
+      discordMsgId:    msgId,
+      sources:         forecast.sources,
+      outcome:         null,
+      observedTemp:    null,
+      signalResult:    null,
+      pnlDollars:      null,
+      closedAt:        null,
     };
 
     if (existingTrade) {
