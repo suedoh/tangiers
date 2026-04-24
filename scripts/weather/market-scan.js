@@ -475,17 +475,18 @@ async function main() {
     for (const market of groupMarkets) {
       const { conditionId, parsed: mp } = market;
 
-      // Cooldown: don't re-signal same market within 4 hours
+      // Cooldown: don't re-signal same market within 4 hours.
+      // Price-move re-evaluation only applies AFTER the cooldown has expired —
+      // it does not bypass the cooldown window.
       const lastSignal = state.cooldowns?.[conditionId] || 0;
-      if (now - lastSignal < COOLDOWN_MS) continue;
+      const cooledDown = (now - lastSignal) >= COOLDOWN_MS;
 
-      // Skip if we already have an open non-superseded trade for this market
-      // (unless price has moved >10pts)
       const existingTrade = trades.find(t => t.conditionId === conditionId && t.outcome === null);
-      if (existingTrade) {
+      if (existingTrade && !cooledDown) continue;
+      if (existingTrade && cooledDown) {
         const priceDiff = Math.abs(market.yesPrice - existingTrade.yesPrice);
         if (priceDiff < 0.10) continue;
-        log(`Market ${conditionId} price moved ${(priceDiff * 100).toFixed(1)}pts — re-evaluating`);
+        log(`Market ${conditionId} price moved ${(priceDiff * 100).toFixed(1)}pts after cooldown — re-evaluating`);
       }
 
       const modelProb = bucketModelProb(mp, forecast.meanF, forecast.sigmaF);
