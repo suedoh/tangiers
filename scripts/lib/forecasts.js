@@ -80,13 +80,18 @@ function thresholdProbability(forecastTemp, thresholdF, sigmaF, direction) {
 
 /**
  * Estimate forecast uncertainty (σ in °F) based on lead time.
- * Short-range: ~2°F, medium: ~3.5°F, long: ~5°F
+ * Hour-based for fine-grained near-term accuracy: 0.8°F same-day → 5.5°F at 10d+.
+ * Uses end-of-day UTC so same-day markets don't go negative.
  */
 function leadTimeSigma(targetDate) {
-  const daysOut = Math.max(0, (new Date(targetDate) - Date.now()) / 86_400_000);
-  if (daysOut <= 1)  return 2.0;
-  if (daysOut <= 3)  return 3.0;
-  if (daysOut <= 7)  return 4.0;
+  const endOfDay = new Date(targetDate + 'T23:59:59Z');
+  const hoursOut = Math.max(0, (endOfDay - Date.now()) / 3_600_000);
+  if (hoursOut <=   6) return 0.8;
+  if (hoursOut <=  12) return 1.2;
+  if (hoursOut <=  24) return 2.0;
+  if (hoursOut <=  48) return 2.8;
+  if (hoursOut <=  72) return 3.5;
+  if (hoursOut <= 168) return 4.5;
   return 5.5;
 }
 
@@ -706,15 +711,26 @@ async function getTemperatureForecast(lat, lon, targetDate, opts = {}) {
     }
   }
 
-  // Sigma priority:
-  //   1. Ensemble spread (31-member GFS — direct sample σ)
-  //   2. GHCN historical σ (12-season station obs — best when ensemble unavailable)
-  //   3. Lead-time heuristic (fallback)
+  // Sigma: Bayesian combination when ensemble spread and GHCN historical σ are both
+  // available and the two means agree (within 1 σ). Treats each as an independent
+  // precision source: 1/σ² + 1/σ² → tighter posterior when sources converge.
+  // When means diverge (outlier forecast), falls back to the wider σ to stay conservative.
+  const sigEns  = ensemble?.spread  != null && ensemble.spread  > 0.5 ? ensemble.spread  : null;
+  const sigHist = historical?.sigma != null && historical.sigma > 0.5 ? historical.sigma : null;
+
   let sigmaF;
-  if (ensemble?.spread != null && ensemble.spread > 0.5) {
-    sigmaF = ensemble.spread;
-  } else if (historical?.sigma != null && historical.sigma > 0.5) {
-    sigmaF = historical.sigma;
+  if (sigEns != null && sigHist != null) {
+    const meanDiff    = meanF != null && historical.mean != null ? Math.abs(meanF - historical.mean) : Infinity;
+    const sourcesAgree = meanDiff < Math.max(sigEns, sigHist);
+    if (sourcesAgree) {
+      sigmaF = 1 / Math.sqrt(1 / sigEns ** 2 + 1 / sigHist ** 2);
+    } else {
+      sigmaF = Math.max(sigEns, sigHist); // outlier forecast — don't narrow
+    }
+  } else if (sigEns  != null) {
+    sigmaF = sigEns;
+  } else if (sigHist != null) {
+    sigmaF = sigHist;
   } else {
     sigmaF = leadTimeSigma(targetDate);
   }
