@@ -177,6 +177,15 @@ async function analyzeSignal(signal) {
       res.on('end', () => {
         try {
           const resp = JSON.parse(data);
+
+          // Handle API-level errors (auth failure, quota, overload, etc.)
+          if (resp.type === 'error') {
+            const msg = resp.error?.message || resp.error?.type || 'unknown API error';
+            console.error('[weather-analysis] API error response:', msg);
+            resolve({ ...fallback, reasoning: `API error (${resp.error?.type || 'unknown'}) — defaulting to take.` });
+            return;
+          }
+
           const text = resp.content?.[0]?.text?.trim() || '';
 
           // Haiku sometimes wraps output in ```json ... ``` despite being told not to.
@@ -188,6 +197,12 @@ async function analyzeSignal(signal) {
           if (!jsonStr.startsWith('{')) {
             const match = jsonStr.match(/\{[\s\S]*\}/);
             jsonStr = match ? match[0] : jsonStr;
+          }
+
+          if (!jsonStr) {
+            console.error('[weather-analysis] Empty response from API');
+            resolve({ ...fallback, reasoning: 'Empty API response — defaulting to take.' });
+            return;
           }
 
           const result = JSON.parse(jsonStr);
