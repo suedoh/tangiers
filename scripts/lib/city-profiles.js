@@ -175,6 +175,99 @@ const CITY_PROFILES = {
     notes: 'Benito Juárez Intl sits at 7,316 ft on the Valley of Mexico — this dramatically compresses both absolute temperature levels and daily variability vs sea-level norms. Subtropical highland climate: rainy season (May–October) brings afternoon convective showers that cap highs via cloud shading; dry season (November–April) sees cold overnight lows from radiative cooling at altitude. GFS cold bias at elevation (documented at Denver at 5,431 ft) is amplified here — expect GFS to underestimate minimum temperatures more than at any other city in this profile set. ECMWF IFS handles the complex Mexican Plateau topography better than GFS. HRRR does not cover Mexico.',
   },
 
+  // ─── International cities (Batch 2) ──────────────────────────────────────────
+
+  'beijing': {
+    uhi:       6.0,
+    coastal:   null,       // Bohai Sea ~80 miles east — negligible maritime influence
+    elevation: 116,        // ZBAA (Capital Intl) — NE suburb, 17 miles from city centre
+    notes: 'Capital Intl is 17 miles northeast of Tiananmen Square — one of the strongest urban heat islands in Asia, with the city core running 5–7°F warmer. Extreme continental seasonal swings: harsh Siberian cold waves in winter, hot humid summers driven by the East Asian monsoon (July–August). Spring dust storms from the Gobi Desert cause rapid temperature drops and reduce solar heating. East Asian monsoon onset is the primary source of summer model uncertainty. ECMWF IFS has good skill over East Asia; GFS degrades more steeply beyond day 5. HRRR does not cover China.',
+  },
+
+  'hong kong': {
+    uhi:       4.5,
+    coastal:   'ocean',    // South China Sea / Pearl River Estuary
+    elevation: 28,         // VHHH (Hong Kong Intl) — Lantau Island, west of main urban area
+    notes: 'Hong Kong Intl is on Lantau Island — the dense urban core of Kowloon and Hong Kong Island runs 4–6°F warmer due to intense urban mass. Typhoon season (May–November, peak August–September) causes the sharpest model divergence of any city in this set; typhoon track errors of 50–100 miles produce completely different temperature outcomes. ECMWF IFS outperforms GFS on western Pacific typhoon track prediction. South China Sea moisture drives very high summer humidity that suppresses temperature extremes relative to apparent heat index. HRRR does not cover Hong Kong.',
+  },
+
+  'sydney': {
+    uhi:       3.0,
+    coastal:   'bay',      // Botany Bay / Tasman Sea
+    elevation: 21,         // YSSY (Kingsford Smith) — inner south suburbs, Botany Bay
+    notes: 'Kingsford Smith sits on Botany Bay in the inner south — comparable ocean exposure to KBOS/Logan. Temperate oceanic climate (Cfb) moderated by the Tasman Sea. Hot westerly air masses from the interior drive extreme summer heat events (Foehn-type continental flow); all models underestimate peak temperatures during these "inland heat surge" events. East Coast Lows (ECLs) cause rapid temperature drops and model divergence at 2–4 day range — analogous to Nor\'easters for Boston. ECMWF IFS outperforms GFS in the Southern Hemisphere. HRRR does not cover Australia.',
+  },
+
+  'amsterdam': {
+    uhi:       2.5,
+    coastal:   'ocean',    // North Sea — 15 miles west
+    elevation: -11,        // EHAM (Schiphol) — below sea level, in a drained lake basin
+    notes: 'Schiphol is one of the few major airports in the world with a negative elevation (-11 ft) — sitting in a drained lake basin (Haarlemmermeer) with exceptional North Sea exposure. North Sea maritime influence is strong and suppresses temperature extremes significantly; the coast is only 15 miles west. ECMWF IFS (Reading HQ ~200 miles south) has exceptional skill over the Netherlands. Summer heat waves require a blocking anticyclone to overcome maritime cooling — models underestimate peak heat during prolonged blocks. Cold north-sea air intrusions in spring cause rapid cooling that GFS handles less reliably than IFS.',
+  },
+
+  'munich': {
+    uhi:       3.5,
+    coastal:   null,
+    elevation: 1738,       // EDDM (Munich Intl) — NE of city, Bavarian Plain
+    notes: 'Munich Intl sits at 1,738 ft on the Bavarian Plain northeast of the city. Continental climate with Alpine influence from the south. Föhn wind events (warm, dry downslope air from the Alps) cause rapid temperature rises of 10–15°F and are consistently underestimated by models in both timing and magnitude — the most reliable source of forecast error here. ICON, developed by the German Weather Service (DWD), has a well-documented skill advantage over GFS in Bavaria and the Alpine forelands; use ICON as the primary reference. IFS also performs well. Winter inversions trap cold air in the Munich basin, suppressing daytime highs below model predictions.',
+  },
+
+  'milan': {
+    uhi:       4.0,
+    coastal:   null,
+    elevation: 768,        // LIMC (Malpensa) — 25 miles NW of city centre, Po Valley
+    notes: 'Malpensa is 25 miles northwest of central Milan on the Po Plain. The Po Valley is enclosed by the Alps to the north and Apennines to the south, creating a basin that traps heat in summer and cold air in winter. Dense autumn/winter fog (nebbia) is a regional signature — cloud cover suppresses daytime highs below model predictions on foggy days. Alpine föhn from the north causes rapid warming events that models underestimate. ECMWF IFS and ICON both have strong skill over northern Italy. Summer heat waves in the Po Valley can be extreme; the enclosed basin amplifies urban heat.',
+  },
+
+  'warsaw': {
+    uhi:       3.5,
+    coastal:   null,       // Baltic Sea ~350 miles north
+    elevation: 360,        // EPWA (Chopin Intl) — southern suburbs, 6 miles from city centre
+    notes: 'Chopin Intl is just 6 miles south of central Warsaw — one of the closer airport-to-city offsets in this profile set, reducing station bias. Humid continental climate (Dfb) with strong seasonal contrast: very cold Siberian winters and warm summers. Cold wave onset from Siberian High is well-forecast by all models at 3–4 day range. Summer heat waves driven by central European blocking are increasingly common and moderately well-forecast by IFS. ECMWF IFS has strong skill over Central Europe. ICON is the secondary reference. GFS skill drops notably for Central European blocking patterns.',
+  },
+
+  'moscow': {
+    uhi:       5.0,
+    coastal:   null,       // Over 1,000 miles from any coast
+    elevation: 623,        // UUEE (Sheremetyevo) — 18 miles N of city centre
+    notes: 'Sheremetyevo is 18 miles north of the Kremlin — Moscow\'s urban heat island is one of Europe\'s strongest, with the city core running 5–7°F warmer. Humid continental climate with the most severe winter cold of any city in this profile set; Siberian anticyclone outbreaks can push temperatures to -22°F / -30°C. Cold wave onset and depth are both well-forecast at 3–5 day range. Summer blocking events cause extreme heat (2010 set an all-time record) — omega-block patterns are the primary model uncertainty, with all models tending to underestimate peak heat duration. ECMWF IFS has strong skill over Russia. HRRR does not cover Russia.',
+  },
+
+  'buenos aires': {
+    uhi:       4.0,
+    coastal:   'bay',      // Río de la Plata estuary
+    elevation: 66,         // SAEZ (Ezeiza Intl) — 22 miles SW of city centre
+    notes: 'Ezeiza Intl is 22 miles southwest of Buenos Aires city centre. Humid subtropical climate (Cfa) moderated by the Río de la Plata estuary. Pampero wind events — cold, dry southerly surges from Patagonia — cause rapid temperature drops of 15–25°F and are the primary source of forecast error: models underestimate both speed and magnitude of temperature fall. Sudestada (southeast wind with rain and cooling) is the second-most important local wind pattern. ECMWF IFS outperforms GFS in the Southern Hemisphere. HRRR does not cover Argentina. GFS skill drops more sharply beyond day 5 over South America.',
+  },
+
+  'lagos': {
+    uhi:       3.5,
+    coastal:   'ocean',    // Bight of Benin / Gulf of Guinea
+    elevation: 135,        // DNMM (Murtala Muhammed Intl) — 14 miles NE of Lagos Island
+    notes: 'Murtala Muhammed Intl is 14 miles northeast of Lagos Island. Tropical wet/dry climate with two distinct seasons: wet season (April–October) with persistent cloud cover that suppresses temperature variability, and dry season (November–March) dominated by the Harmattan — a dry, dusty NE wind from the Sahara that reduces humidity and increases diurnal temperature range. Temperature thresholds are structurally more reachable during the dry season than the wet. Model skill over tropical West Africa is substantially lower than over Europe or North America; all model outputs carry higher inherent uncertainty here. HRRR does not cover Africa.',
+  },
+
+  'cape town': {
+    uhi:       2.5,
+    coastal:   'ocean',    // Atlantic Ocean / False Bay
+    elevation: 151,        // FACT (Cape Town Intl) — 14 miles SE of city centre
+    notes: 'Cape Town Intl sits 14 miles southeast of the city bowl, between the Atlantic and False Bay. Mediterranean climate (Csa) with hot dry summers and mild wet winters — opposite seasonal pattern to Northern Hemisphere cities at similar latitudes. The Cape Doctor (persistent SE wind, September–March) suppresses summer afternoon high temperatures significantly; models tend to underestimate cooling from this sea breeze. The Benguela Current (cold Atlantic upwelling) keeps sea surface temperatures below 60°F year-round and moderates coastal temperatures. ECMWF IFS outperforms GFS in the Southern Hemisphere. HRRR does not cover South Africa.',
+  },
+
+  'nairobi': {
+    uhi:       3.0,
+    coastal:   null,       // Indian Ocean ~330 miles east — negligible direct influence
+    elevation: 5327,       // HKJK (Jomo Kenyatta Intl) — SE suburb, 9 miles from city centre
+    notes: 'Jomo Kenyatta Intl sits at 5,327 ft on the Kenyan Highlands — this high elevation compresses both absolute temperatures and daily range. Tropical highland climate (Cwb) with two rainy seasons: long rains (March–May) and short rains (October–December). Year-round temperatures are remarkably stable (60–80°F typical range) making threshold trades at extremes structurally high-risk. GFS cold bias at elevation applies here — similar amplification to Mexico City. Model skill in equatorial East Africa is limited; ECMWF IFS is the most reliable reference but uncertainty is structurally higher than temperate-zone cities. HRRR does not cover Africa.',
+  },
+
+  'kuala lumpur': {
+    uhi:       3.5,
+    coastal:   null,       // Strait of Malacca ~25 miles west — some indirect influence
+    elevation: 69,         // WMKK (KLIA) — 45 miles south of city centre in Sepang
+    notes: 'KLIA is 45 miles south of Kuala Lumpur city centre in Sepang — the largest city-to-airport offset in this profile set. Equatorial climate (Af) with year-round high temperatures and very limited variability — similar caution to Singapore for threshold trades. Two monsoon seasons modulate rainfall but cause limited temperature swings: SW monsoon (May–September) and NE monsoon (November–March). Afternoon convection reliably caps highs during wet periods via cloud shading. ECMWF IFS and AIFS both perform better than GFS in equatorial SE Asia. Long-range forecasts (5+ days) have very low skill at temperature thresholds. HRRR does not cover Malaysia.',
+  },
+
 };
 
 // ─── Public API ───────────────────────────────────────────────────────────────
