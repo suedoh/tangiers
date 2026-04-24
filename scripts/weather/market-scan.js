@@ -545,6 +545,13 @@ async function main() {
     const adjustedDollars = Math.round(baseKelly.dollars * aiAnalysis.sizeMultiplier * 100) / 100;
     const kelly           = { ...baseKelly, dollars: adjustedDollars };
 
+    // Skip if Kelly is $0 after live price refresh — means the market moved against us
+    // between edge calculation and the CLOB price fetch (common in illiquid bucket markets).
+    if (kelly.dollars === 0) {
+      log(`${groupKey}: Kelly=$0 after price refresh (modelProb=${(bestModelProb*100).toFixed(1)}% vs yesPrice=${(bestMarket.yesPrice*100).toFixed(0)}¢) — skipping`);
+      continue;
+    }
+
     const id    = signalId();
     const card  = buildSignalCard(bestMarket, forecast, kelly, bestSide, bestEdge, bestModelProb, id, aiAnalysis);
     const footer = `Weather • ${mp.city} • ${mp.date} • ${new Date().toISOString().slice(0, 16)} UTC`;
