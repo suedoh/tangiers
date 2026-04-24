@@ -178,7 +178,13 @@ Resolve expired trades using official NOAA observations (GHCN-Daily station data
 → \`!settle --force\` — use a 6h buffer instead of 24h (NWS data is near real-time)
 → \`!settle --dry\` — preview what would resolve without writing anything
 → \`!settle --id wx-abc123\` — resolve one specific trade by ID
-Each resolved trade posts a result card to #weather-backtest showing the observed temperature, data source, and model bias (how far off the forecast was). \`--dry\` and \`--force\` can be combined: \`!settle --dry --force\`.`;
+Each resolved trade posts a result card to #weather-backtest showing the observed temperature, data source, and model bias (how far off the forecast was). \`--dry\` and \`--force\` can be combined: \`!settle --dry --force\`.
+
+\`!resolve-status\`
+Show the current resolution queue. Lists open/superseded/resolved counts broken down by eligibility tier, plus up to 8 pending trades with their age (hours past target date) and whether a Polymarket condition ID is available.
+→ Eligible for Polymarket check = 12h+ past target date (oracle price converged to ~0 or ~1)
+→ Eligible for GHCN check = 36h+ past target date (NOAA data typically posted within 36h)
+Useful for diagnosing why a trade hasn't resolved yet.`;
 
 const MSG_WORKFLOW = `## 📋 Paper Trading Workflow
 
