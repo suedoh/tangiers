@@ -55,6 +55,16 @@ const KELLY_FRAC    = parseFloat(process.env.WEATHER_KELLY_FRAC || '0.15');
 const MAX_BET       = parseFloat(process.env.WEATHER_MAX_BET    || '100');
 const COOLDOWN_MS   = 4 * 60 * 60 * 1000; // 4 hours between signals on same market
 
+// Cities excluded from signal generation.
+// Reasons are documented — do not remove entries without verifying the underlying issue is resolved.
+const BLOCKED_CITIES = new Set([
+  'istanbul',     // Settlement station ambiguity: LTBA (163 ft) vs LTFM (2,057 ft) — ~1,900 ft elevation difference; unknown which Polymarket uses
+  'singapore',    // Equatorial ~7°F mean daily range — threshold trades are structurally near-coinflips
+  'kuala lumpur', // Same equatorial tight-spread issue as Singapore + largest city-to-airport offset in the set (45 miles)
+  'nairobi',      // 5,327 ft altitude compresses range; extreme thresholds structurally high-risk; lowest model skill in tropical East Africa
+  'lagos',        // Lowest model skill in the entire city set; wet-season cloud suppression makes temperature outcomes structurally unpredictable
+]);
+
 const STATE_FILE  = path.join(ROOT, '.weather-state.json');
 const TRADES_FILE = path.join(ROOT, 'weather-trades.json');
 
@@ -500,6 +510,12 @@ async function main() {
 
     if (!coords) {
       log(`No coords for group ${groupKey} — skipping`);
+      continue;
+    }
+
+    // Skip cities with known structural issues (settlement ambiguity, tight distribution, low model skill)
+    if (BLOCKED_CITIES.has(parsed.city.toLowerCase())) {
+      log(`${groupKey}: city '${parsed.city}' is blocked — skipping`);
       continue;
     }
 
