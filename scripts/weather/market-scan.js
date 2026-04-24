@@ -27,7 +27,8 @@ const crypto = require('crypto');
 const { loadEnv, ROOT, resolveWebhook } = require('../lib/env');
 const { postWebhook }                   = require('../lib/discord');
 const { getObserved, fetchGHCNObserved, fetchNWSObserved, getTemperatureForecast, normalCDF, thresholdProbability, leadTimeSigma } = require('../lib/forecasts');
-const { analyzeSignal } = require('../lib/weather-analysis');
+const { analyzeSignal, deepAnalyzeSignal, fetchWUObservation } = require('../lib/weather-analysis');
+const { getCityProfile } = require('../lib/city-profiles');
 const { autoExit }      = require('./exit-monitor');
 const {
   fetchWeatherMarkets,
@@ -222,8 +223,8 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiA
     '',
   );
 
-  // AI analysis section (only when present and not a plain take with no reasoning)
-  if (aiAnalysis && (aiAnalysis.reasoning || aiAnalysis.flags?.length || aiAnalysis.decision !== 'take' || aiAnalysis.confidence != null)) {
+  // AI analysis section
+  if (aiAnalysis && (aiAnalysis.reasoning || aiAnalysis.flags?.length || aiAnalysis.decision !== 'take' || aiAnalysis.confidence != null || aiAnalysis.stage === 2)) {
     const decisionIcon = aiAnalysis.decision === 'take'   ? '✅'
                        : aiAnalysis.decision === 'reduce' ? '⚠️'
                        : '🚫';
@@ -231,15 +232,34 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiA
                       : aiAnalysis.decision === 'reduce' ? `REDUCE → ${aiAnalysis.sizeMultiplier}× Kelly`
                       : 'SKIP';
     const confStr = aiAnalysis.confidence != null ? ` | Confidence: ${(aiAnalysis.confidence * 100).toFixed(0)}%` : '';
-    const flagStr = aiAnalysis.flags?.length ? `\n🏷️ ${aiAnalysis.flags.join(' · ')}` : '';
+    const flagStr = aiAnalysis.flags?.length ? `🏷️ ${aiAnalysis.flags.join(' · ')}` : '';
 
-    lines.push(
-      '',
-      `**🤖 AI ANALYSIS**`,
-      `${decisionIcon} ${decisionStr}${confStr}`,
-      aiAnalysis.reasoning ? `*"${aiAnalysis.reasoning}"*` : '',
-      flagStr,
-    );
+    if (aiAnalysis.stage === 2 && aiAnalysis.steps) {
+      // ── Deep analysis (5-step) card section ───────────────────────────
+      lines.push(
+        '',
+        '**🔬 DEEP ANALYSIS (5-Step)**',
+        `${decisionIcon} ${decisionStr}${confStr}`,
+        aiAnalysis.summary ? `*"${aiAnalysis.summary}"*` : '',
+        '',
+        `**Step 1 — Models:**        ${aiAnalysis.steps.models       || '—'}`,
+        `**Step 2 — Synoptic:**      ${aiAnalysis.steps.synoptic     || '—'}`,
+        `**Step 3 — Microclimate:**  ${aiAnalysis.steps.microclimate || '—'}`,
+        `**Step 4 — Observations:**  ${aiAnalysis.steps.observations || '—'}`,
+        `**Step 5 — Pricing:**       ${aiAnalysis.steps.pricing      || '—'}`,
+        flagStr,
+        aiAnalysis.reasoning ? `*Stage 1 note: "${aiAnalysis.reasoning}"*` : '',
+      );
+    } else {
+      // ── Standard Stage 1 only card section ────────────────────────────
+      lines.push(
+        '',
+        '**🤖 AI ANALYSIS**',
+        `${decisionIcon} ${decisionStr}${confStr}`,
+        aiAnalysis.reasoning ? `*"${aiAnalysis.reasoning}"*` : '',
+        flagStr,
+      );
+    }
   }
 
   lines.push(
@@ -503,10 +523,10 @@ async function main() {
       bestMarket.noPrice  = livePrice.no;
     }
 
-    // ── AI signal quality analysis ────────────────────────────────────────
+    // ── Stage 1: Haiku pre-screen ─────────────────────────────────────────
     const daysToResolution = (new Date(mp.date) - now) / 86_400_000;
     const marketPrice      = bestSide === 'yes' ? bestMarket.yesPrice : bestMarket.noPrice;
-    const aiAnalysis = await analyzeSignal({
+    const stage1Signal = {
       question:             bestMarket.question,
       direction:            mp.direction,
       bucketLabel:          thresholdLabel(mp),
@@ -516,7 +536,7 @@ async function main() {
       modelProb:            bestModelProb,
       meanF:                forecast.meanF,
       sigmaF:               forecast.sigmaF,
-      ensembleSpread:       forecast.ensemble?.spread   ?? null,
+      ensembleSpread:       forecast.ensemble?.spread      ?? null,
       memberCount:          forecast.ensemble?.memberCount ?? null,
       membersOnSide:        forecast.ensemble
         ? Math.round((bestSide === 'yes'
@@ -524,12 +544,46 @@ async function main() {
             : 1 - bestModelProb) * (forecast.ensemble.memberCount || 0))
         : null,
       daysToResolution,
-      historicalMean:       forecast.historical?.historicalMean ?? null,
+      historicalMean:       forecast.historical?.historicalMean ?? null,  // note: legacy field name
       thresholdPercentile:  forecast.historical?.thresholdPercentile ?? null,
       sources:              forecast.sources,
-    });
+    };
 
-    log(`  AI: decision=${aiAnalysis.decision} confidence=${aiAnalysis.confidence != null ? (aiAnalysis.confidence * 100).toFixed(0) + '%' : 'N/A'} size=${aiAnalysis.sizeMultiplier}× | ${aiAnalysis.reasoning || 'no reasoning'}`);
+    const stage1Result = await analyzeSignal(stage1Signal);
+    log(`  Stage 1 (Haiku): decision=${stage1Result.decision} confidence=${stage1Result.confidence != null ? (stage1Result.confidence * 100).toFixed(0) + '%' : 'N/A'} size=${stage1Result.sizeMultiplier}× | ${stage1Result.reasoning || 'no reasoning'}`);
+
+    // ── Stage 2: Sonnet deep analysis (fires on take or reduce only) ──────
+    let aiAnalysis = stage1Result;
+
+    if (stage1Result.decision !== 'skip') {
+      const nwsObs = parsed.coords?.nwsStation
+        ? await fetchNWSObserved(parsed.coords.nwsStation, mp.date, parsed.coords.tz || 'America/New_York').catch(() => null)
+        : null;
+      const wuObs = parsed.coords?.lat != null
+        ? await fetchWUObservation(parsed.coords.lat, parsed.coords.lon).catch(() => null)
+        : null;
+      const cityProfile = getCityProfile(mp.city);
+
+      aiAnalysis = await deepAnalyzeSignal(
+        {
+          ...stage1Signal,
+          stageOneDecision:       stage1Result.decision,
+          stageOneSizeMultiplier: stage1Result.sizeMultiplier,
+        },
+        {
+          perModels:       forecast.models?.models  ?? {},
+          nwsObs,
+          wuObs,
+          cityProfile,
+          historicalSigma: forecast.historical?.sigma ?? null,
+        },
+        stage1Result,
+      );
+
+      const stageLabel = aiAnalysis.stage === 2 ? 'Sonnet' : 'Haiku (Stage 2 fallback)';
+      log(`  Stage 2 (${stageLabel}): decision=${aiAnalysis.decision} confidence=${aiAnalysis.confidence != null ? (aiAnalysis.confidence * 100).toFixed(0) + '%' : 'N/A'} size=${aiAnalysis.sizeMultiplier}×`);
+      if (aiAnalysis.summary) log(`    Summary: ${aiAnalysis.summary.slice(0, 120)}`);
+    }
 
     // If AI says skip, log to backtest but don't post a signal card
     if (aiAnalysis.decision === 'skip') {
@@ -597,11 +651,15 @@ async function main() {
       meanF:           forecast.meanF != null ? Math.round(forecast.meanF * 10) / 10 : null,
       sigmaF:          Math.round(forecast.sigmaF * 10) / 10,
       betDollars:      kelly.dollars,
-      aiDecision:      aiAnalysis.decision,
-      aiConfidence:    aiAnalysis.confidence,
+      aiDecision:       aiAnalysis.decision,
+      aiConfidence:     aiAnalysis.confidence,
       aiSizeMultiplier: aiAnalysis.sizeMultiplier,
-      aiReasoning:     aiAnalysis.reasoning,
-      aiFlags:         aiAnalysis.flags,
+      aiReasoning:      aiAnalysis.reasoning,
+      aiFlags:          aiAnalysis.flags,
+      aiStage:          aiAnalysis.stage         ?? 1,
+      aiSummary:        aiAnalysis.summary        ?? null,
+      aiSteps:          aiAnalysis.steps          ?? null,
+      aiDeepSkipped:    aiAnalysis.deepSkipped    ?? true,
       firedAt:         new Date().toISOString(),
       discordMsgId:    msgId,
       sources:         forecast.sources,
