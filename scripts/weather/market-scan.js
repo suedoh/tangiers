@@ -63,6 +63,7 @@ const BLOCKED_CITIES = new Set([
   'kuala lumpur', // Same equatorial tight-spread issue as Singapore + largest city-to-airport offset in the set (45 miles)
   'nairobi',      // 5,327 ft altitude compresses range; extreme thresholds structurally high-risk; lowest model skill in tropical East Africa
   'lagos',        // Lowest model skill in the entire city set; wet-season cloud suppression makes temperature outcomes structurally unpredictable
+  'wellington',   // Cook Strait persistent wind structurally suppresses temperature extremes — threshold trades near-coinflips, similar to Singapore
 ]);
 
 const STATE_FILE  = path.join(ROOT, '.weather-state.json');
