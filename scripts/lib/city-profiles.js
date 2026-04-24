@@ -103,6 +103,78 @@ const CITY_PROFILES = {
     notes: 'Marine west coast climate, similar to Seattle but with greater continental influence via the Columbia River Gorge. East wind events (cold, dry air from the high desert plateau east of the Cascades) can rapidly cool the city in winter and spring; onset and magnitude are frequently underestimated by models. Heat dome events are high-impact and remain poorly forecast beyond 5 days — same Pacific ridge issue as Seattle. KPDX sits near the Columbia River; downtown Portland is slightly warmer due to lower effective elevation.',
   },
 
+  // ─── International cities (Batch 1) ──────────────────────────────────────────
+
+  'london': {
+    uhi:       3.5,
+    coastal:   null,       // Thames estuary 30 miles east — indirect influence only
+    elevation: 83,         // EGLL (Heathrow) — 15 miles WSW of central London
+    notes: 'EGLL is Heathrow, 15 miles west of central London — central and east London run 3–5°F warmer in summer. ECMWF IFS (headquartered in Reading, UK) has exceptional skill on British Isles synoptic patterns and is the primary model to trust here. Persistent frontal systems from the North Atlantic cause model timing disagreement at 3–5 day range; IFS skill advantage over GFS is largest on this continent. Heat wave thresholds (>86°F / 30°C) are historically rare but have increased in frequency — models underestimate peak heat during omega-block events at 5–7 day range. Winter cold snaps from easterly continental air ("Beast from the East") cause sharp divergence between IFS and GFS at extended range.',
+  },
+
+  'tokyo': {
+    uhi:       5.5,
+    coastal:   'bay',      // Tokyo Bay / Pacific
+    elevation: 35,         // RJTT (Haneda) — reclaimed land on Tokyo Bay
+    notes: 'Haneda is on reclaimed land in Tokyo Bay — city centre and western wards run 5–7°F warmer due to one of the world\'s largest and best-documented urban heat islands. Typhoon season (June–November) causes sharp model divergence when systems approach; ECMWF IFS outperforms GFS on western Pacific typhoon track prediction. Tsuyu rainy season (mid-June to mid-July) depresses temperatures below climatology via persistent cloud cover. HRRR does not cover Japan — rely on AIFS/IFS ensemble consensus. Summer heat domes (subsidence from western Pacific subtropical high) increasingly drive extreme highs that exceed historical percentiles.',
+  },
+
+  'paris': {
+    uhi:       3.0,
+    coastal:   null,
+    elevation: 387,        // LFPG (Charles de Gaulle) — 16 miles NE of central Paris
+    notes: 'CDG is 16 miles northeast of central Paris in open agricultural land — city centre runs 3–5°F warmer in summer. ECMWF IFS and ICON both have exceptional skill over France; this is European model home turf. Summer heat waves can be extreme (2003, 2019 set all-time records) — models underestimate peak heat during omega-block anticyclone events at 5–7 day range. GFS performs adequately but IFS is the primary reference. Winter cold is relatively mild for the latitude; model agreement is strong in winter and autumn.',
+  },
+
+  'madrid': {
+    uhi:       4.0,
+    coastal:   null,
+    elevation: 1998,       // LEMD (Barajas) — on the high Castilian Meseta
+    notes: 'Barajas is on the high Castilian Meseta at ~2,000 ft — one of the highest major European airports. Continental semi-arid climate with extreme summer heat (95–105°F / 35–40°C routinely) and cold winters for the latitude. High-pressure blocking events in summer drive temperatures to extreme high thresholds; ECMWF IFS handles Iberian Peninsula blocking patterns well and is the primary reference. GFS underestimates intensity and duration of summer heat waves on the Meseta. Low humidity reduces cloud cover and makes high-temperature thresholds structurally more predictable in summer than coastal equivalents. GFS cold bias at elevation (documented at Denver) applies here too.',
+  },
+
+  'seoul': {
+    uhi:       4.0,
+    coastal:   'bay',      // Yellow Sea / Incheon Bay
+    elevation: 23,         // RKSI (Incheon Intl) — reclaimed land off Yellow Sea coast
+    notes: 'Incheon Intl is built on reclaimed land off the Yellow Sea coast — central Seoul runs 5–7°F warmer due to dense urban mass. East Asian summer monsoon (Changma, late June to late July) suppresses temperatures and limits extreme highs during the wet period. Winter cold waves driven by the Siberian high can be severe — models agree well on cold wave onset but underestimate absolute depths. Typhoon season (July–September) brings occasional direct hits; ECMWF IFS outperforms GFS on western Pacific track prediction. HRRR does not cover Korea.',
+  },
+
+  'singapore': {
+    uhi:       2.5,
+    coastal:   'ocean',    // South China Sea / Strait of Malacca
+    elevation: 22,         // WSSS (Changi Intl) — eastern coast of Singapore
+    notes: 'Equatorial maritime climate with structurally minimal temperature variability — mean daily range is only ~7°F. Threshold trades (very high or very low) carry very high risk due to the tight climatological distribution. ECMWF IFS and AIFS both perform well in the tropics; GFS has limited skill in equatorial convective environments. Inter-monsoon periods (April–May and October–November) bring the most convective variability and cloud shading that caps highs. Long-range forecasts (5+ days) have very low skill at temperature thresholds given the inherently tight spread.',
+  },
+
+  'istanbul': {
+    uhi:       4.0,
+    coastal:   'bay',      // Marmara Sea / Bosphorus
+    elevation: 163,        // LTBA (Atatürk) — European side, Marmara coast
+    notes: 'Settlement station is likely LTBA (Atatürk, European side, 163 ft) — this station remains active for METAR despite commercial closure. The new airport LTFM sits at 2,057 ft inland and would give dramatically different readings; verify which station Polymarket uses. Bosphorus moderates temperatures on both coasts; Asian side runs 2–3°F warmer in summer. Poyraz (northeasterly channelled through the Bosphorus) rapidly cools the European shore. ECMWF IFS performs well over the Eastern Mediterranean. GFS handles Black Sea blocking episodes less reliably.',
+  },
+
+  'toronto': {
+    uhi:       3.5,
+    coastal:   'lake',     // Lake Ontario
+    elevation: 569,        // CYYZ (Pearson Intl) — suburban Mississauga, 16 miles NW of downtown
+    notes: 'Pearson is in suburban Mississauga 16 miles northwest of downtown — similar offset to KORD/Chicago. Lake Ontario provides significant thermal inertia: suppresses summer highs near the lake by 4–8°F and delays winter cold-air penetration by several weeks. Lake-effect snow events from Lake Ontario cause sharp model divergence. ECMWF IFS handles Great Lakes mesoscale dynamics better than GFS. Canadian winter Arctic outbreaks are well-forecast by all models at 3–4 day range. ICON performs well in the Great Lakes corridor.',
+  },
+
+  'sao paulo': {
+    uhi:       4.5,
+    coastal:   null,       // 87 miles from Atlantic coast
+    elevation: 2459,       // SBGR (Guarulhos Intl) — suburban plateau NE of city
+    notes: 'Guarulhos is on the Paulista Plateau at 2,459 ft, 17 miles northeast of central São Paulo. Subtropical highland climate (Cwa) with distinct dry winters and wet summers. Brazil\'s summer monsoon (November–March) drives intense afternoon convection that suppresses peak temperatures via cloud cover and outflow cooling — models frequently overestimate summer highs when convective initiation occurs earlier than forecast. Dry season (May–September) is structurally more predictable; IFS and AIFS agree closely. HRRR does not cover Brazil. GFS skill drops more sharply beyond day 5 over South America than over North America.',
+  },
+
+  'mexico city': {
+    uhi:       3.0,
+    coastal:   null,
+    elevation: 7316,       // MMMX (Benito Juárez Intl) — one of the world's highest major airports
+    notes: 'Benito Juárez Intl sits at 7,316 ft on the Valley of Mexico — this dramatically compresses both absolute temperature levels and daily variability vs sea-level norms. Subtropical highland climate: rainy season (May–October) brings afternoon convective showers that cap highs via cloud shading; dry season (November–April) sees cold overnight lows from radiative cooling at altitude. GFS cold bias at elevation (documented at Denver at 5,431 ft) is amplified here — expect GFS to underestimate minimum temperatures more than at any other city in this profile set. ECMWF IFS handles the complex Mexican Plateau topography better than GFS. HRRR does not cover Mexico.',
+  },
+
 };
 
 // ─── Public API ───────────────────────────────────────────────────────────────
