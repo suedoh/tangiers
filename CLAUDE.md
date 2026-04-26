@@ -319,6 +319,39 @@ See `TODO.md` for full list. Key items:
 
 ---
 
+## MongoDB Migration — In Progress
+
+**Branch:** `feat/mongodb-docker` | **Plan file:** `~/.claude/plans/i-have-a-project-cozy-book.md`
+
+### What's done (Phase 0–1)
+- MongoDB 7.0 running in Docker (`docker-compose.yml`, `127.0.0.1:27017`, volume `mongo_data`)
+- `scripts/lib/db.js` — shared ES-module connection + collection accessors (loads `.env` automatically)
+- Migration scripts in `scripts/migrate/` — indexes created, 161 trades + all state imported
+- **Cron scripts still read/write JSON files** — no behavioral change yet
+
+### What's next (Phases 2–5, after weathermen merges to main)
+| Phase | Work |
+|---|---|
+| 2 | Switch native cron scripts to MongoDB: `trigger-check.js`, `bz/trigger-check.js`, `bz/analyze.js`, weekly reports |
+| 3 | Containerize Discord bot (`docker/discord-bot.Dockerfile`), remove from crontab |
+| 4 | Refactor `bz/news-watch.js` to write `triggers` collection instead of spawning `analyze.js`; containerize as Docker service, remove from pm2 |
+| 5 | Cleanup — remove JSON dual-writes, archive `.json` files, update Makefile |
+
+### Key constraints (don't forget these)
+- CDP scripts (`trigger-check.js`, `bz/trigger-check.js`, `bz/analyze.js`) **must stay native** — Docker for Mac can't reach TradingView Desktop on `localhost:9222`
+- Native cron scripts connect to MongoDB via `127.0.0.1:27017` (port-forwarded from Docker); Docker services connect via `mongodb:27017` (internal network)
+- **Weathermen** will be a new instrument + standalone feature — add its instrument to `scripts/migrate/import-trades.js` before merging so it's in MongoDB from day one
+- Partner machine (`PRIMARY=false`): no MongoDB, no Docker needed — `PRIMARY` guard exits before any DB calls
+
+### Docker quick-reference
+```bash
+docker compose up -d mongodb    # start (survives reboots via restart:unless-stopped)
+docker compose ps               # check health
+docker compose down             # stop (data persists in volume)
+```
+
+---
+
 ## Adding a New Instrument
 
 1. Create `scripts/{ticker}/trigger-check.js` and `scripts/{ticker}/analyze.js` (model on `scripts/bz/`)
