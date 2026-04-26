@@ -346,26 +346,135 @@ function formatReport(s) {
   ].filter(l => l !== undefined).join('\n');
 }
 
+// ─── Plain-English Summary ────────────────────────────────────────────────────
+
+function formatSummary(s) {
+  const { confirmedTrack: conf, unconfirmedTrack: unconf } = s;
+  const lines = [];
+
+  if (conf.count === 0) {
+    return [
+      `🔍 **WHAT THIS MEANS**`,
+      `No confirmed trades in this period — signals fired but none reached the 30M entry trigger. This is normal in choppy or range-bound conditions. If it persists beyond 2 weeks, check whether the confirmation threshold is too tight or whether the VRVP indicator is visible on the chart.`,
+    ].join('\n');
+  }
+
+  // Win rate
+  const wr = conf.winRate;
+  if      (wr >= 0.60) lines.push(`✅ **Win rate is strong at ${Math.round(wr*100)}%.** The strategy is identifying high-probability levels well this period.`);
+  else if (wr >= 0.50) lines.push(`🟡 **Win rate of ${Math.round(wr*100)}% is acceptable** but below the 55–65% target. You're still profitable if avg R stays above 0.5R, but look at what the losing trades have in common.`);
+  else if (wr >= 0.40) lines.push(`⚠️ **Win rate of ${Math.round(wr*100)}% is below 50%.** You need avg R above 1.0 per trade to stay profitable at this rate. Review whether stops are placed at logical structure or just a fixed distance.`);
+  else                 lines.push(`🔴 **Win rate of ${Math.round(wr*100)}% needs attention.** Check if market structure has changed — a trending market can make mean-reversion zone plays consistently fail. Consider pausing and reviewing the last 5 losses on a chart.`);
+
+  // R profitability
+  if (conf.avgR != null) {
+    if      (conf.avgR >= 1.5) lines.push(`💰 **Avg ${fmt(conf.avgR)} per confirmed trade — excellent.** The strategy is not just winning more than losing; it's winning bigger. This is the ideal profile.`);
+    else if (conf.avgR >= 0.5) lines.push(`💰 **Avg ${fmt(conf.avgR)} per confirmed trade — healthy.** The strategy is profitable. Look for ways to let TP2/TP3 hit more often to push this higher.`);
+    else if (conf.avgR >= 0)   lines.push(`⚠️ **Avg ${fmt(conf.avgR)} per confirmed trade — barely breakeven.** Even with a decent win rate, small average R means transaction costs and slippage eat the edge. Try scaling out at TP1 less aggressively.`);
+    else                       lines.push(`🔴 **Avg ${fmt(conf.avgR)} per confirmed trade — negative.** The strategy lost money on confirmed entries this period. Losses are likely larger than wins on average, which points to a stop placement issue.`);
+  }
+
+  // Confirmation filter value
+  if (conf.winRate != null && unconf.winRate != null && unconf.count >= 3) {
+    const diffPp = Math.round((conf.winRate - unconf.winRate) * 100);
+    if      (diffPp >= 10)  lines.push(`🔍 **The 30M entry confirmation is earning its keep** — confirmed trades win ${diffPp}pp more than unconfirmed ones. Keep waiting for the bar close before entering; jumping in early costs you edge.`);
+    else if (diffPp >= 0)   lines.push(`🔍 **The confirmation filter adds a small edge (+${diffPp}pp).** It's working but only marginally. If this stays flat over several weeks, consider tightening the CVD threshold alongside the bar close.`);
+    else                    lines.push(`⚠️ **Unconfirmed signals are currently outperforming confirmed ones by ${Math.abs(diffPp)}pp.** This may mean you're entering late after the move has already played out. Check whether confirmation bars are happening far from the zone centre.`);
+  }
+
+  // Confirmation rate health
+  const confRate = s.allWindow > 0 ? s.confirmedTotal / s.allWindow : null;
+  if (confRate != null) {
+    if      (confRate < 0.30) lines.push(`⚠️ **Only ${Math.round(confRate*100)}% of signals are triggering entry** — lower than the healthy 50–70% range. Either market conditions are choppy (price approaches zones but never commits), or the confirmation criteria are too strict. Watch the next week before adjusting.`);
+    else if (confRate > 0.80) lines.push(`⚠️ **${Math.round(confRate*100)}% of signals are confirming — unusually high.** A very high confirmation rate can mean the filter isn't screening out weak setups. Make sure CVD alignment is genuinely directional, not just noise.`);
+  }
+
+  // Best / worst level type (min 3 confirmed closed trades)
+  const levelEntries = Object.entries(s.byLevel)
+    .map(([type, d]) => ({ type, total: d.wins + d.losses, wr: d.wins + d.losses >= 3 ? d.wins / (d.wins + d.losses) : null }))
+    .filter(l => l.wr !== null);
+  if (levelEntries.length >= 2) {
+    const sorted = [...levelEntries].sort((a, b) => b.wr - a.wr);
+    const best  = sorted[0];
+    const worst = sorted[sorted.length - 1];
+    const note  = worst.wr < 0.40 ? ` Consider reducing size on **${worst.type}** setups until this improves.` : ' Both are within an acceptable range.';
+    lines.push(`📊 **Best level type: ${best.type}** (${Math.round(best.wr*100)}% win rate). **Weakest: ${worst.type}** (${Math.round(worst.wr*100)}%).${note}`);
+  }
+
+  // Direction bias
+  const longWR  = s.confLongs  >= 2 ? s.confLongWins  / s.confLongs  : null;
+  const shortWR = s.confShorts >= 2 ? s.confShortWins / s.confShorts : null;
+  if (longWR != null && shortWR != null) {
+    const diffPp = Math.abs(Math.round((longWR - shortWR) * 100));
+    if (diffPp >= 20) {
+      const better = longWR > shortWR ? 'longs' : 'shorts';
+      const worse  = longWR > shortWR ? 'shorts' : 'longs';
+      lines.push(`📐 **Strong direction bias: ${better} are winning ${diffPp}pp more than ${worse}.** This usually reflects the broader market trend. Consider sizing down ${worse} or skipping them entirely until the bias narrows.`);
+    }
+  } else if (longWR != null && s.confShorts < 2) {
+    lines.push(`📐 **Not enough short trades to assess direction balance.** All or most confirmed signals were longs this period — normal in a trending market.`);
+  } else if (shortWR != null && s.confLongs < 2) {
+    lines.push(`📐 **Not enough long trades to assess direction balance.** All or most confirmed signals were shorts this period — check whether a downtrend is dominating the zone structure.`);
+  }
+
+  // Time to outcome
+  if (s.avgWinHours != null && s.avgLossHours != null) {
+    if (s.avgLossHours > s.avgWinHours * 1.5) {
+      lines.push(`⏱️ **Losses are taking ${s.avgLossHours.toFixed(1)}h vs ${s.avgWinHours.toFixed(1)}h for wins.** When losses grind slowly to stop, it usually means stops are placed too far away — the market is dragging against you before finally taking you out. Try tightening stops to just below the zone rather than below the wider structure.`);
+    } else if (s.avgWinHours > s.avgLossHours * 1.5) {
+      lines.push(`⏱️ **Wins take ${s.avgWinHours.toFixed(1)}h vs ${s.avgLossHours.toFixed(1)}h for losses.** Losses are fast, wins are slow — this is a healthy momentum pattern. It means when the zone fails you know quickly, and when it holds the trade trends in your favour.`);
+    }
+  }
+
+  // Streak warning
+  if (s.streakType === 'loss' && s.streak >= 3) {
+    lines.push(`🔴 **${s.streak}-loss streak on confirmed trades.** This is within normal variance for a ~55% strategy but worth watching. Before taking the next signal, manually verify on the chart that the setup criteria are genuinely met — drawdown periods often coincide with forcing setups in low-quality conditions.`);
+  } else if (s.streakType === 'win' && s.streak >= 4) {
+    lines.push(`🟢 **${s.streak}-win streak — the strategy is dialled in right now.** Stay disciplined and resist the urge to increase size mid-streak; let the edge compound at the same risk per trade.`);
+  }
+
+  return [`🔍 **WHAT THIS MEANS**`, ...lines].join('\n');
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
   const trades = readTrades();
   const stats  = analyse(trades, LOOKBACK_DAYS);
   const report = formatReport(stats);
+  const summary = formatSummary(stats);
 
   console.log(report);
   console.log('');
+  console.log(summary);
+  console.log('');
 
-  const payload = {
+  const summaryColor = (() => {
+    const conf = stats.confirmedTrack;
+    if (conf.count === 0)       return 16776960; // yellow — no data
+    if (conf.avgR >= 0.5 && conf.winRate >= 0.55) return 5763719;  // green — healthy
+    if (conf.avgR < 0 || conf.winRate < 0.40)     return 15548997; // red — needs work
+    return 16744272; // orange — marginal
+  })();
+
+  await postToDiscord({
     embeds: [{
       description: report,
-      color: 3447003, // blue
+      color: 3447003,
       footer: { text: `Ace • BINANCE:BTCUSDT.P • ${LOOKBACK_DAYS}-day report` },
       timestamp: new Date().toISOString(),
     }],
-  };
+  });
 
-  await postToDiscord(payload);
+  await postToDiscord({
+    embeds: [{
+      description: summary,
+      color: summaryColor,
+      footer: { text: `Ace • BINANCE:BTCUSDT.P • ${LOOKBACK_DAYS}-day interpretation` },
+      timestamp: new Date().toISOString(),
+    }],
+  });
+
   console.log(`Report posted to #backtest-btc (${stats.allTrack.count} closed trades analysed)`);
 }
 
