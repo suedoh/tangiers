@@ -1460,7 +1460,11 @@ function checkPendingConfirmation(price, indicators) {
 
 async function checkConfirmation(client, indicators) {
   const trades = readTrades();
-  const unconfirmed = trades.filter(t => !t.confirmed && t.outcome === null);
+  // Include closed trades — confirmation is independent of outcome.
+  // Bug fix: previously filtered to outcome === null, which caused a race
+  // condition where updateOutcomes() closed the trade before confirmation ran,
+  // leaving TP trades permanently unconfirmed despite price crossing entry.
+  const unconfirmed = trades.filter(t => !t.confirmed);
   if (unconfirmed.length === 0) return;
 
   // Fetch recent 30M bars (already on 30M from outcome check above)
@@ -1474,16 +1478,16 @@ async function checkConfirmation(client, indicators) {
     const relevantBars = bars.filter(b => b.time > signalTs);
     if (relevantBars.length === 0) continue;
 
-    const cvdAligned = t.direction === 'long'
-      ? (indicators.cvd != null && indicators.cvd > 0)
-      : (indicators.cvd != null && indicators.cvd < 0);
-
+    // CVD was validated at signal fire time (criteria check). Re-checking it
+    // here at an arbitrary future poll with current CVD adds noise — CVD flips
+    // direction constantly in volatile markets and the bar that closed above
+    // entry may be hours old. The 30M close beyond entry IS the confirmation.
     for (const bar of relevantBars) {
       const closeConfirms = t.direction === 'long'
         ? bar.close > t.entry
         : bar.close < t.entry;
 
-      if (closeConfirms && cvdAligned) {
+      if (closeConfirms) {
         t.confirmed      = true;
         t.confirmedAt    = new Date(bar.time * 1000).toISOString();
         t.confirmedPrice = bar.close;
@@ -1832,8 +1836,8 @@ async function main() {
 
   // Update outcomes and confirmations BEFORE closing the CDP connection —
   // both functions use the client to fetch OHLCV bars from TradingView.
-  await updateOutcomes(client);
   await checkConfirmation(client, indicators);
+  await updateOutcomes(client);
 
   await client.close();
 
