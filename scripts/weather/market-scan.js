@@ -314,39 +314,38 @@ async function resolveOutcomes(trades) {
   for (const trade of trades) {
     if (trade.outcome !== null) continue;
 
-    const targetMs     = new Date(trade.parsed.date).getTime();
-    const polyEligible = now >= targetMs + 12 * 3_600_000;  // 12h: trading day has ended
-    const obsEligible  = now >= targetMs + 36 * 3_600_000;  // 36h: GHCN data latency window
+    const targetMs      = new Date(trade.parsed.date).getTime();
+    const nwsEligible   = now >= targetMs + 12 * 3_600_000;  // 12h: NWS METAR near real-time
+    const era5Eligible  = now >= targetMs + 24 * 3_600_000;  // 24h: ERA5 archive available
+    const ghcnEligible  = now >= targetMs + 36 * 3_600_000;  // 36h: GHCN posting latency
 
-    if (!polyEligible) continue;
+    if (!nwsEligible) continue;
 
     try {
       const coords   = trade.parsed.coords || {};
       const wantHigh = trade.parsed.direction !== 'below';
 
-      // Path A: observed temperature — GHCN (Polymarket's source) → NWS METAR → ERA5
-      // Only attempted after 36h to respect GHCN posting latency.
+      // Path A: observed temperature — each source gated by its own availability window.
+      // GHCN (Polymarket's source, 36h) → NWS METAR (near real-time, 12h) → ERA5 (24h).
       let value = null, observedSource = null;
 
-      if (obsEligible) {
-        if (coords.ghcnStation) {
-          const ghcn = await fetchGHCNObserved(coords.ghcnStation, trade.parsed.date).catch(() => null);
-          if (ghcn) {
-            const v = wantHigh ? ghcn.tmax : ghcn.tmin;
-            if (v != null) { value = v; observedSource = ghcn.source; }
-          }
+      if (ghcnEligible && coords.ghcnStation) {
+        const ghcn = await fetchGHCNObserved(coords.ghcnStation, trade.parsed.date).catch(() => null);
+        if (ghcn) {
+          const v = wantHigh ? ghcn.tmax : ghcn.tmin;
+          if (v != null) { value = v; observedSource = ghcn.source; }
         }
-        if (value == null && coords.nwsStation) {
-          const nws = await fetchNWSObserved(coords.nwsStation, trade.parsed.date, coords.tz).catch(() => null);
-          if (nws) {
-            const v = wantHigh ? nws.high : nws.low;
-            if (v != null) { value = v; observedSource = nws.source; }
-          }
+      }
+      if (value == null && nwsEligible && coords.nwsStation) {
+        const nws = await fetchNWSObserved(coords.nwsStation, trade.parsed.date, coords.tz).catch(() => null);
+        if (nws) {
+          const v = wantHigh ? nws.high : nws.low;
+          if (v != null) { value = v; observedSource = nws.source; }
         }
-        if (value == null && coords.lat != null) {
-          const era5 = await getObserved(coords.lat, coords.lon, trade.parsed.date, wantHigh ? 'above' : 'below').catch(() => null);
-          if (era5?.value != null) { value = era5.value; observedSource = 'Open-Meteo ERA5'; }
-        }
+      }
+      if (value == null && era5Eligible && coords.lat != null) {
+        const era5 = await getObserved(coords.lat, coords.lon, trade.parsed.date, wantHigh ? 'above' : 'below').catch(() => null);
+        if (era5?.value != null) { value = era5.value; observedSource = 'Open-Meteo ERA5'; }
       }
 
       // Path B: Polymarket settlement price — fallback when observation data unavailable.

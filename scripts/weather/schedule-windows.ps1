@@ -1,7 +1,8 @@
 # weather/schedule-windows.ps1 - Windows Task Scheduler setup for Weathermen
 #
-# Creates three scheduled tasks:
+# Creates four scheduled tasks:
 #   Weathermen-Scan   - runs market-scan.js every 30 minutes (includes exit monitor)
+#   Weathermen-Settle - runs settle.js every hour (NOAA METAR settlement resolver)
 #   Weathermen-Report - runs weekly-report.js every Sunday at 18:00 local time
 #   Weathermen-Bot    - runs discord-bot/index.js every minute (handles !commands)
 #
@@ -12,6 +13,7 @@
 #
 # To remove tasks later:
 #   Unregister-ScheduledTask -TaskName "Weathermen-Scan"   -Confirm:$false
+#   Unregister-ScheduledTask -TaskName "Weathermen-Settle" -Confirm:$false
 #   Unregister-ScheduledTask -TaskName "Weathermen-Report" -Confirm:$false
 #   Unregister-ScheduledTask -TaskName "Weathermen-Bot"    -Confirm:$false
 
@@ -29,13 +31,21 @@ if (-not (Test-Path $LogDir)) {
 # -- Generate silent VBS launchers (wscript window style 0 = truly invisible) --
 
 $ScanVbs   = Join-Path $ProjectRoot 'scripts\weather\run-scan.vbs'
+$SettleVbs = Join-Path $ProjectRoot 'scripts\weather\run-settle.vbs'
 $ReportVbs = Join-Path $ProjectRoot 'scripts\weather\run-report.vbs'
 $BotVbs    = Join-Path $ProjectRoot 'scripts\weather\run-bot.vbs'
+
+$SettleScript = Join-Path $ProjectRoot 'scripts\weather\settle.js'
 
 @"
 Set oShell = CreateObject("WScript.Shell")
 oShell.Run """$NodePath"" ""$ScanScript""", 0, False
 "@ | Out-File -FilePath $ScanVbs -Encoding ascii
+
+@"
+Set oShell = CreateObject("WScript.Shell")
+oShell.Run """$NodePath"" ""$SettleScript""", 0, False
+"@ | Out-File -FilePath $SettleVbs -Encoding ascii
 
 @"
 Set oShell = CreateObject("WScript.Shell")
@@ -88,7 +98,43 @@ if ($existingScan) {
     Write-Host '[created] Weathermen-Scan (every 30 minutes)'
 }
 
-# -- Task 2: weekly-report every Sunday at 18:00 local time -------------------
+# -- Task 2: settle.js every 1 hour ------------------------------------------
+
+$settleAction = New-ScheduledTaskAction `
+    -Execute 'wscript.exe' `
+    -Argument ('//NoLogo "' + $SettleVbs + '"') `
+    -WorkingDirectory $ProjectRoot
+
+$settleTrigger = New-ScheduledTaskTrigger `
+    -RepetitionInterval (New-TimeSpan -Hours 1) `
+    -Once `
+    -At (Get-Date)
+
+$settleSettings = New-ScheduledTaskSettingsSet `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
+    -StartWhenAvailable `
+    -RunOnlyIfNetworkAvailable `
+    -MultipleInstances IgnoreNew
+
+$existingSettle = Get-ScheduledTask -TaskName 'Weathermen-Settle' -ErrorAction SilentlyContinue
+if ($existingSettle) {
+    Set-ScheduledTask -TaskName 'Weathermen-Settle' `
+        -Action $settleAction `
+        -Trigger $settleTrigger `
+        -Settings $settleSettings | Out-Null
+    Write-Host '[updated] Weathermen-Settle (every 1 hour)'
+} else {
+    Register-ScheduledTask `
+        -TaskName    'Weathermen-Settle' `
+        -Description 'Weathermen NOAA METAR settlement resolver (every 1 hour)' `
+        -Action      $settleAction `
+        -Trigger     $settleTrigger `
+        -Settings    $settleSettings `
+        -RunLevel    Limited | Out-Null
+    Write-Host '[created] Weathermen-Settle (every 1 hour)'
+}
+
+# -- Task 4: weekly-report every Sunday at 18:00 local time -------------------
 
 $reportAction = New-ScheduledTaskAction `
     -Execute 'wscript.exe' `
@@ -119,7 +165,7 @@ if ($existingReport) {
     Write-Host '[created] Weathermen-Report (Sundays at 18:00)'
 }
 
-# -- Task 3: discord bot every 1 minute ---------------------------------------
+# -- Task 5: discord bot every 1 minute ---------------------------------------
 
 $botAction = New-ScheduledTaskAction `
     -Execute 'wscript.exe' `
