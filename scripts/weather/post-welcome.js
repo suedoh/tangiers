@@ -161,11 +161,17 @@ Log that you entered a paper trade on a signal.
 → !took wx-mob6otqe947e
 Records who took it and when. Appears in the weekly report.
 
+!sell <signal-id> [--dry]
+Exit an open paper position at the current live Polymarket market price. Fetches the real-time YES/NO price from the CLOB, calculates exact P&L, and closes the trade. Use this to lock in profits or cut losses before the market resolves.
+→ !sell wx-mob6otqe947e
+→ !sell wx-mob6otqe947e --dry   ← preview P&L without closing
+Posts a sell card showing entry price, exit price, shares, P&L, and % of original edge captured.
+
 !exit <signal-id> win|loss|manual
-Close a paper trade. Calculates P&L and posts to #weather-backtest.
+Close a paper trade by manually specifying the outcome. Calculates P&L based on entry price and resolves the trade record.
 → !exit wx-mob6otqe947e win
 → !exit wx-mob6otqe947e loss
-Use manual if closing early (e.g. price moved, changed your mind).
+Use manual if closing early (e.g. price moved, changed your mind). Use !sell instead if you want the bot to fetch the current price automatically.
 
 ## 📊 Reports
 !report
@@ -203,8 +209,9 @@ Building a track record. Goal: 20+ resolved signals to evaluate model accuracy b
     Bot fetches actual observed temp from NOAA (GHCN-Daily station → NWS METAR → ERA5) → marks WIN or LOSS → posts to #weather-backtest.
     Or trigger immediately with \`!settle\` (use \`!settle --force\` for same-day resolution via NWS).
 
-4️⃣  **OR: manual close**
-    \`!exit <id> win|loss\` — override auto-resolution or close early.
+4️⃣  **OR: early exit**
+    \`!sell <id>\` — exit at current live price (bot calculates P&L automatically).
+    \`!exit <id> win|loss\` — override auto-resolution with a manual outcome.
 
 5️⃣  **SUNDAY REPORT** → #weather-backtest
     Win rate · Paper P&L · Edge-tier breakdown · City breakdown · Open positions
