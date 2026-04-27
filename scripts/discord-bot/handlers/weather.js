@@ -10,6 +10,7 @@
  *   !trades                     — list open/recent weather signals
  *   !settle [--force] [--dry] [--id <id>]
  *                               — resolve expired trades via GHCN-Daily / NWS METAR
+ *   !sell <id> [--dry]          — exit open position at current Polymarket price
  *   !took <id>                  — log that you manually entered a paper trade
  *   !exit <id> <outcome>        — log manual exit (win|loss|manual)
  */
@@ -19,6 +20,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { ROOT, resolveWebhook } = require('../../lib/env');
 const { postWebhook }          = require('../../lib/discord');
+const { getMarketPrice }       = require('../../lib/polymarket');
 
 const SCAN_SCRIPT    = path.join(ROOT, 'scripts', 'weather', 'market-scan.js');
 const ANALYZE_SCRIPT = path.join(ROOT, 'scripts', 'weather', 'analyze.js');
@@ -47,6 +49,7 @@ async function handle(message, api) {
   if (/^!report\b/i.test(text))          { await handleReport(user, api);            return true; }
   if (/^!trades\b/i.test(text))          { await handleTrades(user, api);            return true; }
   if (/^!settle\b/i.test(text))          { await handleSettle(user, text, api);      return true; }
+  if (/^!sell\b/i.test(text))            { await handleSell(user, args, api);        return true; }
   if (/^!resolve-status\b/i.test(text))  { await handleResolveStatus(user, api);     return true; }
   if (/^!took\b/i.test(text))            { await handleTook(user, args[0], api);     return true; }
   if (/^!exit\b/i.test(text))            { await handleExit(user, args, api);        return true; }
@@ -286,7 +289,7 @@ async function handleTrades(user, api) {
     }
   }
 
-  pos.push('', `*\`!took <id>\` to log entry · \`!exit <id> win|loss\` to close · \`!settle\` to resolve expired*`);
+  pos.push('', `*\`!took <id>\` to log entry · \`!sell <id>\` to exit at live price · \`!exit <id> win|loss\` to close · \`!settle\` to resolve expired*`);
 
   await api.sendMessage(pos.join('\n').slice(0, 1950));
 }
@@ -434,6 +437,96 @@ async function handleExit(user, args, api) {
 
   if (BACKTEST_HOOK) {
     await postWebhook(BACKTEST_HOOK, signalWon ? 'long' : 'error', msg, 'Weather • Paper Trade');
+  }
+}
+
+// ─── !sell ───────────────────────────────────────────────────────────────────
+
+async function handleSell(user, args, api) {
+  const tradeId = args[0];
+  const dry     = args.includes('--dry');
+
+  if (!tradeId) {
+    await api.sendMessage('Usage: `!sell <signal-id> [--dry]` — exit at current Polymarket price. Get IDs from `!trades`.');
+    return;
+  }
+
+  const trades = readTrades();
+  const idx    = trades.findIndex(t => t.id === tradeId);
+
+  if (idx === -1) {
+    await api.sendMessage(`❌ Signal \`${tradeId}\` not found. Use \`!trades\` to list open positions.`);
+    return;
+  }
+
+  const trade = trades[idx];
+  if (trade.outcome !== null && trade.outcome !== undefined) {
+    await api.sendMessage(`⚠️ \`${tradeId}\` is already closed (${trade.signalResult || trade.outcome}).`);
+    return;
+  }
+
+  if (!trade.conditionId) {
+    await api.sendMessage(`❌ \`${tradeId}\` has no conditionId — cannot fetch live price.`);
+    return;
+  }
+
+  await api.sendTyping();
+  await api.sendMessage(`🔍 Fetching live Polymarket price for \`${tradeId}\`...`);
+
+  let livePrice;
+  try {
+    livePrice = await getMarketPrice(trade.conditionId);
+  } catch (e) {
+    await api.sendMessage(`❌ Could not fetch live price: ${e.message}`);
+    return;
+  }
+
+  if (!livePrice || livePrice.yes == null || livePrice.no == null) {
+    await api.sendMessage(`❌ Live price unavailable for \`${tradeId}\` — market may be closed or settled.`);
+    return;
+  }
+
+  const entryPrice   = trade.side === 'yes' ? trade.yesPrice  : trade.noPrice;
+  const currentPrice = trade.side === 'yes' ? livePrice.yes   : livePrice.no;
+  const shares       = trade.betDollars / entryPrice;
+  const saleValue    = shares * currentPrice;
+  const pnl          = Math.round((saleValue - trade.betDollars) * 100) / 100;
+  const edgeFraction = trade.edge > 0
+    ? Math.round(pnl / (trade.betDollars * (trade.edge / 100)) * 100)
+    : null;
+
+  const signalResult = pnl >= 0 ? 'win' : 'loss';
+  const icon         = pnl >= 0 ? '💚' : '💸';
+  const pnlStr       = pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`;
+  const edgeStr      = edgeFraction != null ? `${edgeFraction}% of original` : 'N/A';
+  const resolvesStr  = trade.parsed?.date || '?';
+
+  const card = [
+    `${icon} **PAPER POSITION SOLD${dry ? ' — DRY RUN' : ''} — ${signalResult.toUpperCase()}**`,
+    `*${(trade.question || '').slice(0, 90)}*`,
+    '',
+    `Side: **${trade.side.toUpperCase()}** | Entry: **${pct(entryPrice)}** → Exit: **${pct(currentPrice)}**`,
+    `Shares: ${shares.toFixed(2)} contracts × ${pct(currentPrice)} = $${saleValue.toFixed(2)}`,
+    `P&L: **${pnlStr}** | Edge captured: **${edgeStr}**`,
+    '',
+    `⏱️ Resolves: ${resolvesStr} | Closed by: ${user}`,
+    `\`ID: ${tradeId}\``,
+  ].join('\n');
+
+  if (!dry) {
+    trades[idx].outcome       = 'sold';
+    trades[idx].exitPrice     = Math.round(currentPrice * 10000) / 10000;
+    trades[idx].pnlDollars    = pnl;
+    trades[idx].signalResult  = signalResult;
+    trades[idx].closedAt      = new Date().toISOString();
+    trades[idx].closedBy      = 'manual-sell';
+    writeTrades(trades);
+  }
+
+  await api.sendMessage(card);
+
+  if (!dry && BACKTEST_HOOK) {
+    await postWebhook(BACKTEST_HOOK, pnl >= 0 ? 'long' : 'error', card, 'Weather • Paper Sell');
   }
 }
 

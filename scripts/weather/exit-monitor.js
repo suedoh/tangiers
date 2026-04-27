@@ -247,6 +247,7 @@ async function autoExit(trades) {
     const pnl = result.pnlDollars;
     trades[idx].signalResult = pnl != null && pnl >= 0 ? 'win' : 'loss';
     trades[idx].pnlDollars   = pnl;
+    trades[idx].exitPrice    = Math.round(result.currentPrice * 10000) / 10000;
     trades[idx].closedAt     = new Date().toISOString();
     trades[idx].closedBy     = 'exit-monitor';
     trades[idx].outcome      = exitReason;
