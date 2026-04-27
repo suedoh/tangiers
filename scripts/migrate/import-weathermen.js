@@ -2,17 +2,17 @@
 'use strict';
 // One-time import of Weathermen JSON files into MongoDB.
 // Safe to re-run — uses insertMany with ordered:false; duplicates skipped via unique index on id.
-// Run after import-trades.js has been run at least once (relies on same trades collection).
+// Can be run independently of import-trades.js (weather_trades is its own collection).
 //
 // Collections written:
-//   trades           — weather signals (instrument: "WM")
+//   weather_trades    — weather signals (own collection; high-volume, distinct schema)
 //   trigger_cooldowns — per-conditionId 4h cooldowns (instrument: "WM")
 //   weathermen_state  — signals map { tradeId → discordMsgId } as singleton
 //   weathermen_data   — per-city bias corrections seeded from bias-corrections.json
 
 const fs   = require('fs');
 const path = require('path');
-const { connect, disconnect, trades, triggerCooldowns, weathermenData, weathermenState } = require('../lib/db');
+const { connect, disconnect, weatherTrades, triggerCooldowns, weathermenData, weathermenState } = require('../lib/db');
 
 const ROOT = path.resolve(__dirname, '../../');
 
@@ -21,7 +21,6 @@ function log(msg) { console.log(`  ${msg}`); }
 function normalizeWeather(t) {
   return {
     ...t,
-    instrument: 'WM',
     firedAt:  t.firedAt  ? new Date(t.firedAt)  : null,
     closedAt: t.closedAt ? new Date(t.closedAt) : null,
   };
@@ -33,7 +32,7 @@ async function importTrades() {
   const docs = JSON.parse(fs.readFileSync(filePath, 'utf8')).map(normalizeWeather);
   if (!docs.length) { log('weather-trades.json: empty, skipping'); return; }
   try {
-    const result = await trades().insertMany(docs, { ordered: false });
+    const result = await weatherTrades().insertMany(docs, { ordered: false });
     log(`weather-trades.json: inserted ${result.insertedCount} / ${docs.length}`);
   } catch (e) {
     const inserted = e.result?.nInserted ?? 0;
@@ -108,7 +107,7 @@ async function main() {
   await importState();
   await importBiasCorrections();
   console.log(`\nVerification counts:`);
-  console.log(`  trades (WM):             ${await trades().countDocuments({ instrument: 'WM' })}`);
+  console.log(`  weather_trades:          ${await weatherTrades().countDocuments()}`);
   console.log(`  trigger_cooldowns (WM):  ${await triggerCooldowns().countDocuments({ instrument: 'WM' })}`);
   console.log(`  weathermen_state:        ${await weathermenState().countDocuments()}`);
   console.log(`  weathermen_data:         ${await weathermenData().countDocuments({ type: 'bias_correction' })} bias corrections`);
