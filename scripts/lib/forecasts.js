@@ -282,11 +282,14 @@ async function fetchGHCNBaseRate(ghcnStation, targetDate, thresholdF, direction)
 
   try {
     // Build narrow window per year (±5 days, clamped to month boundaries)
-    const ddInt  = parseInt(dd, 10);
-    const lo     = String(Math.max(1,  ddInt - 5)).padStart(2, '0');
-    const hiRaw  = ddInt + 5;
-    // Simple month-end clamp: use 28 as safe upper bound (works for all months)
-    const hi     = String(Math.min(28, hiRaw)).padStart(2, '0');
+    const ddInt      = parseInt(dd, 10);
+    const lo         = String(Math.max(1, ddInt - 5)).padStart(2, '0');
+    const hiRaw      = ddInt + 5;
+    // Clamp to the actual last day of the target month so dates 29–31 don't lose
+    // historical observations. new Date(y, m, 0) returns the last day of month m-1,
+    // which equals the last day of parseInt(mm, 10) when month is 1-indexed.
+    const daysInMonth = new Date(currentYear, parseInt(mm, 10), 0).getDate();
+    const hi         = String(Math.min(daysInMonth, hiRaw)).padStart(2, '0');
 
     const yearRequests = years.map(y =>
       nceiGet(`${y}-${mm}-${lo}`, `${y}-${mm}-${hi}`)

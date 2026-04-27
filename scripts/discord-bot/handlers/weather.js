@@ -359,7 +359,7 @@ async function handleTook(user, tradeId, api) {
 
   const icon = trade.side === 'yes' ? '🟢' : '🔴';
   const msg  = [
-    `${icon} **Paper Entry Logged — ${trade.side.toUpperCase()} YES**`,
+    `${icon} **Paper Entry Logged — ${trade.side.toUpperCase()}**`,
     `**${(trade.question || '').slice(0, 80)}**`,
     `Price: **${pct(trade.side === 'yes' ? trade.yesPrice : trade.noPrice)}** | Suggested: ${usd(trade.betDollars)}`,
     `Edge: ${trade.edge}% | Model: ${pct(trade.modelProb / 100)} | Resolves: ${trade.parsed?.date}`,
@@ -403,17 +403,21 @@ async function handleExit(user, args, api) {
 
   const signalWon = outcome === 'win';
   const price     = trade.side === 'yes' ? trade.yesPrice : trade.noPrice;
-  const pnl       = trade.betDollars > 0
-    ? signalWon
-      ? Math.round(trade.betDollars * (1 - price) / price * 100) / 100
-      : -trade.betDollars
-    : null;
+  // Manual exits don't have a real P&L — amount is unknown until live position is closed
+  const pnl       = outcome === 'manual' ? null
+    : trade.betDollars > 0
+      ? signalWon
+        ? Math.round(trade.betDollars * (1 - price) / price * 100) / 100
+        : -trade.betDollars
+      : null;
 
-  trades[idx].signalResult = outcome === 'manual' ? 'manual' : (signalWon ? 'win' : 'loss');
-  trades[idx].pnlDollars   = pnl;
-  trades[idx].closedAt     = new Date().toISOString();
-  trades[idx].closedBy     = user;
-  trades[idx].outcome      = outcome;
+  trades[idx].signalResult  = outcome === 'manual' ? 'manual' : (signalWon ? 'win' : 'loss');
+  trades[idx].pnlDollars    = pnl;
+  trades[idx].closedAt      = new Date().toISOString();
+  trades[idx].closedBy      = user;
+  // Use manualOutcome so the outcome field stays reserved for settlement values
+  // ('yes-resolved' / 'no-resolved' / 'superseded') written by settle.js and market-scan.js
+  trades[idx].manualOutcome = outcome;
   writeTrades(trades);
 
   const icon = signalWon ? '✅' : outcome === 'manual' ? '📋' : '❌';
