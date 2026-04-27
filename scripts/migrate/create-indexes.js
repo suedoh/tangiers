@@ -1,6 +1,7 @@
 #!/usr/bin/env node
+'use strict';
 // One-time index creation. Safe to re-run — createIndex is idempotent.
-import { connect, disconnect, trades, triggerState, triggerCooldowns, newsState, discordBotState } from '../lib/db.js';
+const { connect, disconnect, trades, triggerState, triggerCooldowns } = require('../lib/db');
 
 async function main() {
   await connect();
@@ -19,14 +20,12 @@ async function main() {
   await triggerState().createIndex({ instrument: 1 }, { unique: true, sparse: true });
   console.log('  trigger_state ✓');
 
-  // trigger_cooldowns
+  // trigger_cooldowns — TTL index auto-deletes documents when current time >= expiresAt
   await triggerCooldowns().createIndex({ instrument: 1, levelKey: 1 }, { unique: true });
   await triggerCooldowns().createIndex({ instrument: 1, entryType: 1 });
-  // TTL index — MongoDB auto-deletes documents when current time >= expiresAt
   await triggerCooldowns().createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
   console.log('  trigger_cooldowns ✓');
 
-  // news_state and discord_bot_state use _id only — no additional indexes needed
   console.log('  news_state ✓ (no extra indexes)');
   console.log('  discord_bot_state ✓ (no extra indexes)');
 

@@ -1,11 +1,12 @@
-import { MongoClient } from 'mongodb';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+'use strict';
 
-// Load .env into process.env (ES-module-safe, mirrors lib/env.js behaviour)
+const { MongoClient } = require('mongodb');
+const fs   = require('fs');
+const path = require('path');
+
+// Load .env into process.env (mirrors lib/env.js behaviour, safe to call multiple times)
 (function loadEnv() {
-  const envFile = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../.env');
+  const envFile = path.resolve(__dirname, '../../.env');
   if (!fs.existsSync(envFile)) return;
   fs.readFileSync(envFile, 'utf8').split('\n').forEach(line => {
     const trimmed = line.trim();
@@ -23,7 +24,7 @@ const MONGO_URL = process.env.MONGO_URL
 let _client = null;
 let _db = null;
 
-export async function connect() {
+async function connect() {
   if (_db) return _db;
   _client = new MongoClient(MONGO_URL, {
     serverSelectionTimeoutMS: 5000,
@@ -34,7 +35,7 @@ export async function connect() {
   return _db;
 }
 
-export async function disconnect() {
+async function disconnect() {
   if (_client) {
     await _client.close();
     _client = null;
@@ -42,8 +43,10 @@ export async function disconnect() {
   }
 }
 
-export const trades          = () => _db.collection('trades');
-export const triggerState    = () => _db.collection('trigger_state');
-export const triggerCooldowns= () => _db.collection('trigger_cooldowns');
-export const newsState       = () => _db.collection('news_state');
-export const discordBotState = () => _db.collection('discord_bot_state');
+const trades          = () => _db.collection('trades');
+const triggerState    = () => _db.collection('trigger_state');
+const triggerCooldowns= () => _db.collection('trigger_cooldowns');
+const newsState       = () => _db.collection('news_state');
+const discordBotState = () => _db.collection('discord_bot_state');
+
+module.exports = { connect, disconnect, trades, triggerState, triggerCooldowns, newsState, discordBotState };
