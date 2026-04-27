@@ -26,8 +26,9 @@ if (process.env.PRIMARY === 'false' && !process.argv.includes('--force')) {
   process.exit(0);
 }
 
-const BACKTEST_HOOK = resolveWebhook('WEATHER_DISCORD_BACKTEST_WEBHOOK');
-const TRADES_FILE   = path.join(ROOT, 'weather-trades.json');
+const BACKTEST_HOOK         = resolveWebhook('WEATHER_DISCORD_BACKTEST_WEBHOOK');
+const TRADES_FILE           = path.join(ROOT, 'weather-trades.json');
+const BIAS_CORRECTIONS_FILE = path.join(ROOT, 'scripts/lib/bias-corrections.json');
 
 function log(msg) { console.log(`[${new Date().toISOString()}] [weather-report] ${msg}`); }
 function usd(v)   { return v != null ? (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2) : '?'; }
@@ -171,6 +172,59 @@ async function main() {
 
   lines.push('', `*📌 Paper trades only — Phase A signal validation*`);
   lines.push(`*Advance to live execution after ${allResolved.length < 20 ? `${20 - allResolved.length} more resolved signals` : 'Phase B activation'}*`);
+
+  // ── Per-city bias recalibration ──────────────────────────────────────────
+  // Recompute mean bias (observedTemp - modelMeanF) from all resolved trades.
+  // Updates bias-corrections.json for use by the next scan cycle.
+  const biasMap = {};
+  for (const t of allResolved) {
+    if (t.meanF == null || t.observedTemp == null || !t.parsed?.city) continue;
+    const key  = t.parsed.city.toLowerCase();
+    const bias = t.observedTemp - t.meanF;
+    if (!biasMap[key]) biasMap[key] = { sum: 0, count: 0 };
+    biasMap[key].sum   += bias;
+    biasMap[key].count += 1;
+  }
+
+  let currentCorrections = {};
+  try { currentCorrections = JSON.parse(fs.readFileSync(BIAS_CORRECTIONS_FILE, 'utf8')); } catch { /* absent — start fresh */ }
+
+  const updatedCorrections = { ...currentCorrections };
+  const calibrationReport  = [];
+  const MIN_BIAS_TRADES    = 5;
+
+  for (const [city, { sum, count }] of Object.entries(biasMap)) {
+    if (count < MIN_BIAS_TRADES) continue;
+    const meanBias = Math.round((sum / count) * 100) / 100;
+    updatedCorrections[city] = meanBias;
+    calibrationReport.push({ city, meanBias, count });
+  }
+
+  updatedCorrections._meta = {
+    ...(currentCorrections._meta || {}),
+    generated:   now,
+    tradeCount:  allResolved.filter(t => t.meanF != null && t.observedTemp != null).length,
+  };
+
+  try {
+    fs.writeFileSync(BIAS_CORRECTIONS_FILE, JSON.stringify(updatedCorrections, null, 2));
+    log(`Bias corrections updated: ${calibrationReport.length} cities with ${MIN_BIAS_TRADES}+ trades`);
+  } catch (err) {
+    log(`Warning: could not write bias corrections: ${err.message}`);
+  }
+
+  if (calibrationReport.length > 0) {
+    lines.push('', '### 🎯 Model Calibration');
+    lines.push('*Bias = observedTemp − modelMean · positive = model ran cold · corrections applied to next scan*');
+    const top5 = calibrationReport
+      .sort((a, b) => Math.abs(b.meanBias) - Math.abs(a.meanBias))
+      .slice(0, 5);
+    for (const { city, meanBias, count } of top5) {
+      const dir   = meanBias >= 0 ? '↑ warm' : '↓ cold';
+      const label = city.replace(/\b\w/g, c => c.toUpperCase()).padEnd(18);
+      lines.push(`  ${label} ${meanBias >= 0 ? '+' : ''}${meanBias.toFixed(2)}°F  ${dir}  (n=${count})`);
+    }
+  }
 
   const body   = lines.join('\n');
   const footer = `Weathermen • Weekly Report • ${now}`;

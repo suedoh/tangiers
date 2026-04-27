@@ -39,6 +39,15 @@ const {
 
 loadEnv();
 
+// Per-city model mean bias corrections (observedTemp - modelMeanF, derived from resolved trades).
+// Applied as correctedMeanF = meanF + bias to calibrate probability calculations.
+let BIAS_CORRECTIONS = {};
+try {
+  BIAS_CORRECTIONS = JSON.parse(
+    fs.readFileSync(path.join(__dirname, '../lib/bias-corrections.json'), 'utf8')
+  );
+} catch { /* absent or malformed — proceed with zero corrections */ }
+
 if (process.env.PRIMARY === 'false') {
   console.log('[weather-scan] PRIMARY=false — skipping');
   process.exit(0);
@@ -48,7 +57,8 @@ if (process.env.PRIMARY === 'false') {
 
 const SIGNALS_HOOK  = resolveWebhook('WEATHER_DISCORD_SIGNALS_WEBHOOK');
 const BACKTEST_HOOK = resolveWebhook('WEATHER_DISCORD_BACKTEST_WEBHOOK');
-const MIN_EDGE      = parseFloat(process.env.WEATHER_MIN_EDGE   || '0.08');  // 8%
+const MIN_EDGE           = parseFloat(process.env.WEATHER_MIN_EDGE           || '0.08');  // 8%
+const YES_RANGE_MIN_EDGE = parseFloat(process.env.WEATHER_YES_RANGE_MIN_EDGE || '0.20');  // 20% for YES+range (historically 10.7% WR pre-correction)
 const MIN_VOLUME    = parseFloat(process.env.WEATHER_MIN_VOLUME || '200');   // $200 min volume
 const BANKROLL      = parseFloat(process.env.WEATHER_BANKROLL   || '500');   // paper bankroll
 const KELLY_FRAC    = parseFloat(process.env.WEATHER_KELLY_FRAC || '0.15');
@@ -64,6 +74,8 @@ const BLOCKED_CITIES = new Set([
   'nairobi',      // 5,327 ft altitude compresses range; extreme thresholds structurally high-risk; lowest model skill in tropical East Africa
   'lagos',        // Lowest model skill in the entire city set; wet-season cloud suppression makes temperature outcomes structurally unpredictable
   'wellington',   // Cook Strait persistent wind structurally suppresses temperature extremes — threshold trades near-coinflips, similar to Singapore
+  'lucknow',      // 13% WR (8 trades) — poor GHCN-Daily coverage; mean-shift correction insufficient for structural data quality issues
+  'london',       // 14% WR (7 trades) — settlement station ambiguity (Heathrow vs city); bias correction alone cannot fix station mismatch
 ]);
 
 const STATE_FILE  = path.join(ROOT, '.weather-state.json');
@@ -184,7 +196,11 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiA
   const icon         = side === 'yes' ? '🟢' : '🔴';
   const sideLabel    = side === 'yes' ? 'BUY YES' : 'BUY NO';
 
-  const meanStr  = forecast.meanF != null ? dualTemp(forecast.meanF, marketUnit) : 'N/A';
+  const meanStr  = forecast.meanF != null
+    ? (forecast.biasCorrF && forecast.rawMeanF != null
+        ? `${dualTemp(forecast.rawMeanF, marketUnit)} → **${dualTemp(forecast.meanF, marketUnit)}** corrected (bias ${forecast.biasCorrF >= 0 ? '+' : ''}${forecast.biasCorrF.toFixed(2)}°F)`
+        : dualTemp(forecast.meanF, marketUnit))
+    : 'N/A';
   const sigmaStr = dualSigma(forecast.sigmaF, marketUnit);
 
   const lines = [
@@ -533,18 +549,30 @@ async function main() {
       continue;
     }
 
+    // Apply per-city bias correction: shift model mean to match historical settlement temperatures.
+    // biasCorrF = mean(observedTemp - modelMeanF) over resolved trades for this city.
+    const cityKey        = parsed.city.toLowerCase();
+    const biasCorrF      = typeof BIAS_CORRECTIONS[cityKey] === 'number' ? BIAS_CORRECTIONS[cityKey] : 0;
+    const correctedMeanF = forecast.meanF != null
+      ? Math.round((forecast.meanF + biasCorrF) * 10) / 10
+      : null;
+
     const sigmaSource = forecast.historical
       ? `GHCN-Daily ${forecast.historical.station} (${forecast.historical.sampleSize}yr σ)`
       : forecast.ensemble
         ? 'GFS ensemble spread'
         : 'lead-time heuristic';
-    log(`${groupKey}: mean=${forecast.meanF != null ? forecast.meanF.toFixed(1) + '°F' : 'N/A'} σ=${forecast.sigmaF.toFixed(1)}°F [${sigmaSource}] (${forecast.sources.join(', ')})`);
+    const biasNote = biasCorrF !== 0 && forecast.meanF != null
+      ? ` (bias ${biasCorrF >= 0 ? '+' : ''}${biasCorrF.toFixed(2)}°F → corrected ${correctedMeanF.toFixed(1)}°F)`
+      : '';
+    log(`${groupKey}: mean=${forecast.meanF != null ? forecast.meanF.toFixed(1) + '°F' : 'N/A'}${biasNote} σ=${forecast.sigmaF.toFixed(1)}°F [${sigmaSource}] (${forecast.sources.join(', ')})`);
 
     // Score each bucket market in this group
-    let bestMarket    = null;
-    let bestEdge      = -Infinity;
-    let bestSide      = null;
-    let bestModelProb = null;
+    let bestMarket          = null;
+    let bestEdge            = -Infinity;
+    let bestSide            = null;
+    let bestModelProb       = null;
+    let bestEffectiveMinEdge = MIN_EDGE;
 
     for (const market of groupMarkets) {
       const { conditionId, parsed: mp } = market;
@@ -563,7 +591,7 @@ async function main() {
         log(`Market ${conditionId} price moved ${(priceDiff * 100).toFixed(1)}pts after cooldown — re-evaluating`);
       }
 
-      const modelProb = bucketModelProb(mp, forecast.meanF, forecast.sigmaF);
+      const modelProb = bucketModelProb(mp, correctedMeanF, forecast.sigmaF);
       if (modelProb == null) continue;
 
       const yesEdge = modelProb - market.yesPrice;
@@ -572,17 +600,24 @@ async function main() {
       const side = yesEdge >= noEdge ? 'yes' : 'no';
       const edge = Math.max(yesEdge, noEdge);
 
+      // YES+range bets require a higher edge threshold until bias correction is validated —
+      // this category had 10.7% WR pre-correction vs 77.4% for NO+range.
+      const effectiveMinEdge = (side === 'yes' && mp.direction === 'range')
+        ? YES_RANGE_MIN_EDGE
+        : MIN_EDGE;
+
       if (edge > bestEdge) {
-        bestEdge      = edge;
-        bestMarket    = market;
-        bestSide      = side;
-        bestModelProb = modelProb;
+        bestEdge             = edge;
+        bestMarket           = market;
+        bestSide             = side;
+        bestModelProb        = modelProb;
+        bestEffectiveMinEdge = effectiveMinEdge;
       }
     }
 
-    if (bestMarket == null || bestEdge < MIN_EDGE) {
+    if (bestMarket == null || bestEdge < bestEffectiveMinEdge) {
       if (bestMarket != null) {
-        log(`${groupKey}: best edge ${(bestEdge * 100).toFixed(1)}% below threshold — skip`);
+        log(`${groupKey}: best edge ${(bestEdge * 100).toFixed(1)}% below ${(bestEffectiveMinEdge * 100).toFixed(0)}% threshold (${bestSide}+${bestMarket.parsed?.direction}) — skip`);
       }
       continue;
     }
@@ -609,7 +644,7 @@ async function main() {
       edge:                 bestEdge,
       marketPrice,
       modelProb:            bestModelProb,
-      meanF:                forecast.meanF,
+      meanF:                correctedMeanF,
       sigmaF:               forecast.sigmaF,
       ensembleSpread:       forecast.ensemble?.spread      ?? null,
       memberCount:          forecast.ensemble?.memberCount ?? null,
@@ -690,7 +725,7 @@ async function main() {
     }
 
     const id    = signalId();
-    const card  = buildSignalCard(bestMarket, forecast, kelly, bestSide, bestEdge, bestModelProb, id, aiAnalysis);
+    const card  = buildSignalCard(bestMarket, { ...forecast, meanF: correctedMeanF, rawMeanF: forecast.meanF, biasCorrF }, kelly, bestSide, bestEdge, bestModelProb, id, aiAnalysis);
     const footer = `Weather • ${mp.city} • ${mp.date} • ${new Date().toISOString().slice(0, 16)} UTC`;
 
     let msgId = null;
@@ -724,6 +759,8 @@ async function main() {
       noPrice:         bestMarket.noPrice,
       modelProb:       Math.round(bestModelProb * 1000) / 10,
       meanF:           forecast.meanF != null ? Math.round(forecast.meanF * 10) / 10 : null,
+      correctedMeanF:  correctedMeanF != null ? Math.round(correctedMeanF * 10) / 10 : null,
+      biasCorrF:       biasCorrF !== 0 ? biasCorrF : undefined,
       sigmaF:          Math.round(forecast.sigmaF * 10) / 10,
       betDollars:      kelly.dollars,
       aiDecision:       aiAnalysis.decision,
