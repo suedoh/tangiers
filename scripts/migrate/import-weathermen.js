@@ -47,18 +47,16 @@ async function importCooldowns() {
   const cooldownMap = state.cooldowns || {};
   const entries = Object.entries(cooldownMap);
   if (!entries.length) { log('.weather-state.json#cooldowns: empty, skipping'); return; }
-  const docs = entries.map(([conditionId, epochMs]) => ({
-    conditionId,
-    instrument: 'WM',
-    expiresAt:  new Date(epochMs),
-  }));
-  try {
-    const result = await triggerCooldowns().insertMany(docs, { ordered: false });
-    log(`.weather-state.json#cooldowns: inserted ${result.insertedCount} / ${docs.length}`);
-  } catch (e) {
-    const inserted = e.result?.nInserted ?? 0;
-    log(`.weather-state.json#cooldowns: inserted ${inserted}, skipped ${docs.length - inserted} duplicates`);
+  let upserted = 0;
+  for (const [conditionId, epochMs] of entries) {
+    await triggerCooldowns().replaceOne(
+      { instrument: 'WM', levelKey: conditionId },
+      { levelKey: conditionId, instrument: 'WM', entryType: 'cooldown', expiresAt: new Date(epochMs) },
+      { upsert: true }
+    );
+    upserted++;
   }
+  log(`.weather-state.json#cooldowns: upserted ${upserted} entries`);
 }
 
 async function importState() {
