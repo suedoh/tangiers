@@ -136,73 +136,159 @@ async function handleTrades(user, api) {
     return;
   }
 
-  // Sort open signals: soonest resolving first, then highest edge
+  const now      = Date.now();
+  const weekMs   = 7 * 24 * 3_600_000;
+  const resolved = trades.filter(t => t.signalResult != null);
+  const wins     = resolved.filter(t => t.signalResult === 'win');
+  const allPnl   = resolved.reduce((a, t) => a + (t.pnlDollars || 0), 0);
+  const allWR    = resolved.length > 0 ? wins.length / resolved.length : null;
+
+  // ── Dashboard message ────────────────────────────────────────────────────
+  const dash = [];
+
+  // This week
+  const weekCutoff  = now - weekMs;
+  const weekAll     = trades.filter(t => new Date(t.firedAt).getTime() > weekCutoff);
+  const weekRes     = weekAll.filter(t => t.signalResult != null);
+  const weekWins    = weekRes.filter(t => t.signalResult === 'win');
+  const weekOpen    = weekAll.filter(t => t.outcome === null);
+  const weekPnl     = weekRes.reduce((a, t) => a + (t.pnlDollars || 0), 0);
+  const weekFrom    = new Date(weekCutoff).toISOString().slice(5, 10).replace('-', '/');
+  const weekTo      = new Date(now).toISOString().slice(5, 10).replace('-', '/');
+  const weekWR      = weekRes.length > 0 ? Math.round(100 * weekWins.length / weekRes.length) : null;
+
+  dash.push(`## 🌡️ WEATHERMEN — TRADES`);
+  dash.push(`### 📅 This Week (${weekFrom}–${weekTo})`);
+  if (weekRes.length === 0 && weekOpen.length === 0) {
+    dash.push('*No signals this week.*');
+  } else {
+    const weekPnlStr = weekPnl >= 0 ? `+$${weekPnl.toFixed(2)}` : `-$${Math.abs(weekPnl).toFixed(2)}`;
+    dash.push(
+      `Signals:   **${weekAll.length}** (${weekRes.length} resolved, ${weekOpen.length} open)`,
+      weekRes.length > 0
+        ? `Results:   **${weekWins.length}W / ${weekRes.length - weekWins.length}L** (${weekWR}% WR) · P&L: **${weekPnlStr}**`
+        : `Results:   *awaiting resolution*`,
+    );
+  }
+
+  // All-time headline
+  dash.push('', `### 📊 All-Time (${resolved.length} resolved)`);
+  if (resolved.length > 0) {
+    const pnlStr = allPnl >= 0 ? `+$${allPnl.toFixed(2)}` : `-$${Math.abs(allPnl).toFixed(2)}`;
+    dash.push(`Win rate: **${(allWR * 100).toFixed(1)}%** · Paper P&L: **${pnlStr}**`);
+
+    // Edge tier breakdown
+    const edgeTiers = [
+      { label: 'High ≥25%',  min: 25, max: Infinity },
+      { label: 'Mid 15–25%', min: 15, max: 25 },
+      { label: 'Low 8–15%',  min: 8,  max: 15 },
+    ];
+    const tierLines = [];
+    for (const tier of edgeTiers) {
+      const tt  = resolved.filter(t => (t.edge || 0) >= tier.min && (t.edge || 0) < tier.max);
+      if (tt.length === 0) continue;
+      const tw  = tt.filter(t => t.signalResult === 'win');
+      const twr = Math.round(100 * tw.length / tt.length);
+      const tpnl = tt.reduce((a, t) => a + (t.pnlDollars || 0), 0);
+      const tpnlStr = tpnl >= 0 ? `+$${tpnl.toFixed(0)}` : `-$${Math.abs(tpnl).toFixed(0)}`;
+      tierLines.push(`  ${tier.label.padEnd(12)} ${tw.length}W/${tt.length - tw.length}L  ${twr}% WR  ${tpnlStr}`);
+    }
+    if (tierLines.length) {
+      dash.push('', '**By edge:**');
+      dash.push(...tierLines);
+    }
+
+    // Side breakdown (YES vs NO) — key calibration signal
+    const sideRows = [
+      { label: 'NO ',  trades: resolved.filter(t => t.side === 'no') },
+      { label: 'YES',  trades: resolved.filter(t => t.side === 'yes') },
+    ];
+    const sideLines = sideRows
+      .filter(r => r.trades.length > 0)
+      .map(r => {
+        const w   = r.trades.filter(t => t.signalResult === 'win');
+        const wr  = Math.round(100 * w.length / r.trades.length);
+        const pnl = r.trades.reduce((a, t) => a + (t.pnlDollars || 0), 0);
+        const ps  = pnl >= 0 ? `+$${pnl.toFixed(0)}` : `-$${Math.abs(pnl).toFixed(0)}`;
+        return `  ${r.label}  ${w.length}W/${r.trades.length - w.length}L  ${wr}% WR  ${ps}`;
+      });
+    if (sideLines.length) {
+      dash.push('', '**By side:**');
+      dash.push(...sideLines);
+    }
+
+    // Direction breakdown (above/below/range)
+    const dirRows = [
+      { label: 'Above ', dir: 'above' },
+      { label: 'Below ', dir: 'below' },
+      { label: 'Range ', dir: 'range' },
+    ];
+    const dirLines = dirRows
+      .map(r => ({ ...r, trades: resolved.filter(t => t.parsed?.direction === r.dir) }))
+      .filter(r => r.trades.length > 0)
+      .map(r => {
+        const w  = r.trades.filter(t => t.signalResult === 'win');
+        const wr = Math.round(100 * w.length / r.trades.length);
+        return `  ${r.label}  ${w.length}W/${r.trades.length - w.length}L  ${wr}% WR`;
+      });
+    if (dirLines.length) {
+      dash.push('', '**By direction:**');
+      dash.push(...dirLines);
+    }
+  }
+
+  await api.sendMessage(dash.join('\n').slice(0, 1950));
+
+  // ── Positions message ────────────────────────────────────────────────────
   const allOpen = trades
     .filter(t => t.outcome === null)
     .sort((a, b) => {
-      const dA = new Date(a.parsed?.date) - Date.now();
-      const dB = new Date(b.parsed?.date) - Date.now();
-      // Prefer positive daysLeft (not yet expired); among those, soonest first
+      const dA = new Date(a.parsed?.date) - now;
+      const dB = new Date(b.parsed?.date) - now;
       if (dA > 0 && dB <= 0) return -1;
       if (dB > 0 && dA <= 0) return 1;
-      if (Math.abs(dA - dB) > 86_400_000) return dA - dB; // >1 day apart: soonest first
-      return (b.edge || 0) - (a.edge || 0);               // same day: highest edge first
+      if (Math.abs(dA - dB) > 86_400_000) return dA - dB;
+      return (b.edge || 0) - (a.edge || 0);
     });
 
-  const SHOW_OPEN = 8;
-  const open      = allOpen.slice(0, SHOW_OPEN);
-  const hiddenCnt = allOpen.length - open.length;
+  const SHOW_OPEN = 6;
+  const openSlice = allOpen.slice(0, SHOW_OPEN);
+  const pos = [];
+
+  if (openSlice.length) {
+    pos.push(`**OPEN (${allOpen.length} total)**`);
+    for (const t of openSlice) {
+      const daysLeft = ((new Date(t.parsed?.date) - now) / 86_400_000).toFixed(1);
+      const icon     = t.side === 'yes' ? '🟢' : '🔴';
+      const city     = (t.parsed?.city || '').replace(/\b\w/g, c => c.toUpperCase()).slice(0, 14);
+      pos.push(`${icon} **${t.side.toUpperCase()}** ${city} | Edge **${t.edge}%** | ${t.parsed?.date} (${daysLeft}d) | \`${t.id}\``);
+    }
+    if (allOpen.length > SHOW_OPEN) pos.push(`  *…and ${allOpen.length - SHOW_OPEN} more*`);
+  } else {
+    pos.push('**OPEN** — none');
+  }
 
   const recent = trades
     .filter(t => t.signalResult != null)
     .sort((a, b) => new Date(b.firedAt) - new Date(a.firedAt))
-    .slice(0, 6);
-
-  const lines = [];
-
-  if (open.length) {
-    lines.push(`**OPEN WEATHER SIGNALS (${allOpen.length} total — top ${open.length} shown)**`);
-    for (const t of open) {
-      const daysLeft = ((new Date(t.parsed?.date) - Date.now()) / 86_400_000).toFixed(1);
-      const icon     = t.side === 'yes' ? '🟢' : '🔴';
-      lines.push(`${icon} **${t.side.toUpperCase()}** | ${(t.question || '').slice(0, 48)}…`);
-      lines.push(`   Edge **${t.edge}%** | ${t.parsed?.date} (${daysLeft}d) | ${usd(t.betDollars)} suggested`);
-      lines.push(`   \`${t.id}\``);
-    }
-    if (hiddenCnt > 0) {
-      lines.push(`   *...and ${hiddenCnt} more open signals*`);
-    }
-  } else {
-    lines.push('**OPEN SIGNALS** — none');
-  }
+    .slice(0, 5);
 
   if (recent.length) {
-    lines.push('', `**LAST ${recent.length} RESOLVED**`);
+    pos.push('', `**LAST ${recent.length} RESOLVED**`);
     for (const t of recent) {
       const icon   = t.signalResult === 'win' ? '✅' : '❌';
       const pnlStr = t.pnlDollars != null
-        ? (t.pnlDollars >= 0 ? `+${usd(t.pnlDollars)}` : `-${usd(t.pnlDollars)}`)
+        ? (t.pnlDollars >= 0 ? `+$${t.pnlDollars.toFixed(2)}` : `-$${Math.abs(t.pnlDollars).toFixed(2)}`)
         : '?';
-      lines.push(`${icon} ${t.side === 'yes' ? '🟢' : '🔴'} **${t.side.toUpperCase()}** | ${(t.question || '').slice(0, 45)}...`);
-      lines.push(`   **${pnlStr}** | Observed ${t.observedTemp?.toFixed(1)}°F | ${t.parsed?.date}`);
+      const city   = (t.parsed?.city || '').replace(/\b\w/g, c => c.toUpperCase()).slice(0, 14);
+      const obs    = t.observedTemp != null ? ` | obs ${t.observedTemp.toFixed(1)}°F` : '';
+      pos.push(`${icon} ${t.side === 'yes' ? '🟢' : '🔴'} **${t.side.toUpperCase()}** ${city} | **${pnlStr}**${obs} | ${t.parsed?.date}`);
     }
   }
 
-  // Summary stats
-  const resolved = trades.filter(t => t.signalResult != null);
-  if (resolved.length > 0) {
-    const wins     = resolved.filter(t => t.signalResult === 'win');
-    const totalPnl = resolved.reduce((a, t) => a + (t.pnlDollars || 0), 0);
-    const wr       = Math.round(100 * wins.length / resolved.length);
-    lines.push('', `*${resolved.length} resolved — Win rate: ${wr}% | Paper P&L: ${totalPnl >= 0 ? '+' : ''}${usd(totalPnl)}*`);
-    lines.push(`*Use \`!took <id>\` to log a paper entry, \`!exit <id> win|loss\` to close.*`);
-  } else {
-    lines.push('', `*No resolved signals yet — use \`!took <id>\` to log a paper entry.*`);
-  }
+  pos.push('', `*\`!took <id>\` to log entry · \`!exit <id> win|loss\` to close · \`!settle\` to resolve expired*`);
 
-  // Guard: Discord 2000-char limit — truncate gracefully if somehow still too long
-  const msg = lines.join('\n');
-  await api.sendMessage(msg.length <= 1950 ? msg : msg.slice(0, 1947) + '...');
+  await api.sendMessage(pos.join('\n').slice(0, 1950));
 }
 
 // ─── !settle ─────────────────────────────────────────────────────────────────
