@@ -76,7 +76,7 @@ function shortCity(city) {
 
 async function main() {
   const all      = readTrades();
-  const resolved = all.filter(t => t.signalResult === 'win' || t.signalResult === 'loss');
+  const resolved = all.filter(t => (t.signalResult === 'win' || t.signalResult === 'loss') && !t.shadow);
 
   if (resolved.length === 0) {
     log('No resolved trades found — nothing to report');
@@ -165,6 +165,24 @@ async function main() {
 
   if (postBias.count < 10) {
     aLines.push('', `*⏳ Post-correction window is very new — revisit after 2–3 weeks of data.*`);
+  }
+
+  // Shadow YES+range validation section
+  const shadowResolved = all.filter(t => t.shadow && (t.signalResult === 'win' || t.signalResult === 'loss'));
+  const shadowOpen     = all.filter(t => t.shadow && t.outcome === null);
+  if (shadowResolved.length > 0 || shadowOpen.length > 0) {
+    const swins = shadowResolved.filter(t => t.signalResult === 'win').length;
+    const sloss = shadowResolved.length - swins;
+    const swr   = shadowResolved.length > 0 ? swins / shadowResolved.length : null;
+    aLines.push(
+      '',
+      `### 🔬 Shadow YES+range (σ<0.75°F + |bias|<2°F filter)`,
+      `Resolved: **${swins}W/${sloss}L**${swr != null ? ` — ${pct(swr)} WR` : ''}  (n=${shadowResolved.length})${shadowOpen.length > 0 ? `  |  Open: ${shadowOpen.length}` : ''}`,
+      `*Not real trades — validation data for the dual filter. Deploy at ~20 resolved.*`,
+    );
+    if (shadowResolved.length < 20) {
+      aLines.push(`*${20 - shadowResolved.length} more needed before filter activation.*`);
+    }
   }
 
   const bodyA  = aLines.join('\n');

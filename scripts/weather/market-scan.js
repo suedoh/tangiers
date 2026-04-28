@@ -572,6 +572,7 @@ async function main() {
     let bestSide            = null;
     let bestModelProb       = null;
     let bestEffectiveMinEdge = MIN_EDGE;
+    const shadowCandidates  = [];
 
     for (const market of groupMarkets) {
       const { conditionId, parsed: mp } = market;
@@ -599,19 +600,54 @@ async function main() {
       const side = yesEdge >= noEdge ? 'yes' : 'no';
       const edge = Math.max(yesEdge, noEdge);
 
-      // YES+range bets require a higher edge threshold until bias correction is validated —
-      // this category had 10.7% WR pre-correction vs 77.4% for NO+range.
-      const effectiveMinEdge = (side === 'yes' && mp.direction === 'range')
-        ? YES_RANGE_MIN_EDGE
-        : MIN_EDGE;
+      // YES+range: fully blocked (13% WR all-time, structural model-accuracy problem).
+      // Shadow-log candidates meeting the sigma+bias filter for future validation —
+      // zero AI cost, no Discord post, no paper trade.
+      if (side === 'yes' && mp.direction === 'range') {
+        if (forecast.sigmaF < 0.75 && Math.abs(biasCorrF) < 2.0 && yesEdge > MIN_EDGE) {
+          shadowCandidates.push({ market, modelProb, yesEdge });
+        }
+        continue;
+      }
 
       if (edge > bestEdge) {
         bestEdge             = edge;
         bestMarket           = market;
         bestSide             = side;
         bestModelProb        = modelProb;
-        bestEffectiveMinEdge = effectiveMinEdge;
+        bestEffectiveMinEdge = MIN_EDGE;
       }
+    }
+
+    // Write shadow records before checking for a real winner — no AI, no Discord.
+    if (shadowCandidates.length > 0) {
+      for (const sc of shadowCandidates) {
+        const shadowRecord = {
+          id:            `shadow-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          shadow:        true,
+          conditionId:   sc.market.conditionId,
+          question:      sc.market.question,
+          parsed:        sc.market.parsed,
+          eventSlug:     sc.market.eventSlug,
+          side:          'yes',
+          edge:          Math.round(sc.yesEdge * 1000) / 10,
+          yesPrice:      sc.market.yesPrice,
+          noPrice:       sc.market.noPrice,
+          modelProb:     Math.round(sc.modelProb * 1000) / 10,
+          meanF:         forecast.meanF,
+          correctedMeanF,
+          biasCorrF,
+          sigmaF:        forecast.sigmaF,
+          firedAt:       new Date().toISOString(),
+          outcome:       null,
+          signalResult:  null,
+          observedTemp:  null,
+          pnlDollars:    null,
+        };
+        trades.push(shadowRecord);
+        log(`Shadow YES+range: ${sc.market.parsed?.city} σ=${forecast.sigmaF.toFixed(2)}°F bias=${biasCorrF.toFixed(2)}°F edge=${(sc.yesEdge * 100).toFixed(1)}%`);
+      }
+      writeTrades(trades);
     }
 
     if (bestMarket == null || bestEdge < bestEffectiveMinEdge) {

@@ -48,8 +48,8 @@ async function main() {
     new Date(t.firedAt).getTime() > cutoff && t.outcome !== 'superseded'
   );
 
-  const resolved = recent.filter(t => t.signalResult != null);
-  const open     = recent.filter(t => t.outcome === null);
+  const resolved = recent.filter(t => t.signalResult != null && !t.shadow);
+  const open     = recent.filter(t => t.outcome === null && !t.shadow);
   const wins     = resolved.filter(t => t.signalResult === 'win');
   const losses   = resolved.filter(t => t.signalResult === 'loss');
 
@@ -61,7 +61,7 @@ async function main() {
   const avgEdgeLoss = losses.length > 0 ? losses.reduce((a, t) => a + t.edge, 0) / losses.length : null;
 
   // ── Lifetime stats ────────────────────────────────────────────────────────
-  const allResolved = trades.filter(t => t.signalResult != null);
+  const allResolved = trades.filter(t => t.signalResult != null && !t.shadow);
   const allWins     = allResolved.filter(t => t.signalResult === 'win');
   const allPnl      = allResolved.reduce((acc, t) => acc + (t.pnlDollars || 0), 0);
   const allWinRate  = allResolved.length > 0 ? allWins.length / allResolved.length : null;

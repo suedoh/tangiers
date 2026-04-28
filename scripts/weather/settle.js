@@ -198,7 +198,7 @@ async function main() {
       if (trade.meanF != null) {
         trade.modelBiasF = Math.round((observed.value - trade.meanF) * 10) / 10;
       }
-      await postResolutionCard(trade, observed, hit, signalWon);
+      if (!trade.shadow) await postResolutionCard(trade, observed, hit, signalWon);
     } else {
       log(`  ↳ [DRY] would write: outcome=${hit ? 'yes-resolved' : 'no-resolved'} signalResult=${signalWon ? 'win' : 'loss'}`);
     }
@@ -212,8 +212,8 @@ async function main() {
   }
 
   // Summary
-  const wins   = trades.filter(t => t.signalResult === 'win').length;
-  const losses = trades.filter(t => t.signalResult === 'loss').length;
+  const wins   = trades.filter(t => t.signalResult === 'win'  && !t.shadow).length;
+  const losses = trades.filter(t => t.signalResult === 'loss' && !t.shadow).length;
   const total  = wins + losses;
   const wr     = total > 0 ? Math.round(100 * wins / total) : null;
 

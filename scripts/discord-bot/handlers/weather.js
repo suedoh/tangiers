@@ -158,7 +158,7 @@ async function handlePerformance(user, args, api) {
 // ─── !trades ─────────────────────────────────────────────────────────────────
 
 async function handleTrades(user, api) {
-  const trades = readTrades().filter(t => t.outcome !== 'superseded');
+  const trades = readTrades().filter(t => t.outcome !== 'superseded' && !t.shadow);
 
   if (trades.length === 0) {
     await api.sendMessage('📭 No weather signals logged yet — run `!scan` to check for opportunities.');
