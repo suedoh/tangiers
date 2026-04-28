@@ -7,6 +7,7 @@
  *   !scan                       — run market-scan.js immediately
  *   !analyze <url|q>            — deep dive on a specific market or question
  *   !report                     — generate weekly report now
+ *   !performance [--days N]     — deep performance analysis (bias, AI, direction)
  *   !trades                     — list open/recent weather signals
  *   !settle [--force] [--dry] [--id <id>]
  *                               — resolve expired trades via GHCN-Daily / NWS METAR
@@ -25,6 +26,7 @@ const { getMarketPrice }       = require('../../lib/polymarket');
 const SCAN_SCRIPT    = path.join(ROOT, 'scripts', 'weather', 'market-scan.js');
 const ANALYZE_SCRIPT = path.join(ROOT, 'scripts', 'weather', 'analyze.js');
 const REPORT_SCRIPT  = path.join(ROOT, 'scripts', 'weather', 'weekly-report.js');
+const PERF_SCRIPT    = path.join(ROOT, 'scripts', 'weather', 'analyze-performance.js');
 const SETTLE_SCRIPT  = path.join(ROOT, 'scripts', 'weather', 'settle.js');
 const TRADES_FILE    = path.join(ROOT, 'weather-trades.json');
 
@@ -47,6 +49,7 @@ async function handle(message, api) {
   if (/^!scan\b/i.test(text))            { await handleScan(user, api);              return true; }
   if (/^!analyze\b/i.test(text))         { await handleAnalyze(user, text, api);     return true; }
   if (/^!report\b/i.test(text))          { await handleReport(user, api);            return true; }
+  if (/^!performance\b/i.test(text))     { await handlePerformance(user, args, api); return true; }
   if (/^!trades\b/i.test(text))          { await handleTrades(user, api);            return true; }
   if (/^!settle\b/i.test(text))          { await handleSettle(user, text, api);      return true; }
   if (/^!sell\b/i.test(text))            { await handleSell(user, args, api);        return true; }
@@ -126,6 +129,29 @@ async function handleReport(user, api) {
     await api.sendMessage(`❌ **Report failed:** ${err.slice(0, 200)}`);
   } else {
     await api.sendMessage(`✅ **Report posted to #weather-backtest**`);
+  }
+}
+
+// ─── !performance ────────────────────────────────────────────────────────────
+
+async function handlePerformance(user, args, api) {
+  await api.sendTyping();
+
+  const daysIdx = args.indexOf('--days');
+  const days    = daysIdx !== -1 && args[daysIdx + 1] ? args[daysIdx + 1] : '30';
+  const daysNum = parseInt(days, 10);
+  const label   = Number.isFinite(daysNum) && daysNum > 0 ? `${daysNum}-day` : '30-day';
+
+  await api.sendMessage(`📊 **Performance analysis triggered by ${user}** (${label} window)\nCrunching data... (~10s)`);
+
+  const extraArgs = daysIdx !== -1 ? ['--days', days] : [];
+  const result    = spawnSync(NODE, [PERF_SCRIPT, ...extraArgs], { encoding: 'utf8', timeout: 60_000 });
+
+  if (result.error || result.status !== 0) {
+    const err = result.error?.message || result.stderr?.trim() || 'Unknown error';
+    await api.sendMessage(`❌ **Performance analysis failed:** ${err.slice(0, 200)}`);
+  } else {
+    await api.sendMessage(`✅ **Analysis posted to #weather-backtest** (3 embeds)`);
   }
 }
 
@@ -289,7 +315,7 @@ async function handleTrades(user, api) {
     }
   }
 
-  pos.push('', `*\`!took <id>\` to log entry · \`!sell <id>\` to exit at live price · \`!exit <id> win|loss\` to close · \`!settle\` to resolve expired*`);
+  pos.push('', `*\`!took <id>\` to log entry · \`!sell <id>\` to exit at live price · \`!exit <id> win|loss\` to close · \`!settle\` to resolve expired · \`!performance\` for deep analysis*`);
 
   await api.sendMessage(pos.join('\n').slice(0, 1950));
 }
