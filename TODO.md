@@ -37,8 +37,7 @@ Outstanding tasks grouped by priority. Check README.md for phase status and desi
 ## Low Priority / Future
 
 - [ ] `exit-monitor.js` — currently runs inside `market-scan.js` per cycle. Consider moving to a standalone Task Scheduler entry (every 5 min) for faster early-exit detection on live positions.
-- [ ] MongoDB migration — weathermen is on the roadmap for Phase 2 of the main branch MongoDB migration. Add instrument to `scripts/migrate/import-trades.js` before merging to main so all weather trades land in the DB from day one.
-- [ ] Weekly war report — add a `weekly-war-report.js` for Weathermen (similar to BZ! war report) that covers the coming week's forecast landscape: which cities have highest model uncertainty, which markets are already open with thin liquidity.
+- [ ] Weekly war report — add a `weekly-war-report.js` that covers the coming week's forecast landscape: which cities have highest model uncertainty, which markets are already open with thin liquidity.
 - [ ] Backtesting harness — replay `weather-trades.json` against different edge thresholds, Kelly fractions, and city blocklists without running live scans. Useful before Phase B tuning.
 
 ---
