@@ -200,6 +200,18 @@ Use \`manual\` if closing early. Use \`!sell\` instead if you want the bot to fe
 Generate the weekly P&L summary right now instead of waiting for Sunday.
 Posts to #weather-backtest: win rate, edge-tier breakdown, city breakdown, open positions.
 
+\`\`\`
+!performance
+!performance --days 7
+!performance --days 14
+\`\`\`
+Deep performance analysis — goes beyond the weekly report. Posts 3 embeds to #weather-backtest covering:
+• **Recent vs historical** win rate and P&L comparison
+• **Bias correction impact** — pre vs post 2026-04-27 win rates for high-bias cities and YES+range bets
+• **AI filter calibration** — confidence bucket breakdown, flag performance, full-size vs reduced trade WR
+• **Direction & side breakdown** — above/below/range × YES/NO combos, worst cities by WR
+Default window is 30 days. Pass \`--days N\` for a shorter comparison window.
+
 ## 🔧 Settlement
 
 \`\`\`
