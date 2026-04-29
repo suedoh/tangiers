@@ -36,8 +36,9 @@ const RECENT_DAYS = (() => {
 })();
 
 // Dates when key changes landed
-const BIAS_CUTOFF = new Date('2026-04-27T00:00:00Z');
-const AI_CUTOFF   = new Date('2026-04-23T00:00:00Z');
+const BIAS_CUTOFF   = new Date('2026-04-27T00:00:00Z');
+const AI_CUTOFF     = new Date('2026-04-23T00:00:00Z');
+const YES_BLOCK_DATE = new Date('2026-04-28T00:00:00Z'); // YES+above + YES+range blocked
 
 // High-bias cities (|bias| ≥ 3°F) — where correction matters most
 const HIGH_BIAS_CITIES = new Set([
@@ -204,6 +205,41 @@ async function main() {
   }
   if (!anyShadow) {
     // No shadow records yet — nothing to show
+  }
+
+  // Post-block era: signals fired after YES bets were blocked (2026-04-28)
+  // Temporary section — remove after ~1 week of data accumulates
+  const postBlock  = all.filter(t => !t.shadow && new Date(t.firedAt) >= YES_BLOCK_DATE);
+  const pbResolved = postBlock.filter(t => t.signalResult === 'win' || t.signalResult === 'loss');
+  const pbOpen     = postBlock.filter(t => t.outcome === null);
+  const pbTrack    = calcTrack(pbResolved);
+
+  aLines.push('', `### 📵 Post-Block Era (since 2026-04-28 — NO bets only)`);
+  if (postBlock.length === 0) {
+    aLines.push('*No signals fired yet since YES bets were blocked.*');
+  } else {
+    aLines.push(
+      `Signals fired: **${postBlock.length}** (${pbResolved.length} resolved, ${pbOpen.length} open)`,
+      `Win / Loss:    **${pbTrack.wins}W / ${pbTrack.losses}L**${pbTrack.winRate != null ? ` — **${pct(pbTrack.winRate)} WR**` : ''}`,
+      `Paper P&L:     **${usd(pbTrack.totalPnl)}**`,
+    );
+    const comboLines = [];
+    for (const side of ['no', 'yes']) {
+      for (const dir of ['above', 'below', 'range']) {
+        const g = pbResolved.filter(t => t.side === side && t.parsed?.direction === dir);
+        if (g.length === 0) continue;
+        const tk   = calcTrack(g);
+        const icon = tk.winRate != null && tk.winRate >= 0.55 ? '✅' : (tk.winRate != null && tk.winRate >= 0.45 ? '⚠️' : '❌');
+        comboLines.push(`  ${icon} **${side.toUpperCase()}+${dir.padEnd(6)}** ${tk.wins}W/${tk.losses}L — ${pct(tk.winRate)} WR  (n=${tk.count})`);
+      }
+    }
+    if (comboLines.length > 0) {
+      aLines.push('', '**By type:**');
+      aLines.push(...comboLines);
+    }
+    if (pbResolved.length < 10) {
+      aLines.push(`*⏳ Low sample (n=${pbResolved.length}) — check back in a few days.*`);
+    }
   }
 
   const bodyA  = aLines.join('\n');
