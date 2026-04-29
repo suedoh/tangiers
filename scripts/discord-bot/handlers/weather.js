@@ -155,6 +155,26 @@ async function handlePerformance(user, args, api) {
   }
 }
 
+// ─── Live order status tag ────────────────────────────────────────────────────
+
+function liveOrderTag(lo) {
+  if (!lo) return '';
+  switch (lo.status) {
+    case 'dry_run':       return ' `[DRY RUN]`';
+    case 'open':          return ` 🔴 LIVE open @ ${lo.limitPrice}`;
+    case 'filled': {
+      const pnlStr = lo.livePnlDollars != null
+        ? (lo.livePnlDollars >= 0 ? ` +$${lo.livePnlDollars.toFixed(2)}` : ` -$${Math.abs(lo.livePnlDollars).toFixed(2)}`)
+        : '';
+      return ` 🔴 LIVE filled $${lo.filledDollars?.toFixed(2) ?? '?'} @ ${lo.limitPrice}${pnlStr}`;
+    }
+    case 'partial_expired': return ` 🔴 LIVE partial ${lo.filledShares ?? 0}sh`;
+    case 'cancelled':     return ' 🔴 LIVE cancelled';
+    case 'error':         return ' 🔴 LIVE error';
+    default:              return '';
+  }
+}
+
 // ─── !trades ─────────────────────────────────────────────────────────────────
 
 async function handleTrades(user, api) {
@@ -290,7 +310,8 @@ async function handleTrades(user, api) {
       const daysLeft = ((new Date(t.parsed?.date) - now) / 86_400_000).toFixed(1);
       const icon     = t.side === 'yes' ? '🟢' : '🔴';
       const city     = (t.parsed?.city || '').replace(/\b\w/g, c => c.toUpperCase()).slice(0, 14);
-      pos.push(`${icon} **${t.side.toUpperCase()}** ${city} | Edge **${t.edge}%** | ${t.parsed?.date} (${daysLeft}d) | \`${t.id}\``);
+        const liveTag = t.liveOrder ? liveOrderTag(t.liveOrder) : '';
+      pos.push(`${icon} **${t.side.toUpperCase()}** ${city} | Edge **${t.edge}%** | ${t.parsed?.date} (${daysLeft}d)${liveTag} | \`${t.id}\``);
     }
     if (allOpen.length > SHOW_OPEN) pos.push(`  *…and ${allOpen.length - SHOW_OPEN} more*`);
   } else {
@@ -311,7 +332,8 @@ async function handleTrades(user, api) {
         : '?';
       const city   = (t.parsed?.city || '').replace(/\b\w/g, c => c.toUpperCase()).slice(0, 14);
       const obs    = t.observedTemp != null ? ` | obs ${t.observedTemp.toFixed(1)}°F` : '';
-      pos.push(`${icon} ${t.side === 'yes' ? '🟢' : '🔴'} **${t.side.toUpperCase()}** ${city} | **${pnlStr}**${obs} | ${t.parsed?.date}`);
+      const liveTag = t.liveOrder ? liveOrderTag(t.liveOrder) : '';
+      pos.push(`${icon} ${t.side === 'yes' ? '🟢' : '🔴'} **${t.side.toUpperCase()}** ${city} | **${pnlStr}**${obs}${liveTag} | ${t.parsed?.date}`);
     }
   }
 
@@ -527,6 +549,11 @@ async function handleSell(user, args, api) {
   const edgeStr      = edgeFraction != null ? `${edgeFraction}% of original` : 'N/A';
   const resolvesStr  = trade.parsed?.date || '?';
 
+  const lo = trade.liveOrder;
+  const liveLine = lo?.status === 'filled' && lo.livePnlDollars != null
+    ? `🔴 Live P&L: **${lo.livePnlDollars >= 0 ? '+' : ''}$${lo.livePnlDollars.toFixed(2)}** (filled $${lo.filledDollars?.toFixed(2) ?? '?'} @ ${lo.limitPrice})`
+    : lo ? `🔴 Live order: ${lo.status}` : null;
+
   const card = [
     `${icon} **PAPER POSITION SOLD${dry ? ' — DRY RUN' : ''} — ${signalResult.toUpperCase()}**`,
     `*${(trade.question || '').slice(0, 90)}*`,
@@ -534,6 +561,7 @@ async function handleSell(user, args, api) {
     `Side: **${trade.side.toUpperCase()}** | Entry: **${pct(entryPrice)}** → Exit: **${pct(currentPrice)}**`,
     `Shares: ${shares.toFixed(2)} contracts × ${pct(currentPrice)} = $${saleValue.toFixed(2)}`,
     `P&L: **${pnlStr}** | Edge captured: **${edgeStr}**`,
+    ...(liveLine ? [liveLine] : []),
     '',
     `⏱️ Resolves: ${resolvesStr} | Closed by: ${user}`,
     `\`ID: ${tradeId}\``,

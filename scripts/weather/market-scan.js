@@ -63,6 +63,12 @@ const MIN_VOLUME    = parseFloat(process.env.WEATHER_MIN_VOLUME || '200');   // 
 const BANKROLL      = parseFloat(process.env.WEATHER_BANKROLL   || '500');   // paper bankroll
 const KELLY_FRAC    = parseFloat(process.env.WEATHER_KELLY_FRAC || '0.15');
 const MAX_BET       = parseFloat(process.env.WEATHER_MAX_BET    || '100');
+
+// ─── Live execution config ─────────────────────────────────────────────────────
+const LIVE_EXECUTE  = process.env.POLYMARKET_EXECUTE_ORDERS === 'true';
+const LIVE_BANKROLL = parseFloat(process.env.POLYMARKET_LIVE_BANKROLL  || '100');
+const LIVE_MAX_BET  = parseFloat(process.env.POLYMARKET_MAX_LIVE_BET   || '10');
+const LIVE_TTL_MS   = (+process.env.POLYMARKET_ORDER_TTL_S || 1800) * 1000;
 const COOLDOWN_MS   = 4 * 60 * 60 * 1000; // 4 hours between signals on same market
 
 // Cities excluded from signal generation.
@@ -832,6 +838,48 @@ async function main() {
     }
     trades.push(tradeRecord);
     writeTrades(trades);
+
+    // ── Live order execution: NO+Range only ────────────────────────────────────
+    if (LIVE_EXECUTE && bestSide === 'no' && mp.direction === 'range') {
+      const { placeNoOrder, pollOrderFill } = require('../lib/polymarket-orders');
+      const noToken = (bestMarket.tokens || []).find(t => /^no$/i.test(t.outcome));
+      if (noToken) {
+        const liveKelly  = kellySizing(bestModelProb, bestMarket.yesPrice, 'no', LIVE_BANKROLL, KELLY_FRAC, LIVE_MAX_BET);
+        const liveDollars = liveKelly.dollars;
+        if (liveDollars > 0) {
+          (async () => {
+            try {
+              const result = await placeNoOrder(conditionId, noToken.token_id, bestMarket.noPrice, liveDollars);
+              // Merge liveOrder into the trade record we just pushed
+              const liveIdx = trades.findIndex(t => t.id === id);
+              if (liveIdx !== -1) {
+                trades[liveIdx].liveOrder = result.liveOrder;
+                writeTrades(trades);
+              }
+              const isDryRun = process.env.POLYMARKET_DRY_RUN === 'true';
+              const tag      = isDryRun ? '[DRY RUN] ' : '';
+              const statusLine = result.liveOrder.status === 'error'
+                ? `❌ Order error: ${result.liveOrder.error}`
+                : `✅ ${tag}NO limit buy — ${liveDollars} USD @ ${result.liveOrder.limitPrice} | orderId: \`${result.liveOrder.orderId}\``;
+              await postWebhook(
+                SIGNALS_HOOK, 'short',
+                `🔴 **LIVE ORDER PLACED** | \`${id}\`\n${bestMarket.question.slice(0, 100)}\n${statusLine}`,
+                `Weather • Live • ${mp.date}`
+              );
+              // Fire-and-forget fill polling (non-blocking)
+              if (result.liveOrder.status === 'open') {
+                setImmediate(() => pollOrderFill(id, result.liveOrder.orderId, LIVE_TTL_MS));
+              }
+            } catch (err) {
+              console.error(`[market-scan] live order failed for ${id}:`, err.message);
+            }
+          })();
+        }
+      } else {
+        log(`${id}: NO token not found in bestMarket.tokens — skipping live order`);
+      }
+    }
+    // ──────────────────────────────────────────────────────────────────────────
 
     if (!state.cooldowns) state.cooldowns = {};
     state.cooldowns[conditionId] = now;
