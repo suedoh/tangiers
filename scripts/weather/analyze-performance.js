@@ -143,13 +143,13 @@ async function main() {
   // Bias correction block
   aLines.push('', `### 📐 Bias Correction Impact (since 2026-04-27)`);
 
-  const preBias  = preCorrection.filter(t => HIGH_BIAS_CITIES.has(t.parsed?.city));
-  const postBias = postCorrection.filter(t => HIGH_BIAS_CITIES.has(t.parsed?.city));
-  const pbTrack  = calcTrack(preBias);
-  const poBTrack = calcTrack(postBias);
+  const preBias      = preCorrection.filter(t => HIGH_BIAS_CITIES.has(t.parsed?.city));
+  const postBias     = postCorrection.filter(t => HIGH_BIAS_CITIES.has(t.parsed?.city));
+  const preBiasTrack = calcTrack(preBias);
+  const poBTrack     = calcTrack(postBias);
 
   aLines.push(
-    `High-bias cities pre:   **${pbTrack.wins}W/${pbTrack.losses}L** — ${pct(pbTrack.winRate)} WR  (n=${pbTrack.count})`,
+    `High-bias cities pre:   **${preBiasTrack.wins}W/${preBiasTrack.losses}L** — ${pct(preBiasTrack.winRate)} WR  (n=${preBiasTrack.count})`,
     `High-bias cities post:  **${poBTrack.wins}W/${poBTrack.losses}L** — ${pct(poBTrack.winRate)} WR  (n=${poBTrack.count})${poBTrack.count < 10 ? ' ⚠️ low N' : ''}`,
   );
 
