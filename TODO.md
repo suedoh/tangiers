@@ -7,7 +7,8 @@ Outstanding tasks grouped by priority. Check README.md for phase status and desi
 ## Active / High Priority
 
 ### Phase A completion
-- [ ] Reach 20+ resolved shadow YES+range trades under the dual filter (`sigmaF < 0.75°F AND |biasCorrection| < 2.0°F`) — currently tracking silently via shadow records in `weather-trades.json`. Run `!performance` to see progress.
+- [ ] Reach 20+ resolved shadow YES+range trades under the dual filter (`sigmaF < 0.75°F AND |biasCorrection| < 2.0°F`) — currently tracking silently. Run `!performance` → 🔬 section to see progress.
+- [ ] Reach 20+ resolved shadow YES+above trades under the dual filter (`sigmaF < 1.5°F AND biasCorrF > -2.0°F`) — same shadow pipeline. 78% WR on n=9 historical; validate before activating.
 - [ ] Validate bias corrections have converged: run `!report` to recalibrate, then check `bias-corrections.json` — Houston and Dallas are missing (fewer than 5 resolved trades each).
 - [ ] Consider blocking Jeddah (~14% WR) and Milan (~27% WR) once sample size crosses 10 trades each — add to `BLOCKED_CITIES` in `market-scan.js` with documented reason.
 
@@ -19,10 +20,10 @@ Outstanding tasks grouped by priority. Check README.md for phase status and desi
 
 ## Medium Priority
 
-### YES+range filter activation (future)
-- [ ] When shadow YES+range resolved count reaches ~20, run `!performance` and review the 🔬 Shadow section WR.
-- [ ] If WR ≥ 55% at n≥20: implement the gate in `market-scan.js` — replace the hard block with `if (sigmaF < 0.75 && Math.abs(biasCorrection) < 2.0)` condition.
-- [ ] Add `sigmaF` and `biasCorrF` fields to the Discord signal card for transparency.
+### Shadow filter activation (future)
+- [ ] **YES+range**: when shadow resolved count reaches ~20, check `!performance` 🔬 section. If WR ≥ 55%: replace the hard block in `market-scan.js` with `if (sigmaF < 0.75 && Math.abs(biasCorrF) < 2.0)` gate.
+- [ ] **YES+above**: same process. If WR ≥ 60% at n≥20: replace block with `if (sigmaF < 1.5 && biasCorrF > -2.0)` gate. Historical data shows 78% WR on n=9 — promising but needs validation.
+- [ ] Add `sigmaF` and `biasCorrF` fields to the Discord signal card so they're visible at signal time.
 
 ### Stage 2 deep analysis (Sonnet)
 - [ ] Currently gated behind `WEATHER_DEEP_ANALYSIS=false`. Enable only after Phase B activation and when API credits support it.

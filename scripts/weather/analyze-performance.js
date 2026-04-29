@@ -167,22 +167,43 @@ async function main() {
     aLines.push('', `*⏳ Post-correction window is very new — revisit after 2–3 weeks of data.*`);
   }
 
-  // Shadow YES+range validation section
-  const shadowResolved = all.filter(t => t.shadow && (t.signalResult === 'win' || t.signalResult === 'loss'));
-  const shadowOpen     = all.filter(t => t.shadow && t.outcome === null);
-  if (shadowResolved.length > 0 || shadowOpen.length > 0) {
-    const swins = shadowResolved.filter(t => t.signalResult === 'win').length;
-    const sloss = shadowResolved.length - swins;
-    const swr   = shadowResolved.length > 0 ? swins / shadowResolved.length : null;
+  // Shadow validation sections — YES+range and YES+above tracked separately
+  const shadowSections = [
+    {
+      direction: 'range',
+      label:     'YES+range',
+      filter:    'σ<0.75°F + |bias|<2°F',
+      target:    20,
+    },
+    {
+      direction: 'above',
+      label:     'YES+above',
+      filter:    'σ<1.5°F + bias>-2°F',
+      target:    20,
+    },
+  ];
+
+  let anyShadow = false;
+  for (const sec of shadowSections) {
+    const secResolved = all.filter(t => t.shadow && t.parsed?.direction === sec.direction && (t.signalResult === 'win' || t.signalResult === 'loss'));
+    const secOpen     = all.filter(t => t.shadow && t.parsed?.direction === sec.direction && t.outcome === null);
+    if (secResolved.length === 0 && secOpen.length === 0) continue;
+    anyShadow = true;
+    const swins = secResolved.filter(t => t.signalResult === 'win').length;
+    const sloss = secResolved.length - swins;
+    const swr   = secResolved.length > 0 ? swins / secResolved.length : null;
     aLines.push(
       '',
-      `### 🔬 Shadow YES+range (σ<0.75°F + |bias|<2°F filter)`,
-      `Resolved: **${swins}W/${sloss}L**${swr != null ? ` — ${pct(swr)} WR` : ''}  (n=${shadowResolved.length})${shadowOpen.length > 0 ? `  |  Open: ${shadowOpen.length}` : ''}`,
-      `*Not real trades — validation data for the dual filter. Deploy at ~20 resolved.*`,
+      `### 🔬 Shadow ${sec.label} (${sec.filter})`,
+      `Resolved: **${swins}W/${sloss}L**${swr != null ? ` — ${pct(swr)} WR` : ''}  (n=${secResolved.length})${secOpen.length > 0 ? `  |  Open: ${secOpen.length}` : ''}`,
+      `*Not real trades — validation data. Deploy at ~${sec.target} resolved.*`,
     );
-    if (shadowResolved.length < 20) {
-      aLines.push(`*${20 - shadowResolved.length} more needed before filter activation.*`);
+    if (secResolved.length < sec.target) {
+      aLines.push(`*${sec.target - secResolved.length} more needed before filter activation.*`);
     }
+  }
+  if (!anyShadow) {
+    // No shadow records yet — nothing to show
   }
 
   const bodyA  = aLines.join('\n');

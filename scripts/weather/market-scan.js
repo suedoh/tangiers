@@ -610,6 +610,15 @@ async function main() {
         continue;
       }
 
+      // YES+above: fully blocked (44% WR all-time; 11% WR when σ≥1.5°F or bias<-2°F).
+      // Shadow-log candidates meeting σ<1.5°F AND bias>-2°F — 78% WR on n=9 trades.
+      if (side === 'yes' && mp.direction === 'above') {
+        if (forecast.sigmaF < 1.5 && biasCorrF > -2.0 && yesEdge > MIN_EDGE) {
+          shadowCandidates.push({ market, modelProb, yesEdge });
+        }
+        continue;
+      }
+
       if (edge > bestEdge) {
         bestEdge             = edge;
         bestMarket           = market;
@@ -645,7 +654,7 @@ async function main() {
           pnlDollars:    null,
         };
         trades.push(shadowRecord);
-        log(`Shadow YES+range: ${sc.market.parsed?.city} σ=${forecast.sigmaF.toFixed(2)}°F bias=${biasCorrF.toFixed(2)}°F edge=${(sc.yesEdge * 100).toFixed(1)}%`);
+        log(`Shadow YES+${sc.market.parsed?.direction}: ${sc.market.parsed?.city} σ=${forecast.sigmaF.toFixed(2)}°F bias=${biasCorrF.toFixed(2)}°F edge=${(sc.yesEdge * 100).toFixed(1)}%`);
       }
       writeTrades(trades);
     }
