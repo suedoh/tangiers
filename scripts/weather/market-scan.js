@@ -69,7 +69,8 @@ const LIVE_EXECUTE   = process.env.POLYMARKET_EXECUTE_ORDERS === 'true';
 const LIVE_BANKROLL  = parseFloat(process.env.POLYMARKET_LIVE_BANKROLL  || '100');
 const LIVE_MAX_BET   = parseFloat(process.env.POLYMARKET_MAX_LIVE_BET   || '10');
 const LIVE_TTL_MS    = (+process.env.POLYMARKET_ORDER_TTL_S || 1800) * 1000;
-const LIVE_MIN_BALANCE = parseFloat(process.env.POLYMARKET_MIN_BALANCE  || '20');
+const LIVE_MIN_BALANCE  = parseFloat(process.env.POLYMARKET_MIN_BALANCE   || '20');
+const LIVE_MIN_PROFIT   = parseFloat(process.env.POLYMARKET_MIN_WIN_PROFIT || '2.00');
 const COOLDOWN_MS   = 4 * 60 * 60 * 1000; // 4 hours between signals on same market
 
 // Cities excluded from signal generation.
@@ -861,12 +862,30 @@ async function main() {
             `Weather • Live • ${mp.date}`
           );
         } else {
-          const liveKelly   = kellySizing(bestModelProb, bestMarket.yesPrice, 'no', LIVE_BANKROLL, KELLY_FRAC, LIVE_MAX_BET);
-          const liveDollars = Math.min(
+          const liveKelly  = kellySizing(bestModelProb, bestMarket.yesPrice, 'no', LIVE_BANKROLL, KELLY_FRAC, LIVE_MAX_BET);
+          const kellyDollars = Math.min(
             Math.round(liveKelly.dollars * (aiAnalysis.sizeMultiplier ?? 1) * 100) / 100,
-            available - LIVE_MIN_BALANCE  // never commit the reserve
+            available - LIVE_MIN_BALANCE
           );
-          if (liveDollars > 0) {
+
+          // Minimum win profit check: at current noPrice, what would we win?
+          // If below LIVE_MIN_PROFIT, scale up to the minimum required bet.
+          // If that exceeds LIVE_MAX_BET or available capital, skip the trade.
+          const noPrice         = bestMarket.noPrice;
+          const minRequiredBet  = Math.ceil(LIVE_MIN_PROFIT * noPrice / (1 - noPrice) * 100) / 100;
+          const liveDollars     = Math.max(kellyDollars, minRequiredBet);
+          const estWinProfit    = Math.round(liveDollars * (1 - noPrice) / noPrice * 100) / 100;
+
+          if (estWinProfit < LIVE_MIN_PROFIT || liveDollars > LIVE_MAX_BET || liveDollars > available - LIVE_MIN_BALANCE) {
+            log(`${id}: live order skipped — est. win $${estWinProfit} < min $${LIVE_MIN_PROFIT} even at $${liveDollars} (NO price ${(noPrice * 100).toFixed(0)}¢)`);
+            await postWebhook(
+              SIGNALS_HOOK, 'info',
+              `📉 **LIVE ORDER SKIPPED — POOR R:R** | \`${id}\`\n` +
+              `NO price: **${(noPrice * 100).toFixed(0)}¢** | Would need **$${minRequiredBet}** to win $${LIVE_MIN_PROFIT}\n` +
+              `Cap: $${LIVE_MAX_BET} | Available: $${(available - LIVE_MIN_BALANCE).toFixed(2)} | Paper signal still active.`,
+              `Weather • Live • ${mp.date}`
+            );
+          } else if (liveDollars > 0) {
             (async () => {
               try {
                 const result = await placeNoOrder(conditionId, noToken.token_id, bestMarket.noPrice, liveDollars);
