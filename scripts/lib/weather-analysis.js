@@ -69,7 +69,18 @@ function buildPrompt(signal) {
     ? (ensembleSpread / sigmaF).toFixed(2)
     : null;
 
-  return `You are a Polymarket weather market analyst. The quant model has already found an edge. Your job is to assess setup quality and decide whether to take, reduce, or skip.
+  // Compute distance from mean to range center — the primary predictive feature for NO+range
+  const rangeCenterStr = signal.thresholdHighF != null && meanF != null
+    ? (() => {
+        const center = (signal.thresholdF + signal.thresholdHighF) / 2;
+        const dist   = Math.abs(meanF - center);
+        return `Range center: ${center.toFixed(1)}°F | Mean→center distance: ${dist.toFixed(1)}°F`;
+      })()
+    : null;
+
+  return `You are a Polymarket weather market analyst. A quant model found a statistical edge. Your job is NOT to confirm it — your job is to find reasons to REDUCE or SKIP.
+
+Target filter rate: skip ~5–10% of signals, reduce ~20–25%. If you are approving everything, you are not doing your job.
 
 SIGNAL:
 Market: "${question}"
@@ -78,43 +89,48 @@ Edge: ${(edge * 100).toFixed(1)}% | Market price: ${(marketPrice * 100).toFixed(
 
 TEMPERATURE FORECAST:
 Model mean: ${meanF != null ? meanF.toFixed(1) : 'N/A'}°F | Model σ: ${sigmaF.toFixed(1)}°F
-GFS ensemble: spread=${spreadStr}°F | members=${membersStr} | on-side=${sideStr}${sigmaRatio != null ? ` | spread/σ ratio=${sigmaRatio}` : ''}
+${rangeCenterStr != null ? rangeCenterStr + '\n' : ''}GFS ensemble: spread=${spreadStr}°F | members=${membersStr} | on-side=${sideStr}
 Historical mean (same date): ${histMeanStr}°F | Threshold sits at ${percStr}
 Days to resolution: ${daysStr}
 Sources: ${Array.isArray(sources) ? sources.join(', ') : 'N/A'}
 
-EVALUATION CRITERIA:
-1. CONVICTION — Is σ tight enough that the edge is meaningful?
-   σ < 2°F = high conviction. 2–4°F = moderate. >4°F = low.
+EVALUATION CRITERIA — look for reasons to reduce or skip:
 
-2. DISTRIBUTION INTEGRITY — Does the ensemble spread support the Normal CDF assumption?
-   spread/σ ≈ 1.0 = consistent. Ratio >1.5 = possible bimodal distribution where Normal CDF misfires.
-   A high on-side member count (e.g. 26/30) is more reliable than a ratio alone.
+1. MEAN-TO-RANGE DISTANCE (primary criterion for NO+range bets)
+   Empirically validated on 173 resolved NO+range trades:
+   distance ≥ 5°F  → 94% WR — take at full size
+   distance 3–5°F  → 82–89% WR — take, minor concern
+   distance 2–3°F  → 91% WR but watch σ — take with small trim if σ > 2°F
+   distance < 2°F  → 80% WR, model mean is near the range — REDUCE (0.5×)
+   distance < 1°F  → model mean is inside or touching the range — SKIP
 
-3. THRESHOLD POSITION — Where does the bucket sit in history?
-   Thresholds in the top or bottom 15% are harder to price and more susceptible to model error at tails.
+2. FORECAST STABILITY — Does the ensemble actually agree?
+   on-side members < 20/31 → meaningful dissent, trim to 0.75×
+   on-side members < 15/31 → majority of ensemble disagrees — REDUCE (0.5×)
+   spread > 5°F at ≤2 days → pattern unsettled, trim to 0.75×
 
-4. TIME WINDOW — How reliable is the forecast?
-   0–2 days: high accuracy. 3–5 days: moderate. >5 days: low, edge likely noise.
+3. EDGE QUALITY — Is this a structural edge or noise?
+   Edge > 40% is suspicious — quant model may be miscalculating. REDUCE (0.5×) unless on-side ≥ 26/31.
+   Edge 8–10% with distance < 3°F → marginal setup, insufficient cushion — SKIP.
 
-5. EDGE QUALITY — Is this a well-priced mispricing or just model noise?
-   Large edges (>20%) at >4 days out are often model artifacts, not real opportunity.
+4. THRESHOLD EXTREMITY — Tail outcomes are harder to price
+   Threshold in top or bottom 5% historically (percStr) → elevated model error risk, trim to 0.75×.
 
 Respond with ONLY valid JSON (no markdown, no extra text):
 {
   "decision": "take" | "reduce" | "skip",
   "confidence": <0.0–1.0>,
   "sizeMultiplier": 1.0 | 0.75 | 0.5 | 0.25,
-  "reasoning": "<one sentence for the trader, max 120 chars>",
-  "flags": ["high_conviction" | "wide_uncertainty" | "extreme_threshold" | "bimodal_risk" | "far_out" | "short_runway" | "tail_risk" | "strong_ensemble"]
+  "reasoning": "<one sentence for the trader citing the specific factor, max 120 chars>",
+  "flags": ["high_conviction" | "mean_near_range" | "mean_far_from_range" | "weak_ensemble" | "strong_ensemble" | "extreme_threshold" | "high_edge_suspicious" | "marginal_edge" | "settled_pattern" | "unsettled_pattern"]
 }
 
 sizeMultiplier rules:
-- 1.0  → take at full Kelly (high conviction, tight spread, reliable window)
-- 0.75 → take with modest trim (good setup with minor concern)
-- 0.5  → reduce (edge real but setup has structural weakness)
-- 0.25 → minimal position (proceed with caution — significant uncertainty)
-- skip → set decision to "skip" (sizeMultiplier ignored); use when Normal CDF assumption breaks down, edge is >4 days and >20%, or spread/σ ratio is very high without strong on-side consensus`;
+- 1.0  → mean ≥ 3°F from range, ensemble agrees, edge 10–30% — strong setup
+- 0.75 → one minor concern (slight ensemble dissent, or edge >35%, or tail threshold)
+- 0.5  → mean < 2°F from range, OR ensemble majority disagrees, OR edge >40%
+- 0.25 → multiple concerns but edge is real — hold minimal position
+- skip → mean inside/touching range, OR edge 8–10% with mean < 3°F from range`;
 }
 
 // ─── API call ─────────────────────────────────────────────────────────────────
