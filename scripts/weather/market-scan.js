@@ -627,6 +627,12 @@ async function main() {
         continue;
       }
 
+      // NO+below: fully blocked (14% WR across 14 trades — model consistently wrong on
+      // below-threshold NO bets; market pricing of cold extremes is more reliable than GFS).
+      if (side === 'no' && mp.direction === 'below') {
+        continue;
+      }
+
       if (edge > bestEdge) {
         bestEdge             = edge;
         bestMarket           = market;
