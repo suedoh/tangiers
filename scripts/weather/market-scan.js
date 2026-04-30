@@ -844,8 +844,8 @@ async function main() {
       const { placeNoOrder, pollOrderFill } = require('../lib/polymarket-orders');
       const noToken = (bestMarket.tokens || []).find(t => /^no$/i.test(t.outcome));
       if (noToken) {
-        const liveKelly  = kellySizing(bestModelProb, bestMarket.yesPrice, 'no', LIVE_BANKROLL, KELLY_FRAC, LIVE_MAX_BET);
-        const liveDollars = liveKelly.dollars;
+        const liveKelly   = kellySizing(bestModelProb, bestMarket.yesPrice, 'no', LIVE_BANKROLL, KELLY_FRAC, LIVE_MAX_BET);
+        const liveDollars = Math.round(liveKelly.dollars * (aiAnalysis.sizeMultiplier ?? 1) * 100) / 100;
         if (liveDollars > 0) {
           (async () => {
             try {
