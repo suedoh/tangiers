@@ -170,7 +170,16 @@ async function checkReactions({ id: channelId, prefix }) {
     try {
       reactors = await discordRequest('GET', `/channels/${channelId}/messages/${entry.id}/reactions/${REACT_ENC}?limit=5`);
     } catch(e) {
+      // Network or JSON-parse error — mark deleted messages as analyzed to stop retrying
       if (e.message?.includes('10008') || e.message?.includes('404')) { entry.analyzed = true; changed = true; }
+      continue;
+    }
+
+    // discordRequest resolves (not rejects) with Discord error JSON on HTTP 404/10008.
+    // Detect "Unknown Message" (deleted) and stop tracking it.
+    if (reactors?.code === 10008 || reactors?.code === 404) {
+      entry.analyzed = true;
+      changed = true;
       continue;
     }
 

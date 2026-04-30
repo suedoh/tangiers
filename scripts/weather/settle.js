@@ -47,8 +47,8 @@ const BACKTEST_HOOK = resolveWebhook('WEATHER_DISCORD_BACKTEST_WEBHOOK');
 const BUFFER_MS = FORCE ? 6 * 3_600_000 : 24 * 3_600_000;
 
 function log(msg) { console.log(`[${new Date().toISOString()}] [settle] ${msg}`); }
-function readTrades()   { try { return JSON.parse(fs.readFileSync(TRADES_FILE, 'utf8')); } catch { return []; } }
-function writeTrades(t) { fs.writeFileSync(TRADES_FILE, JSON.stringify(t, null, 2)); }
+function readTrades()   { try { return JSON.parse(fs.readFileSync(TRADES_FILE, 'utf8')); } catch (e) { console.error('[settle] readTrades error:', e.message); return []; } }
+function writeTrades(t) { try { fs.writeFileSync(TRADES_FILE, JSON.stringify(t, null, 2)); } catch (e) { console.error('[settle] writeTrades error:', e.message); } }
 function pct(v)  { return v != null ? (v * 100).toFixed(1) + '%' : 'N/A'; }
 function usd(v)  { return v != null ? '$' + Math.abs(v).toFixed(2) : '?'; }
 function fToC(f) { return (f - 32) * 5 / 9; }
@@ -207,8 +207,11 @@ async function main() {
   }
 
   if (!DRY && resolved > 0) {
-    writeTrades(trades);
-    log(`Wrote ${resolved} resolution(s) to weather-trades.json`);
+    // Remove resolved shadow trades — they've served their tracking purpose and shouldn't accumulate
+    const toWrite = trades.filter(t => !(t.shadow && t.outcome !== null));
+    const removed = trades.length - toWrite.length;
+    writeTrades(toWrite);
+    log(`Wrote ${resolved} resolution(s) to weather-trades.json${removed > 0 ? ` (removed ${removed} resolved shadow trade(s))` : ''}`);
   }
 
   // Summary
@@ -221,9 +224,10 @@ async function main() {
 
   // Post a summary to backtest channel if multiple trades resolved
   if (!DRY && resolved >= 2 && BACKTEST_HOOK) {
-    const wins_this_run   = candidates.slice(0, resolved).filter(t => t.signalResult === 'win').length;
-    const losses_this_run = resolved - wins_this_run;
-    const pnl_this_run    = candidates.slice(0, resolved).reduce((a, t) => a + (t.pnlDollars || 0), 0);
+    const resolvedThisRun = candidates.filter(t => t.signalResult != null);
+    const wins_this_run   = resolvedThisRun.filter(t => t.signalResult === 'win').length;
+    const losses_this_run = resolvedThisRun.length - wins_this_run;
+    const pnl_this_run    = resolvedThisRun.reduce((a, t) => a + (t.pnlDollars || 0), 0);
     const summary = [
       `🏁 **SETTLEMENT RUN — ${resolved} resolved**`,
       `${wins_this_run}W / ${losses_this_run}L | P&L: ${pnl_this_run >= 0 ? '+' : ''}${usd(pnl_this_run)}`,

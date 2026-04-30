@@ -90,10 +90,10 @@ const STATE_FILE  = path.join(ROOT, '.weather-state.json');
 const TRADES_FILE = path.join(ROOT, 'weather-trades.json');
 
 function log(msg) { console.log(`[${new Date().toISOString()}] [weather-scan] ${msg}`); }
-function readState()    { try { return JSON.parse(fs.readFileSync(STATE_FILE,  'utf8')); } catch { return { cooldowns: {}, signals: {} }; } }
-function writeState(s)  { try { fs.writeFileSync(STATE_FILE,  JSON.stringify(s, null, 2)); } catch {} }
-function readTrades()   { try { return JSON.parse(fs.readFileSync(TRADES_FILE, 'utf8')); } catch { return []; } }
-function writeTrades(t) { try { fs.writeFileSync(TRADES_FILE, JSON.stringify(t, null, 2)); } catch {} }
+function readState()    { try { return JSON.parse(fs.readFileSync(STATE_FILE,  'utf8')); } catch (e) { console.error('[weather-scan] readState error:', e.message);  return { cooldowns: {}, signals: {} }; } }
+function writeState(s)  { try { fs.writeFileSync(STATE_FILE,  JSON.stringify(s, null, 2)); } catch (e) { console.error('[weather-scan] writeState error:', e.message);  } }
+function readTrades()   { try { return JSON.parse(fs.readFileSync(TRADES_FILE, 'utf8')); } catch (e) { console.error('[weather-scan] readTrades error:', e.message);   return []; } }
+function writeTrades(t) { try { fs.writeFileSync(TRADES_FILE, JSON.stringify(t, null, 2)); } catch (e) { console.error('[weather-scan] writeTrades error:', e.message); } }
 
 function signalId() {
   return 'wx-' + Date.now().toString(36) + crypto.randomBytes(2).toString('hex');
@@ -712,7 +712,7 @@ async function main() {
             : 1 - bestModelProb) * (forecast.ensemble.memberCount || 0))
         : null,
       daysToResolution,
-      historicalMean:       forecast.historical?.historicalMean ?? null,  // note: legacy field name
+      historicalMean:       forecast.historical?.mean ?? null,            // fetchGHCNStats remaps historicalMean → mean
       thresholdPercentile:  forecast.historical?.thresholdPercentile ?? null,
       sources:              forecast.sources,
     };
@@ -766,8 +766,7 @@ async function main() {
         ].filter(Boolean).join('\n');
         await postWebhook(BACKTEST_HOOK, 'info', skipLog, `Weather • AI Skip • ${mp.date}`);
       }
-      signalsFired++;
-      continue;
+      continue;  // suppressed — don't count as a fired signal
     }
 
     // Apply size multiplier from AI assessment

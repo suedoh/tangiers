@@ -18,6 +18,7 @@ const path = require('path');
 const fs   = require('fs');
 const { loadEnv, ROOT, resolveWebhook } = require('../lib/env');
 const { postWebhook }                   = require('../lib/discord');
+const { normaliseCityKey }              = require('../lib/city-profiles');
 
 loadEnv();
 
@@ -179,7 +180,9 @@ async function main() {
   const biasMap = {};
   for (const t of allResolved) {
     if (t.meanF == null || t.observedTemp == null || !t.parsed?.city) continue;
-    const key  = t.parsed.city.toLowerCase();
+    // Guard against corrupted trade records where these fields are non-numeric
+    if (typeof t.observedTemp !== 'number' || typeof t.meanF !== 'number') continue;
+    const key  = normaliseCityKey(t.parsed.city);  // e.g. "new york city" → "new york"
     const bias = t.observedTemp - t.meanF;
     if (!biasMap[key]) biasMap[key] = { sum: 0, count: 0 };
     biasMap[key].sum   += bias;
@@ -203,7 +206,7 @@ async function main() {
   updatedCorrections._meta = {
     ...(currentCorrections._meta || {}),
     generated:   now,
-    tradeCount:  allResolved.filter(t => t.meanF != null && t.observedTemp != null).length,
+    tradeCount:  allResolved.filter(t => t.meanF != null && t.observedTemp != null && t.parsed?.city).length,
   };
 
   try {

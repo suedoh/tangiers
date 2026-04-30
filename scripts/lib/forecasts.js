@@ -115,7 +115,7 @@ async function fetchEnsemble(lat, lon, targetDate, thresholdF, direction) {
     const members = Object.keys(daily)
       .filter(k => k.startsWith(field + '_member'))
       .map(k => daily[k][0])
-      .filter(v => v != null && !isNaN(v));
+      .filter(v => v != null && !isNaN(v) && v > -60 && v < 150);  // bounds-check: reject obviously corrupt members
 
     if (members.length < 5) return null; // not enough members
 
@@ -125,7 +125,10 @@ async function fetchEnsemble(lat, lon, targetDate, thresholdF, direction) {
 
     const prob = aboveCount / members.length;
     const mean = members.reduce((a, b) => a + b, 0) / members.length;
-    const variance = members.reduce((a, v) => a + (v - mean) ** 2, 0) / members.length;
+    // Use sample variance (n-1) so spread isn't systematically underestimated for small ensembles
+    const variance = members.length > 1
+      ? members.reduce((a, v) => a + (v - mean) ** 2, 0) / (members.length - 1)
+      : 0;
     const spread = Math.sqrt(variance);
 
     return { prob, memberCount: members.length, mean, spread };
@@ -348,11 +351,12 @@ async function fetchGHCNStats(ghcnStation, targetDate) {
   const result = await fetchGHCNBaseRate(ghcnStation, targetDate, 60, 'above').catch(() => null);
   if (!result) return null;
   return {
-    mean:       result.historicalMean,
-    sigma:      result.historicalSigma,
-    sampleSize: result.sampleSize,
-    source:     result.source,
-    station:    result.station,
+    mean:                result.historicalMean,
+    sigma:               result.historicalSigma,
+    sampleSize:          result.sampleSize,
+    source:              result.source,
+    station:             result.station,
+    thresholdPercentile: result.thresholdPercentile,  // required for extreme-mode detection in getTemperatureForecast()
   };
 }
 
@@ -629,8 +633,14 @@ async function fetchNWSObserved(nwsStation, date, timezone = 'America/New_York')
   try {
     const data   = await httpGet(NWS_API, apiPath, 15_000);
     const tempsC = (data?.features || [])
-      .map(f => f?.properties?.temperature?.value)
-      .filter(v => v != null && !isNaN(v) && v > -60 && v < 60);
+      .map(f => {
+        const t = f?.properties?.temperature;
+        if (t?.value == null || isNaN(t.value)) return null;
+        // NWS always reports degC; skip if unexpected unit to avoid double-conversion
+        if (t.unitCode && !t.unitCode.includes('degC')) return null;
+        return t.value;
+      })
+      .filter(v => v != null && v > -60 && v < 60);
     if (tempsC.length < 3) return null;
     const tempsF = tempsC.map(c => c * 9 / 5 + 32);
     return {

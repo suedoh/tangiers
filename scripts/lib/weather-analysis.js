@@ -216,10 +216,11 @@ async function _analyzeSignal(signal) {
           const resp = JSON.parse(data);
 
           // Handle API-level errors (auth failure, quota, overload, etc.)
+          // Set _parseError so analyzeSignal() retries once before falling back to take.
           if (resp.type === 'error') {
             const msg = resp.error?.message || resp.error?.type || 'unknown API error';
             console.error('[weather-analysis] API error response:', msg);
-            resolve({ ...fallback, reasoning: `API error (${resp.error?.type || 'unknown'}) — defaulting to take.` });
+            resolve({ ...fallback, reasoning: `API error (${resp.error?.type || 'unknown'}) — defaulting to take.`, _parseError: true });
             return;
           }
 
@@ -244,11 +245,16 @@ async function _analyzeSignal(signal) {
 
           const parsed = JSON.parse(jsonStr);
 
+          const VALID_FLAGS    = ['high_conviction','wide_uncertainty','extreme_threshold',
+                                   'bimodal_risk','far_out','short_runway','tail_risk','strong_ensemble'];
           const decision       = ['take', 'reduce', 'skip'].includes(parsed.decision) ? parsed.decision : 'take';
           const confidence     = typeof parsed.confidence === 'number'    ? Math.min(1, Math.max(0, parsed.confidence)) : null;
           const sizeMultiplier = [1.0, 0.75, 0.5, 0.25].includes(parsed.sizeMultiplier) ? parsed.sizeMultiplier : 1.0;
           const reasoning      = typeof parsed.reasoning === 'string'     ? parsed.reasoning.slice(0, 140)            : null;
-          const flags          = Array.isArray(parsed.flags)              ? parsed.flags.filter(f => typeof f === 'string').slice(0, 6) : [];
+          // Whitelist flags so arbitrary strings from Haiku never land in trade records
+          const flags          = Array.isArray(parsed.flags)
+            ? parsed.flags.filter(f => typeof f === 'string' && VALID_FLAGS.includes(f)).slice(0, 6)
+            : [];
 
           resolve({ decision, confidence, sizeMultiplier, reasoning, flags, raw: text, skipped: false });
         } catch (e) {

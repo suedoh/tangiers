@@ -47,11 +47,35 @@ const SIGNALS_WEBHOOK = resolveWebhook('WEATHER_DISCORD_SIGNALS_WEBHOOK');
 
 function readTrades() {
   try { return JSON.parse(fs.readFileSync(TRADES_FILE, 'utf8')); }
-  catch { return []; }
+  catch (e) { console.error('[exit-monitor] readTrades error:', e.message); return []; }
 }
 
 function writeTrades(trades) {
-  fs.writeFileSync(TRADES_FILE, JSON.stringify(trades, null, 2));
+  try { fs.writeFileSync(TRADES_FILE, JSON.stringify(trades, null, 2)); }
+  catch (e) { console.error('[exit-monitor] writeTrades error:', e.message); }
+}
+
+/**
+ * Returns the UTC timestamp for end-of-day (23:59) in the given IANA timezone.
+ * Falls back to UTC midnight if tz is absent or unrecognised.
+ */
+function endOfDayUtcMs(dateStr, tz) {
+  if (!tz) return new Date(dateStr + 'T23:59:00Z').getTime();
+  try {
+    const noonUtc = new Date(dateStr + 'T12:00:00Z');
+    const parts   = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, hour: 'numeric', minute: 'numeric', timeZoneName: 'longOffset',
+    }).formatToParts(noonUtc);
+    const tzPart  = parts.find(p => p.type === 'timeZoneName')?.value || 'GMT+0';
+    const match   = tzPart.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/);
+    if (!match) return new Date(dateStr + 'T23:59:00Z').getTime();
+    const sign    = match[1] === '+' ? 1 : -1;
+    const offsetMs = sign * (parseInt(match[2], 10) * 60 + parseInt(match[3] || '0', 10)) * 60_000;
+    // 23:59 local = 23:59 UTC shifted by offset
+    return new Date(dateStr + 'T23:59:00Z').getTime() - offsetMs;
+  } catch {
+    return new Date(dateStr + 'T23:59:00Z').getTime();
+  }
 }
 
 /** Mark-to-market P&L: what you'd pocket selling the position right now. */
@@ -97,7 +121,10 @@ async function checkTrade(trade) {
   const peakPrice     = Math.max(trade.peakPrice ?? entryPrice, currentPrice);
 
   const gain          = currentPrice - entryPrice;
-  const remainingEdge = modelProb - currentPrice;  // still-unexploited edge (decimal)
+  // YES: edge = model YES prob − market YES price. NO: edge = market NO price − model NO prob.
+  const remainingEdge = trade.side === 'yes'
+    ? modelProb - currentPrice
+    : currentPrice + modelProb - 1;
 
   let exitReason = null;
 
@@ -124,9 +151,10 @@ async function checkTrade(trade) {
     exitReason = 'stop_loss';
   }
 
-  // --- Layer 5: Time decay — within 2h of end-of-resolution-day UTC --------
+  // --- Layer 5: Time decay — within 2h of end-of-resolution-day (local city time) --------
   else if (trade.parsed?.date) {
-    const resolutionMs = new Date(trade.parsed.date + 'T23:59:00Z').getTime();
+    const tz           = trade.parsed?.coords?.tz || null;
+    const resolutionMs = endOfDayUtcMs(trade.parsed.date, tz);
     const hoursLeft    = (resolutionMs - Date.now()) / 3_600_000;
     if (hoursLeft >= 0 && hoursLeft <= TIME_DECAY_HOURS) {
       exitReason = 'time_decay';

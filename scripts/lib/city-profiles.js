@@ -344,16 +344,43 @@ const CITY_PROFILES = {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
+// Common aliases Polymarket uses in market titles that differ from our profile keys.
+// Add entries here whenever a new city name variant appears in market questions.
+const CITY_ALIASES = {
+  'new york city':  'new york',
+  'nyc':            'new york',
+  'ny':             'new york',
+  'la':             'los angeles',
+  'chi':            'chicago',
+  'phx':            'phoenix',
+  'pdx':            'portland',
+  'cdg':            'paris',       // airport code sometimes used in API responses
+};
+
 /**
- * Look up a city profile by name (case-insensitive partial match).
- * Returns null for international cities not in the table.
+ * Look up a city profile by name (case-insensitive, alias-aware).
+ * Returns null for cities not in the table.
  *
- * @param {string} cityName  e.g. 'new york', 'Chicago', 'los angeles'
+ * @param {string} cityName  e.g. 'new york', 'New York City', 'NYC'
  * @returns {{ uhi, coastal, elevation, notes }|null}
  */
 function getCityProfile(cityName) {
   if (!cityName) return null;
-  return CITY_PROFILES[cityName.toLowerCase().trim()] || null;
+  const key = cityName.toLowerCase().trim();
+  return CITY_PROFILES[CITY_ALIASES[key] ?? key] || null;
 }
 
-module.exports = { CITY_PROFILES, getCityProfile };
+/**
+ * Normalise a city name to the canonical profile key.
+ * Used by weekly-report.js when writing bias-corrections.json.
+ *
+ * @param {string} cityName
+ * @returns {string}
+ */
+function normaliseCityKey(cityName) {
+  if (!cityName) return cityName;
+  const key = cityName.toLowerCase().trim();
+  return CITY_ALIASES[key] ?? key;
+}
+
+module.exports = { CITY_PROFILES, getCityProfile, normaliseCityKey };
