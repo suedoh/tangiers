@@ -25,6 +25,25 @@ const CLOB_HOST  = 'https://clob.polymarket.com';
 const TRADES_FILE = path.join(ROOT, 'weather-trades.json');
 const SIGNALS_HOOK = resolveWebhook('WEATHER_DISCORD_SIGNALS_WEBHOOK');
 
+// Polygon USDC (bridged) — 6 decimals
+const USDC_ADDRESS = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174';
+const USDC_ABI     = [{ name: 'balanceOf', type: 'function', inputs: [{ name: 'account', type: 'address' }], outputs: [{ name: '', type: 'uint256' }], stateMutability: 'view' }];
+
+// ─── On-chain USDC balance check ─────────────────────────────────────────────
+
+async function checkUsdcBalance(walletAddress) {
+  const { createPublicClient, http } = require('viem');
+  const { polygon } = require('viem/chains');
+  const client = createPublicClient({ chain: polygon, transport: http() });
+  const raw = await client.readContract({
+    address: USDC_ADDRESS,
+    abi:     USDC_ABI,
+    functionName: 'balanceOf',
+    args:    [walletAddress],
+  });
+  return Number(raw) / 1e6;
+}
+
 // ─── Lazy CLOB client (initialised once per process) ─────────────────────────
 
 let _clobClient = null;
@@ -153,6 +172,26 @@ async function placeNoOrder(conditionId, noTokenId, noPrice, dollars) {
     console.log(`[polymarket-orders] DRY RUN — would place NO limit buy: ${shares} shares @ ${limitPrice} ($${dollars})`);
     console.log(`[polymarket-orders] conditionId=${conditionId} noTokenId=${noTokenId}`);
     return { liveOrder: { ...baseOrder, orderId: fakeId } };
+  }
+
+  // On-chain USDC balance check — catches depleted wallets before the CLOB rejects us silently
+  try {
+    const { privateKeyToAccount } = require('viem/accounts');
+    const pk          = process.env.POLYMARKET_PRIVATE_KEY || '';
+    const normalised  = pk.startsWith('0x') ? pk : `0x${pk}`;
+    const address     = privateKeyToAccount(normalised).address;
+    const minBalance  = parseFloat(process.env.POLYMARKET_MIN_BALANCE || '20');
+    const usdcBalance = await checkUsdcBalance(address);
+    console.log(`[polymarket-orders] on-chain USDC: $${usdcBalance.toFixed(2)}`);
+    if (usdcBalance < minBalance) {
+      const msg = `⚠️ **LOW USDC BALANCE — ORDER SKIPPED**\nOn-chain: **$${usdcBalance.toFixed(2)}** | Minimum: **$${minBalance}**\nDeposit USDC to Polygon wallet \`${address}\` to resume live trading.`;
+      console.warn('[polymarket-orders] low USDC balance, skipping order');
+      await postWebhook(SIGNALS_HOOK, 'error', msg, 'Weather • Live Order');
+      return { liveOrder: { ...baseOrder, status: 'error', error: `low usdc balance: $${usdcBalance.toFixed(2)}` } };
+    }
+  } catch (err) {
+    // Non-fatal — log and continue; the CLOB will reject if truly out of funds
+    console.warn('[polymarket-orders] USDC balance check failed (non-fatal):', err.message);
   }
 
   try {
