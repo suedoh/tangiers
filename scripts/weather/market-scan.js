@@ -84,6 +84,13 @@ const BLOCKED_CITIES = new Set([
   'wellington',   // Cook Strait persistent wind structurally suppresses temperature extremes — threshold trades near-coinflips, similar to Singapore
   'lucknow',      // 13% WR (8 trades) — poor GHCN-Daily coverage; mean-shift correction insufficient for structural data quality issues
   'london',       // 14% WR (7 trades) — settlement station ambiguity (Heathrow vs city); bias correction alone cannot fix station mismatch
+  'cape town',    // 31.3% WR (16 trades) — persistent model underperformance; no clear structural fix identified
+  'jeddah',       // 33.3% WR (12 trades) — desert heat extremes structurally mis-modeled; positive P&L is noise at this sample size
+]);
+
+// Cities allowed to paper-trade but never execute live orders against the Polymarket account.
+const PAPER_ONLY_CITIES = new Set([
+  'madrid',       // 42.1% WR (19 trades) — flagged; collecting more data before deciding to block or reinstate
 ]);
 
 const STATE_FILE  = path.join(ROOT, '.weather-state.json');
@@ -847,7 +854,7 @@ async function main() {
     writeTrades(trades);
 
     // ── Live order execution: NO+Range only ────────────────────────────────────
-    if (LIVE_EXECUTE && bestSide === 'no' && mp.direction === 'range') {
+    if (LIVE_EXECUTE && bestSide === 'no' && mp.direction === 'range' && !PAPER_ONLY_CITIES.has(mp.city?.toLowerCase())) {
       const { placeNoOrder, pollOrderFill } = require('../lib/polymarket-orders');
       const noToken = (bestMarket.tokens || []).find(t => /^no$/i.test(t.outcome));
       if (noToken) {
