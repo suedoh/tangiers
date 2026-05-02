@@ -12,3 +12,6 @@ tradingview-mcp/screenshots/
 analysis/
 *.log
 .DS_Store
+scripts/weather/run-*.vbs
+.weather-state.json
+weather-trades.json
