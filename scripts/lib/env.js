@@ -28,7 +28,9 @@ function loadEnv() {
       const i = l.indexOf('=');
       if (i > 0) {
         const key = l.slice(0, i).trim();
-        if (!process.env[key]) process.env[key] = l.slice(i + 1).trim();
+        // Strip inline comments (e.g. VALUE=foo  # comment → foo)
+        const raw = l.slice(i + 1).trim().replace(/\s+#.*$/, '');
+        if (!process.env[key]) process.env[key] = raw;
       }
     });
 }
