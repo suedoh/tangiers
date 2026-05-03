@@ -25,38 +25,6 @@ const CLOB_HOST  = 'https://clob.polymarket.com';
 const TRADES_FILE = path.join(ROOT, 'weather-trades.json');
 const SIGNALS_HOOK = resolveWebhook('WEATHER_DISCORD_SIGNALS_WEBHOOK');
 
-// ─── CLOB balance check ───────────────────────────────────────────────────────
-// Polymarket holds deposited USDC in their CTF Exchange contract, NOT in the
-// user's EOA. Checking balanceOf(EOA) always returns $0. Instead we query the
-// CLOB API which tracks the spendable balance within Polymarket's system.
-
-async function checkClobBalance() {
-  return new Promise((resolve) => {
-    const req = https.request(
-      {
-        hostname: 'clob.polymarket.com',
-        path:     '/balance-allowance?asset_type=0',  // 0 = USDC
-        method:   'GET',
-        headers:  { 'User-Agent': 'Weathermen/1.0 (Tangiers)' },
-      },
-      res => {
-        let raw = '';
-        res.on('data', c => raw += c);
-        res.on('end', () => {
-          try {
-            const data = JSON.parse(raw);
-            // balance is returned in micro-USDC (6 decimals)
-            const bal = parseFloat(data.balance ?? data.allowance ?? '0') / 1e6;
-            resolve(isNaN(bal) ? null : bal);
-          } catch { resolve(null); }
-        });
-      }
-    );
-    req.setTimeout(8_000, () => { req.destroy(); resolve(null); });
-    req.on('error', () => resolve(null));
-    req.end();
-  });
-}
 
 // ─── Lazy CLOB client (initialised once per process) ─────────────────────────
 
@@ -188,27 +156,10 @@ async function placeNoOrder(conditionId, noTokenId, noPrice, dollars) {
     return { liveOrder: { ...baseOrder, orderId: fakeId } };
   }
 
-  // CLOB balance check — Polymarket tracks spendable USDC in their contract system,
-  // not in the user's EOA. We query the CLOB API directly.
-  // Non-fatal: if the check fails we log a warning and let the CLOB reject the order
-  // itself if funds are truly insufficient.
-  try {
-    const minBalance  = parseFloat(process.env.POLYMARKET_MIN_BALANCE || '20');
-    const clobBalance = await checkClobBalance();
-    if (clobBalance !== null) {
-      console.log(`[polymarket-orders] CLOB USDC balance: $${clobBalance.toFixed(2)}`);
-      if (clobBalance < minBalance) {
-        const msg = `⚠️ **LOW USDC BALANCE — ORDER SKIPPED**\nCLOB balance: **$${clobBalance.toFixed(2)}** | Minimum: **$${minBalance}**\nDeposit USDC to your Polymarket account to resume live trading.`;
-        console.warn('[polymarket-orders] low CLOB balance, skipping order');
-        await postWebhook(SIGNALS_HOOK, 'error', msg, 'Weather • Live Order');
-        return { liveOrder: { ...baseOrder, status: 'error', error: `low usdc balance: $${clobBalance.toFixed(2)}` } };
-      }
-    } else {
-      console.warn('[polymarket-orders] CLOB balance check returned null — proceeding (CLOB will reject if out of funds)');
-    }
-  } catch (err) {
-    console.warn('[polymarket-orders] CLOB balance check failed (non-fatal):', err.message);
-  }
+  // Note: No pre-flight balance check — the CLOB /balance-allowance endpoint
+  // requires full API auth and Polymarket holds funds in their CTF Exchange
+  // contract (not the EOA). If funds are insufficient the CLOB will reject the
+  // order and we catch + report the error below.
 
   try {
     const { Side, OrderType } = require('@polymarket/clob-client');
