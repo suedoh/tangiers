@@ -46,6 +46,15 @@ const HIGH_BIAS_CITIES = new Set([
   'los angeles', 'istanbul', 'amsterdam', 'denver', 'wuhan', 'karachi',
 ]);
 
+// Keep these in sync with BLOCKED_CITIES / PAPER_ONLY_CITIES in market-scan.js
+const CITY_BLOCKED = new Set([
+  'istanbul', 'singapore', 'kuala lumpur', 'nairobi', 'lagos',
+  'wellington', 'lucknow', 'london', 'cape town', 'jeddah', 'paris',
+]);
+const CITY_PAPER = new Set([
+  'madrid', 'chengdu', 'milan',
+]);
+
 function log(msg) { console.log(`[${new Date().toISOString()}] [analyze-perf] ${msg}`); }
 function pct(v, digits = 1) { return v != null ? (v * 100).toFixed(digits) + '%' : 'N/A'; }
 function usd(v) { return v != null ? (v >= 0 ? '+$' : '-$') + Math.abs(v).toFixed(2) : '?'; }
@@ -413,16 +422,94 @@ async function main() {
   const bodyC  = cLines.join('\n');
   const footerC = `Ace/Weathermen • ${resolved.length} resolved trades • ${todayDate}`;
 
+  // ── Section D: Full City Leaderboard ─────────────────────────────────────
+
+  const allCityMap = {};
+  for (const t of resolved) {
+    const city = t.parsed?.city;
+    if (!city) continue;
+    if (!allCityMap[city]) allCityMap[city] = { wins: 0, losses: 0, pnl: 0 };
+    t.signalResult === 'win' ? allCityMap[city].wins++ : allCityMap[city].losses++;
+    allCityMap[city].pnl += t.pnlDollars ?? 0;
+  }
+
+  const cityRows = Object.entries(allCityMap)
+    .map(([city, s]) => {
+      const n      = s.wins + s.losses;
+      const wr     = n ? s.wins / n : 0;
+      const status = CITY_BLOCKED.has(city) ? 'BLOCKED' : CITY_PAPER.has(city) ? 'PAPER' : 'ACTIVE';
+      return { city, wins: s.wins, losses: s.losses, n, wr, pnl: s.pnl, status };
+    })
+    .sort((a, b) => a.wr - b.wr || b.n - a.n); // WR ascending; break ties by sample size desc
+
+  const noRange   = resolved.filter(t => t.side === 'no' && t.parsed?.direction === 'range');
+  const sysAvgWR  = noRange.length ? noRange.filter(t => t.signalResult === 'win').length / noRange.length : null;
+
+  function cityIcon(row) {
+    if (row.n < 5)       return '🔬'; // too small to call
+    if (row.wr < 0.40)   return '❌';
+    if (row.wr < 0.60)   return '⚠️';
+    if (row.wr < 0.75)   return '👀';
+    return '✅';
+  }
+
+  const dLines = [
+    `## 🏙️ CITY LEADERBOARD — ALL-TIME`,
+    `*(${resolved.length} resolved non-shadow trades · sys avg ${sysAvgWR != null ? pct(sysAvgWR) : '?'} WR on NO+range)*`,
+    '',
+  ];
+
+  for (const row of cityRows) {
+    const icon   = cityIcon(row);
+    const label  = shortCity(row.city).padEnd(15);
+    const wl     = `${row.wins}W/${row.losses}L`.padEnd(9);
+    const wrStr  = (row.wr * 100).toFixed(1).padStart(5) + '%';
+    const pnlStr = (row.pnl >= 0 ? '+$' : '-$') + Math.abs(row.pnl).toFixed(0);
+    const tag    = row.status === 'BLOCKED' ? '  [BLOCKED]' : row.status === 'PAPER' ? '  [PAPER]' : '';
+    dLines.push(`${icon} ${label} ${wl} ${wrStr}  ${pnlStr}${tag}`);
+  }
+
+  // Auto-flag ACTIVE cities only
+  const blockCandidates = cityRows.filter(r => r.status === 'ACTIVE' && r.n >= 10 && r.wr <  0.50);
+  const paperCandidates = cityRows.filter(r => r.status === 'ACTIVE' && r.n >= 15 && r.wr >= 0.50 && r.wr < 0.60);
+  const watchCandidates = cityRows.filter(r => r.status === 'ACTIVE' && r.n >= 20 && r.wr >= 0.60 && r.wr < 0.75);
+
+  dLines.push('');
+  dLines.push('**─── Recommendations ───**');
+
+  if (blockCandidates.length > 0) {
+    dLines.push('🚨 **Block candidates** (n≥10, WR<50%):');
+    for (const r of blockCandidates)
+      dLines.push(`  • ${r.city} — ${pct(r.wr)} WR (${r.n} trades, ${usd(r.pnl)} P&L)`);
+  }
+  if (paperCandidates.length > 0) {
+    dLines.push('⚠️ **Paper-only candidates** (n≥15, WR 50–60%):');
+    for (const r of paperCandidates)
+      dLines.push(`  • ${r.city} — ${pct(r.wr)} WR (${r.n} trades, ${usd(r.pnl)} P&L)`);
+  }
+  if (watchCandidates.length > 0) {
+    dLines.push('👀 **Watch list** (n≥20, WR 60–75%):');
+    for (const r of watchCandidates)
+      dLines.push(`  • ${r.city} — ${pct(r.wr)} WR (${r.n} trades, ${usd(r.pnl)} P&L)`);
+  }
+  if (blockCandidates.length === 0 && paperCandidates.length === 0 && watchCandidates.length === 0) {
+    dLines.push('✅ *No new candidates to flag — city roster looks clean.*');
+  }
+
+  const bodyD  = dLines.join('\n');
+  const footerD = `Ace/Weathermen • city leaderboard • ${todayDate}`;
+
   // ── Post to Discord ───────────────────────────────────────────────────────
 
   if (BACKTEST_HOOK) {
     await postWebhook(BACKTEST_HOOK, 'info',     bodyA, footerA);
     await postWebhook(BACKTEST_HOOK, 'info',     bodyB, footerB);
     await postWebhook(BACKTEST_HOOK, 'catalyst', bodyC, footerC);
-    log('Analysis posted (3 embeds)');
+    await postWebhook(BACKTEST_HOOK, 'catalyst', bodyD, footerD);
+    log('Analysis posted (4 embeds)');
   } else {
     log('WEATHER_DISCORD_BACKTEST_WEBHOOK not set — printing to stdout');
-    console.log('\n' + [bodyA, bodyB, bodyC].join('\n\n---\n\n') + '\n');
+    console.log('\n' + [bodyA, bodyB, bodyC, bodyD].join('\n\n---\n\n') + '\n');
   }
 }
 

@@ -8,7 +8,7 @@ TRADING := $(shell pwd)
 
 # ─── Targets ─────────────────────────────────────────────────────────────────
 
-.PHONY: help install deps env mcp cron test test-discord analyze bot bot-logs report report-30 war-report logs clean weather-scan weather-analyze weather-report weather-clean
+.PHONY: help install deps env mcp cron test test-discord analyze bot bot-logs report report-30 war-report logs clean weather-scan weather-analyze weather-report weather-perf weather-clean
 
 help: ## Show available commands
 	@echo ""
@@ -161,6 +161,10 @@ weather-cron: ## Install weather cron jobs (15-min scan + Sunday report)
 	  (crontab -l 2>/dev/null; echo ""; echo "# Weathermen — weekly P&L report every Sunday 18:00 UTC"; echo "$$REPORTLINE") | crontab -; \
 	  echo "✓  Weather report cron installed (runs Sundays at 18:00 UTC)"; \
 	fi
+
+weather-perf: ## Full performance + city leaderboard analysis → #weather-backtest
+	@echo "→ Running weather performance analysis..."
+	@$(NODE) $(TRADING)/scripts/weather/analyze-performance.js
 
 weather-clean: ## Reset weather state + clear weather logs
 	@rm -f .weather-state.json
