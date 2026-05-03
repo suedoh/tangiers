@@ -48,5 +48,8 @@ const triggerState    = () => _db.collection('trigger_state');
 const triggerCooldowns= () => _db.collection('trigger_cooldowns');
 const newsState       = () => _db.collection('news_state');
 const discordBotState = () => _db.collection('discord_bot_state');
+const weatherTrades   = () => _db.collection('weather_trades');
+const weathermenData  = () => _db.collection('weathermen_data');
+const weathermenState = () => _db.collection('weathermen_state');
 
-module.exports = { connect, disconnect, trades, triggerState, triggerCooldowns, newsState, discordBotState };
+module.exports = { connect, disconnect, trades, triggerState, triggerCooldowns, newsState, discordBotState, weatherTrades, weathermenData, weathermenState };

@@ -8,7 +8,7 @@ TRADING := $(shell pwd)
 
 # ─── Targets ─────────────────────────────────────────────────────────────────
 
-.PHONY: help install deps env mcp cron test test-discord analyze bot bot-logs report report-30 war-report logs clean
+.PHONY: help install deps env mcp cron test test-discord analyze bot bot-logs report report-30 war-report logs clean weather-scan weather-analyze weather-report weather-perf weather-clean
 
 help: ## Show available commands
 	@echo ""
@@ -121,3 +121,52 @@ clean: ## Remove .trigger-state.json and clear logs (resets cooldowns and OI tre
 	@rm -f .trigger-state.json
 	@rm -f logs/trigger-check.log
 	@echo "✓  Cleared state and logs"
+
+# ─── Weathermen targets ───────────────────────────────────────────────────────
+
+weather-scan: ## Run market-scan.js once — check Polymarket for temperature edge now
+	@echo "→ Running weather market scan..."
+	@mkdir -p logs
+	@$(NODE) $(TRADING)/scripts/weather/market-scan.js
+
+weather-analyze: ## Deep-dive a specific market: make weather-analyze URL=https://polymarket.com/event/...
+	@if [ -z "$(URL)" ] && [ -z "$(Q)" ]; then \
+	  echo "Usage: make weather-analyze URL=https://polymarket.com/event/..."; \
+	  echo "   or: make weather-analyze Q=\"Will NYC high exceed 75F on April 28?\""; \
+	  exit 1; \
+	fi
+	@if [ -n "$(URL)" ]; then \
+	  $(NODE) $(TRADING)/scripts/weather/analyze.js --url "$(URL)"; \
+	else \
+	  $(NODE) $(TRADING)/scripts/weather/analyze.js --question "$(Q)"; \
+	fi
+
+weather-report: ## Generate the weekly weather P&L report now
+	@echo "→ Running weather weekly report..."
+	@$(NODE) $(TRADING)/scripts/weather/weekly-report.js --force
+
+weather-cron: ## Install weather cron jobs (15-min scan + Sunday report)
+	@NODEDIR=$$(dirname $(NODE)); \
+	if crontab -l 2>/dev/null | grep -q "weather/market-scan.js"; then \
+	  echo "✓  Weather scan cron already installed — skipping"; \
+	else \
+	  SCANLINE="*/15 * * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/weather/market-scan.js >> $(TRADING)/logs/weather-scan.log 2>&1"; \
+	  (crontab -l 2>/dev/null; echo ""; echo "# Weathermen — Polymarket weather scan every 15 minutes"; echo "$$SCANLINE") | crontab -; \
+	  echo "✓  Weather scan cron installed (runs every 15 minutes)"; \
+	fi; \
+	if crontab -l 2>/dev/null | grep -q "weather/weekly-report.js"; then \
+	  echo "✓  Weather report cron already installed — skipping"; \
+	else \
+	  REPORTLINE="0 18 * * 0 PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/weather/weekly-report.js >> $(TRADING)/logs/weather-report.log 2>&1"; \
+	  (crontab -l 2>/dev/null; echo ""; echo "# Weathermen — weekly P&L report every Sunday 18:00 UTC"; echo "$$REPORTLINE") | crontab -; \
+	  echo "✓  Weather report cron installed (runs Sundays at 18:00 UTC)"; \
+	fi
+
+weather-perf: ## Full performance + city leaderboard analysis → #weather-backtest
+	@echo "→ Running weather performance analysis..."
+	@$(NODE) $(TRADING)/scripts/weather/analyze-performance.js
+
+weather-clean: ## Reset weather state + clear weather logs
+	@rm -f .weather-state.json
+	@rm -f logs/weather-scan.log logs/weather-report.log
+	@echo "✓  Weather state and logs cleared"

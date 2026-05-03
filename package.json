@@ -1,1 +1,1 @@
-{"name":"ace-trading","version":"1.0.0","private":true,"dependencies":{"mongodb":"^7.2.0"}}
+{"name":"ace-trading","version":"1.0.0","private":true,"dependencies":{"@polymarket/clob-client":"^5.8.1","mongodb":"^7.2.0"}}

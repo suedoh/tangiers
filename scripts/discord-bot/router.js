@@ -11,15 +11,20 @@
  *   #bz-signals, #bz-backtest, #bz-weekly-war-report → bz handler
  */
 
-const btcHandler    = require('./handlers/btc');
-const bzHandler     = require('./handlers/bz');
-const sharedHandler = require('./handlers/shared');
+const { loadEnv, isStaging } = require('../lib/env');
+const btcHandler              = require('./handlers/btc');
+const bzHandler               = require('./handlers/bz');
+const weatherHandler          = require('./handlers/weather');
+const sharedHandler           = require('./handlers/shared');
+
+loadEnv();
 
 // Map of channel name prefix → handler module
 // Order matters: first match wins
 const ROUTES = [
-  { prefix: 'bz',  handler: bzHandler  },
-  { prefix: 'btc', handler: btcHandler },
+  { prefix: 'bz',      handler: bzHandler      },
+  { prefix: 'btc',     handler: btcHandler     },
+  { prefix: 'weather', handler: weatherHandler },
 ];
 
 /**
@@ -40,13 +45,27 @@ function resolve(channelName) {
  * Reads from env — each instrument registers its own channel ID.
  */
 function allChannelIds() {
+  const staging = isStaging();
+  const env     = k => process.env[staging && process.env[`${k}_STAGING`] ? `${k}_STAGING` : k];
+
   const ids = [];
-  if (process.env.DISCORD_CHANNEL_ID)                   ids.push({ id: process.env.DISCORD_CHANNEL_ID,                   prefix: 'btc' });
-  if (process.env.DISCORD_BTC_WAR_REPORT_CHANNEL_ID)    ids.push({ id: process.env.DISCORD_BTC_WAR_REPORT_CHANNEL_ID,    prefix: 'btc' });
-  if (process.env.DISCORD_BTC_BACKTEST_CHANNEL_ID)      ids.push({ id: process.env.DISCORD_BTC_BACKTEST_CHANNEL_ID,      prefix: 'btc' });
-  if (process.env.BZ_DISCORD_SIGNALS_CHANNEL_ID)        ids.push({ id: process.env.BZ_DISCORD_SIGNALS_CHANNEL_ID,        prefix: 'bz' });
-  if (process.env.BZ_DISCORD_WAR_REPORT_CHANNEL_ID)     ids.push({ id: process.env.BZ_DISCORD_WAR_REPORT_CHANNEL_ID,     prefix: 'bz' });
-  if (process.env.BZ_DISCORD_BACKTEST_CHANNEL_ID)       ids.push({ id: process.env.BZ_DISCORD_BACKTEST_CHANNEL_ID,       prefix: 'bz' });
+
+  // BTC + BZ channels are production-only (not in staging server)
+  if (!staging) {
+    if (process.env.DISCORD_CHANNEL_ID)                ids.push({ id: process.env.DISCORD_CHANNEL_ID,                prefix: 'btc' });
+    if (process.env.DISCORD_BTC_WAR_REPORT_CHANNEL_ID) ids.push({ id: process.env.DISCORD_BTC_WAR_REPORT_CHANNEL_ID, prefix: 'btc' });
+    if (process.env.DISCORD_BTC_BACKTEST_CHANNEL_ID)   ids.push({ id: process.env.DISCORD_BTC_BACKTEST_CHANNEL_ID,   prefix: 'btc' });
+    if (process.env.BZ_DISCORD_SIGNALS_CHANNEL_ID)     ids.push({ id: process.env.BZ_DISCORD_SIGNALS_CHANNEL_ID,     prefix: 'bz'  });
+    if (process.env.BZ_DISCORD_WAR_REPORT_CHANNEL_ID)  ids.push({ id: process.env.BZ_DISCORD_WAR_REPORT_CHANNEL_ID,  prefix: 'bz'  });
+    if (process.env.BZ_DISCORD_BACKTEST_CHANNEL_ID)    ids.push({ id: process.env.BZ_DISCORD_BACKTEST_CHANNEL_ID,    prefix: 'bz'  });
+  }
+
+  // Weather channels respect ENVIRONMENT — uses _STAGING IDs when in staging
+  const wxSignals  = env('WEATHER_DISCORD_SIGNALS_CHANNEL_ID');
+  const wxBacktest = env('WEATHER_DISCORD_BACKTEST_CHANNEL_ID');
+  if (wxSignals)  ids.push({ id: wxSignals,  prefix: 'weather' });
+  if (wxBacktest) ids.push({ id: wxBacktest, prefix: 'weather' });
+
   return ids;
 }
 
