@@ -542,6 +542,17 @@ async function main() {
 
   log(`${eventGroups.size} event groups to evaluate`);
 
+  // Pre-compute available capital once per scan cycle.
+  // AI analysis is skipped when capital is fully deployed — no point spending tokens
+  // on signals we can't enter. Paper signals still fire; aiDecision stored as null
+  // so calibration stats exclude these trades.
+  const deployedNow = LIVE_EXECUTE
+    ? trades.filter(t => ['open', 'filled', 'partial_expired'].includes(t.liveOrder?.status))
+            .reduce((sum, t) => sum + (t.liveOrder.sizeDollars || 0), 0)
+    : 0;
+  const capitalAvailable = !LIVE_EXECUTE || Math.round((LIVE_BANKROLL - deployedNow) * 100) / 100 > LIVE_MIN_BALANCE;
+  if (!capitalAvailable) log(`AI analysis disabled this cycle — capital fully deployed ($${deployedNow.toFixed(2)} of $${LIVE_BANKROLL}, reserve $${LIVE_MIN_BALANCE})`);
+
   // ── Step 4: evaluate each event group ────────────────────────────────────
   let signalsFired = 0;
 
@@ -735,40 +746,50 @@ async function main() {
       sources:              forecast.sources,
     };
 
-    const stage1Result = await analyzeSignal(stage1Signal);
-    log(`  Stage 1 (Haiku): decision=${stage1Result.decision} confidence=${stage1Result.confidence != null ? (stage1Result.confidence * 100).toFixed(0) + '%' : 'N/A'} size=${stage1Result.sizeMultiplier}× | ${stage1Result.reasoning || 'no reasoning'}`);
+    // ── AI quality filter (skipped when capital fully deployed) ───────────
+    let aiAnalysis;
 
-    // ── Stage 2: Sonnet deep analysis (fires on take or reduce only) ──────
-    let aiAnalysis = stage1Result;
+    if (!capitalAvailable) {
+      // No capital to deploy — skip token spend, fire paper signal only.
+      // aiDecision: null marks these trades as non-AI so calibration excludes them.
+      aiAnalysis = { decision: 'take', sizeMultiplier: 1.0, confidence: null, reasoning: null, flags: [], stage: null, summary: null, steps: null, deepSkipped: true };
+      log('  AI skipped — capital fully deployed');
+    } else {
+      const stage1Result = await analyzeSignal(stage1Signal);
+      log(`  Stage 1 (Haiku): decision=${stage1Result.decision} confidence=${stage1Result.confidence != null ? (stage1Result.confidence * 100).toFixed(0) + '%' : 'N/A'} size=${stage1Result.sizeMultiplier}× | ${stage1Result.reasoning || 'no reasoning'}`);
 
-    if (stage1Result.decision !== 'skip' && process.env.WEATHER_DEEP_ANALYSIS === 'true') {
-      const nwsObs = parsed.coords?.nwsStation
-        ? await fetchNWSObserved(parsed.coords.nwsStation, mp.date, parsed.coords.tz || 'America/New_York').catch(() => null)
-        : null;
-      const wuObs = parsed.coords?.lat != null
-        ? await fetchWUObservation(parsed.coords.lat, parsed.coords.lon).catch(() => null)
-        : null;
-      const cityProfile = getCityProfile(mp.city);
+      aiAnalysis = stage1Result;
 
-      aiAnalysis = await deepAnalyzeSignal(
-        {
-          ...stage1Signal,
-          stageOneDecision:       stage1Result.decision,
-          stageOneSizeMultiplier: stage1Result.sizeMultiplier,
-        },
-        {
-          perModels:       forecast.models?.models  ?? {},
-          nwsObs,
-          wuObs,
-          cityProfile,
-          historicalSigma: forecast.historical?.sigma ?? null,
-        },
-        stage1Result,
-      );
+      // ── Stage 2: Sonnet deep analysis (fires on take or reduce only) ────
+      if (stage1Result.decision !== 'skip' && process.env.WEATHER_DEEP_ANALYSIS === 'true') {
+        const nwsObs = parsed.coords?.nwsStation
+          ? await fetchNWSObserved(parsed.coords.nwsStation, mp.date, parsed.coords.tz || 'America/New_York').catch(() => null)
+          : null;
+        const wuObs = parsed.coords?.lat != null
+          ? await fetchWUObservation(parsed.coords.lat, parsed.coords.lon).catch(() => null)
+          : null;
+        const cityProfile = getCityProfile(mp.city);
 
-      const stageLabel = aiAnalysis.stage === 2 ? 'Sonnet' : 'Haiku (Stage 2 fallback)';
-      log(`  Stage 2 (${stageLabel}): decision=${aiAnalysis.decision} confidence=${aiAnalysis.confidence != null ? (aiAnalysis.confidence * 100).toFixed(0) + '%' : 'N/A'} size=${aiAnalysis.sizeMultiplier}×`);
-      if (aiAnalysis.summary) log(`    Summary: ${aiAnalysis.summary.slice(0, 120)}`);
+        aiAnalysis = await deepAnalyzeSignal(
+          {
+            ...stage1Signal,
+            stageOneDecision:       stage1Result.decision,
+            stageOneSizeMultiplier: stage1Result.sizeMultiplier,
+          },
+          {
+            perModels:       forecast.models?.models  ?? {},
+            nwsObs,
+            wuObs,
+            cityProfile,
+            historicalSigma: forecast.historical?.sigma ?? null,
+          },
+          stage1Result,
+        );
+
+        const stageLabel = aiAnalysis.stage === 2 ? 'Sonnet' : 'Haiku (Stage 2 fallback)';
+        log(`  Stage 2 (${stageLabel}): decision=${aiAnalysis.decision} confidence=${aiAnalysis.confidence != null ? (aiAnalysis.confidence * 100).toFixed(0) + '%' : 'N/A'} size=${aiAnalysis.sizeMultiplier}×`);
+        if (aiAnalysis.summary) log(`    Summary: ${aiAnalysis.summary.slice(0, 120)}`);
+      }
     }
 
     // If AI says skip, log to backtest but don't post a signal card
@@ -838,7 +859,7 @@ async function main() {
       biasCorrF:       biasCorrF !== 0 ? biasCorrF : undefined,
       sigmaF:          Math.round(forecast.sigmaF * 10) / 10,
       betDollars:      kelly.dollars,
-      aiDecision:       aiAnalysis.decision,
+      aiDecision:       aiAnalysis.stage === null ? null : aiAnalysis.decision,
       aiConfidence:     aiAnalysis.confidence,
       aiSizeMultiplier: aiAnalysis.sizeMultiplier,
       aiReasoning:      aiAnalysis.reasoning,
