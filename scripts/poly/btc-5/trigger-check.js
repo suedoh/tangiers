@@ -29,8 +29,7 @@ const {
   cdpConnect, setSymbol, setTimeframe, waitForPrice,
   getStudyValues, getOHLCV, cdpEval, sleep,
 } = require('../../lib/cdp');
-const { postWebhook }          = require('../../lib/discord');
-const { discoverActiveMarket } = require('../../lib/polymarket');
+const { postWebhook } = require('../../lib/discord');
 
 loadEnv();
 
@@ -54,6 +53,45 @@ const MARKET_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const MARKET_ALERT_COOLDOWN_MS = 4 * 60 * 60 * 1000;
 
 function log(msg) { console.log(`[${new Date().toISOString()}] [poly-btc-5] ${msg}`); }
+
+// ─── Market URL discovery (Gamma API) ────────────────────────────────────────
+
+function _httpsGet(url) {
+  const https = require('https');
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers: { 'User-Agent': 'ace-trading-bot/1.0' } }, res => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => resolve({ status: res.statusCode, body: data }));
+    });
+    req.on('error', reject);
+    req.setTimeout(6000, () => { req.destroy(); reject(new Error('timeout')); });
+  });
+}
+
+async function discoverActiveMarket() {
+  try {
+    const { status, body } = await _httpsGet(
+      'https://gamma-api.polymarket.com/markets?search=btc+5+minutes&active=true&closed=false&limit=20'
+    );
+    if (status !== 200) return null;
+    const data = JSON.parse(body);
+    const arr  = Array.isArray(data) ? data : (data.markets || data.results || []);
+    const match = arr.find(m => {
+      const slug     = (m.slug || '').toLowerCase();
+      const question = (m.question || '').toLowerCase();
+      const isBtc    = slug.includes('btc') || question.includes('btc') || question.includes('bitcoin');
+      const is5m     = slug.includes('5m') || slug.includes('5-m') ||
+                       question.includes('5 min') || question.includes('5min');
+      return isBtc && is5m;
+    });
+    if (!match || !match.slug) return null;
+    return `https://polymarket.com/event/${match.slug}`;
+  } catch {
+    return null;
+  }
+}
+
 function readState()    { try { return JSON.parse(fs.readFileSync(STATE_FILE,  'utf8')); } catch { return {}; } }
 function writeState(s)  { try { fs.writeFileSync(STATE_FILE,  JSON.stringify(s, null, 2)); } catch {} }
 function readTrades()   { try { return JSON.parse(fs.readFileSync(TRADES_FILE, 'utf8')); } catch { return []; } }

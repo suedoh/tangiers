@@ -25,4 +25,20 @@ function loadEnv() {
     });
 }
 
-module.exports = { loadEnv, ROOT, ENV_FILE };
+/**
+ * Resolve an env var to its staging equivalent when ENVIRONMENT=staging.
+ * Usage: resolveWebhook('WEATHER_DISCORD_SIGNALS_WEBHOOK')
+ */
+function resolveWebhook(baseKey) {
+  const env = (process.env.ENVIRONMENT || 'production').toLowerCase();
+  if (env === 'staging') {
+    const stagingVal = process.env[`${baseKey}_STAGING`];
+    if (stagingVal) return stagingVal;
+    console.warn(`[env] ENVIRONMENT=staging but ${baseKey}_STAGING not set — falling back to production`);
+  }
+  return process.env[baseKey];
+}
+
+const isStaging = () => (process.env.ENVIRONMENT || 'production').toLowerCase() === 'staging';
+
+module.exports = { loadEnv, ROOT, ENV_FILE, resolveWebhook, isStaging };
