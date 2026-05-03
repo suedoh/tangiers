@@ -87,11 +87,14 @@ const BLOCKED_CITIES = new Set([
   'london',       // 14% WR (7 trades) — settlement station ambiguity (Heathrow vs city); bias correction alone cannot fix station mismatch
   'cape town',    // 31.3% WR (16 trades) — persistent model underperformance; no clear structural fix identified
   'jeddah',       // 33.3% WR (12 trades) — desert heat extremes structurally mis-modeled; positive P&L is noise at this sample size
+  'paris',        // 50.0% WR (26 trades) — zero predictive edge; settlement station (Orly/CDG) micro-climate diverges from GFS grid
 ]);
 
 // Cities allowed to paper-trade but never execute live orders against the Polymarket account.
 const PAPER_ONLY_CITIES = new Set([
-  'madrid',       // 42.1% WR (19 trades) — flagged; collecting more data before deciding to block or reinstate
+  'madrid',       // 57.7% WR (26 trades) — recovering but still below live threshold; continue collecting data
+  'chengdu',      // 52.0% WR (25 trades) — Sichuan Basin cloud/inversion dynamics degrade GFS skill; collecting more data
+  'milan',        // 53.8% WR (26 trades) — Po Valley cold-air pooling poorly modeled; below live threshold
 ]);
 
 const STATE_FILE  = path.join(ROOT, '.weather-state.json');
