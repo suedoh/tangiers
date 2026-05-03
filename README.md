@@ -1,10 +1,12 @@
-# Ace Trading System v1.1.0
+# Ace Trading System v1.3.0
 
-Automated multi-instrument trade setup detection for **BTC/USDT perpetual futures** and **Brent Crude (BZ!)**.
+Automated multi-instrument signal detection for **BTC/USDT perpetual futures**, **Brent Crude (BZ!)**, and **Polymarket BTC 5-min predictions**.
 
 Every minute the system connects to TradingView Desktop via CDP, reads price zones, CVD, OI, Session VP, and VWAP, evaluates setup criteria rule-by-rule, and posts complete trade plans to Discord — entry, stop, three TP targets, R:R ratios, and a quality score. Every signal is auto-logged with bar-accurate outcome tracking. A weekly performance report posts every Monday (BTC) and Sunday 5pm ET (BZ!). Type `!analyze` in any instrument channel for an on-demand sweep.
 
 **BZ! adds:** session-aware 1-min polling, AIS WebSocket tanker monitoring (Fujairah/Jebel Ali anchorages as Hormuz proxy), RSS feed monitoring across 7 sources, Claude Haiku sentiment classification, and a Sunday institutional war report with geopolitical scenarios.
+
+**Poly BTC-5 adds:** 5-min directional signals for the Polymarket "Will BTC be higher in 5 minutes?" market. 6-factor scoring across 5M→1M→1H sweep (CVD momentum, VWAP, 1H structure, OI, clean air, session). Score ≥ 5/6 triggers a signal for high-probability setups. Market URL auto-discovered hourly via Polymarket Gamma API. Full forward-test logging with outcome tracking and Monday weekly reports.
 
 ---
 
@@ -87,7 +89,20 @@ node scripts/trigger-check.js
 │   │   └── handlers/
 │   │       ├── btc.js                     ← BTC commands (!analyze, !trades, !status)
 │   │       ├── bz.js                      ← BZ! commands (!analyze, !report, !trades, !took, !take, !exit)
+│   │       ├── poly-btc-5.js              ← Poly BTC-5 commands (!analyze, !trades, !status, !report)
+│   │       ├── poly-btc-15.js             ← Poly BTC-15 commands (deprecated)
 │   │       └── shared.js                  ← cross-channel commands (!stop, !start)
+│   │
+│   ├── poly/
+│   │   ├── btc-5/                         ← Polymarket BTC 5-min module (active)
+│   │   │   ├── trigger-check.js           ← cron: 5M bar scorer + signal poster
+│   │   │   ├── analyze.js                 ← on-demand sweep (!analyze)
+│   │   │   └── weekly-report.js           ← Monday 09:00 UTC performance report
+│   │   └── btc-15/                        ← Polymarket BTC 15-min module (deprecated)
+│   │       ├── trigger-check.js           ← (inactive — cron removed)
+│   │       ├── analyze.js
+│   │       ├── weekly-report.js
+│   │       └── debug-studies.js           ← diagnostic: dump TradingView study names/values
 │   │
 │   ├── trigger-check.js                   ← BTC zone poller (every 10m)
 │   ├── mtf-analyze.js                     ← BTC 4-TF CDP sweep
@@ -106,6 +121,7 @@ node scripts/trigger-check.js
 │   └── bz-weekly.log
 ├── trades.json                            ← BTC signals + outcomes (gitignored)
 ├── bz-trades.json                         ← BZ! signals + outcomes (gitignored)
+├── poly-btc-15-trades.json                ← Poly BTC-15 bar evaluations + outcomes (gitignored)
 ├── my-trades.json                         ← BTC personal execution log (gitignored)
 ├── bz-my-trades.json                      ← BZ! personal execution log (gitignored)
 └── tradingview-mcp/                       ← TradingView MCP server (Claude Desktop only)
@@ -116,12 +132,14 @@ node scripts/trigger-check.js
 ## Cron Schedule
 
 ```
-*/10 * * * *   trigger-check.js              — BTC zone trigger + outcome updates
-*/1  * * * *   discord-bot/index.js          — multi-channel bot (all instruments)
-*/1  * * * *   bz/trigger-check.js           — BZ! zone poller (self-throttles off-session)
-0    9 * * 1   weekly-report.js              — BTC Monday 09:00 UTC → #btc-backtest
-0   14 * * 0   weekly-war-report.js          — BTC Sunday 14:00 UTC → #btc-weekly-war-report
-0   21 * * 0   bz/weekly-report.js           — BZ! Sunday 21:00 UTC (17:00 ET) → #bz!-weekly-war-report
+*/10 * * * *                    trigger-check.js             — BTC zone trigger + outcome updates
+*/1  * * * *                    discord-bot/index.js         — multi-channel bot (all instruments)
+*/1  * * * *                    bz/trigger-check.js          — BZ! zone poller (self-throttles off-session)
+1,6,11,16,21,26,31,36,41,46,51,56 * * * *  poly/btc-5/trigger-check.js  — Poly BTC-5 bar scorer (1 min after bar open)
+0    9 * * 1                    weekly-report.js             — BTC Monday 09:00 UTC → #btc-backtest
+0    9 * * 1                    poly/btc-5/weekly-report.js  — Poly Monday 09:00 UTC → #poly-btc-5-report
+0   14 * * 0                    weekly-war-report.js         — BTC Sunday 14:00 UTC → #btc-weekly-war-report
+0   21 * * 0                    bz/weekly-report.js          — BZ! Sunday 21:00 UTC (17:00 ET) → #bz!-weekly-war-report
 ```
 
 View: `crontab -l`
@@ -165,6 +183,14 @@ pm2 restart bz-news-watch     # restart after config change
 | `!exit tp1\|tp2\|tp3\|stop\|manual <price>` | Close trade, log outcome |
 | `!stop` / `!start` | Pause / resume all notifications |
 
+### Poly BTC-5 (`#poly-btc-5` channels)
+| Command | Action |
+|---|---|
+| `!analyze` | On-demand 5M→1M→1H sweep, always posts score + probability |
+| `!trades` | Last 20 bar evaluations with prediction, score, outcome, correct |
+| `!status` | Current bar score + overall win rate |
+| `!report` | Generate weekly performance report immediately |
+
 ---
 
 ## Indicator Stack
@@ -186,6 +212,16 @@ pm2 restart bz-news-watch     # restart after config change
 | VWAP | Directional bias (above = bullish) |
 | Cumulative Volume Delta | Order flow |
 | Open Interest | Positioning |
+
+### Poly BTC-5 (BINANCE:BTCUSDT.P)
+| Indicator | TF | Purpose |
+|---|---|---|
+| Visible Range Volume Profile | 5M | Clean air check — POC/VAH/VAL proximity |
+| VWAP | 5M | Price above/below VWAP (>0.15% threshold) |
+| Cumulative Volume Delta | 5M | CVD trend vs prior bar (rising/falling) |
+| Open Interest | 5M | Rising OI = new positioning conviction |
+| OHLCV (micro momentum) | 1M | Price momentum — last 3 closes direction |
+| OHLCV (macro structure) | 1H | Higher highs/lows or lower lows/highs |
 
 ---
 
@@ -211,3 +247,10 @@ pm2 restart bz-news-watch     # restart after config change
 | `!took` / `!take` / `!exit` tracking | ✅ Live |
 | Sunday 5pm ET war report | ✅ Live |
 | Geopolitical flag (BZ_GEOPOLITICAL_FLAG) | ✅ Active |
+| **Poly BTC-5** | |
+| 5M bar scorer + signal poster (score ≥ 5/6) | ✅ Live |
+| Bar-accurate outcome tracking | ✅ Live |
+| Forward-test trade log | ✅ Live |
+| Market URL auto-discovery (Gamma API, hourly) | ✅ Live |
+| Monday weekly performance report | ✅ Live |
+| `!analyze` / `!trades` / `!status` / `!report` | ✅ Live |

@@ -11,15 +11,20 @@
  *   #bz-signals, #bz-backtest, #bz-weekly-war-report → bz handler
  */
 
-const btcHandler    = require('./handlers/btc');
-const bzHandler     = require('./handlers/bz');
-const sharedHandler = require('./handlers/shared');
+const btcHandler       = require('./handlers/btc');
+const bzHandler        = require('./handlers/bz');
+const polyBtc5Handler  = require('./handlers/poly-btc-5');
+const polyBtc15Handler = require('./handlers/poly-btc-15');
+const sharedHandler    = require('./handlers/shared');
 
 // Map of channel name prefix → handler module
-// Order matters: first match wins
+// Order matters: first match wins. More-specific prefixes must come before shorter ones.
 const ROUTES = [
-  { prefix: 'bz',  handler: bzHandler  },
-  { prefix: 'btc', handler: btcHandler },
+  { prefix: 'bz',          handler: bzHandler        },
+  { prefix: 'btc',         handler: btcHandler       },
+  { prefix: 'poly-btc-5',  handler: polyBtc5Handler  },
+  { prefix: 'poly-btc-15', handler: polyBtc15Handler },
+  { prefix: 'poly-btc',    handler: polyBtc5Handler  },  // fallback → btc-5
 ];
 
 /**
@@ -44,9 +49,13 @@ function allChannelIds() {
   if (process.env.DISCORD_CHANNEL_ID)                   ids.push({ id: process.env.DISCORD_CHANNEL_ID,                   prefix: 'btc' });
   if (process.env.DISCORD_BTC_WAR_REPORT_CHANNEL_ID)    ids.push({ id: process.env.DISCORD_BTC_WAR_REPORT_CHANNEL_ID,    prefix: 'btc' });
   if (process.env.DISCORD_BTC_BACKTEST_CHANNEL_ID)      ids.push({ id: process.env.DISCORD_BTC_BACKTEST_CHANNEL_ID,      prefix: 'btc' });
-  if (process.env.BZ_DISCORD_SIGNALS_CHANNEL_ID)        ids.push({ id: process.env.BZ_DISCORD_SIGNALS_CHANNEL_ID,        prefix: 'bz' });
-  if (process.env.BZ_DISCORD_WAR_REPORT_CHANNEL_ID)     ids.push({ id: process.env.BZ_DISCORD_WAR_REPORT_CHANNEL_ID,     prefix: 'bz' });
-  if (process.env.BZ_DISCORD_BACKTEST_CHANNEL_ID)       ids.push({ id: process.env.BZ_DISCORD_BACKTEST_CHANNEL_ID,       prefix: 'bz' });
+  if (process.env.BZ_DISCORD_SIGNALS_CHANNEL_ID)            ids.push({ id: process.env.BZ_DISCORD_SIGNALS_CHANNEL_ID,            prefix: 'bz' });
+  if (process.env.BZ_DISCORD_WAR_REPORT_CHANNEL_ID)         ids.push({ id: process.env.BZ_DISCORD_WAR_REPORT_CHANNEL_ID,         prefix: 'bz' });
+  if (process.env.BZ_DISCORD_BACKTEST_CHANNEL_ID)           ids.push({ id: process.env.BZ_DISCORD_BACKTEST_CHANNEL_ID,           prefix: 'bz' });
+  if (process.env.POLY_BTC_5_SIGNALS_CHANNEL_ID)            ids.push({ id: process.env.POLY_BTC_5_SIGNALS_CHANNEL_ID,            prefix: 'poly-btc-5'  });
+  if (process.env.POLY_BTC_5_REPORT_CHANNEL_ID)             ids.push({ id: process.env.POLY_BTC_5_REPORT_CHANNEL_ID,             prefix: 'poly-btc-5'  });
+  if (process.env.POLY_BTC_15_SIGNALS_CHANNEL_ID)           ids.push({ id: process.env.POLY_BTC_15_SIGNALS_CHANNEL_ID,           prefix: 'poly-btc-15' });
+  if (process.env.POLY_BTC_15_REPORT_CHANNEL_ID)            ids.push({ id: process.env.POLY_BTC_15_REPORT_CHANNEL_ID,            prefix: 'poly-btc-15' });
   return ids;
 }
 

@@ -2,24 +2,25 @@
 
 ## What Is Tangiers?
 
-Tangiers is the **Ace Trading System** — an automated multi-instrument trade setup detection and alerting platform running on macOS. It monitors **BTC/USDT perpetual futures** (Binance) and **Brent Crude futures (BZ!)** (NYMEX), detects high-probability setups via TradingView Desktop, and delivers structured trade plans to Discord. Zero AI usage in the automated pipeline — all rules are deterministic.
+Tangiers is the **Ace Trading System** — an automated multi-instrument trade setup detection and alerting platform running on macOS. It monitors **BTC/USDT perpetual futures** (Binance), **Brent Crude futures (BZ!)** (NYMEX), and **Polymarket BTC 5-min directional predictions**, detects high-probability setups via TradingView Desktop, and delivers structured trade plans to Discord. Zero AI usage in the automated pipeline (except BZ! sentiment classification) — all signal rules are deterministic.
 
 ---
 
-## Two Instruments, Two Pipelines
+## Three Instruments, Three Pipelines
 
-| | **BTC** | **BZ! (Brent Crude)** |
-|---|---|---|
-| Symbol | `BINANCE:BTCUSDT.P` | `NYMEX:BZ1!` |
-| Zone source | Visible Range Volume Profile (VRVP) | LuxAlgo SMC supply/demand boxes |
-| Trigger script | `scripts/trigger-check.js` | `scripts/bz/trigger-check.js` |
-| Analysis script | `scripts/mtf-analyze.js` | `scripts/bz/analyze.js` |
-| Poll frequency | Every 10 min (cron) | Every 1 min (cron, session-gated) |
-| Proximity buffer | `max(price × 0.005, zone_width × 1.5)` | `max(atr14 × 0.35, 1.50)` |
-| Session gating | None | Skips NYMEX close 5–6pm ET; throttles post-settle |
-| Extra intelligence | — | AIS tanker monitoring + RSS news feeds |
-| Sentiment | None | Claude Haiku 4.5 (on trigger only) |
-| Discord channels | `#btc-*` | `#bz!-*` |
+| | **BTC** | **BZ! (Brent Crude)** | **Poly BTC-5** |
+|---|---|---|---|
+| Symbol | `BINANCE:BTCUSDT.P` | `NYMEX:BZ1!` | `BINANCE:BTCUSDT.P` |
+| Zone/signal source | VRVP levels | LuxAlgo SMC boxes | 6-factor score (CVD, VWAP, OI, structure, clean air, session) |
+| Trigger script | `scripts/trigger-check.js` | `scripts/bz/trigger-check.js` | `scripts/poly/btc-5/trigger-check.js` |
+| Analysis script | `scripts/mtf-analyze.js` | `scripts/bz/analyze.js` | `scripts/poly/btc-5/analyze.js` |
+| Poll frequency | Every 10 min | Every 1 min (session-gated) | Every 5 min (1 min after bar open) |
+| Signal threshold | Zone proximity | Zone proximity + quality score | Score ≥ 5/6 |
+| TF sweep | 12H→4H→1H→30M | 4H→1H→30M | 5M primary → 1M momentum → 1H structure |
+| Session gating | None | Skips NYMEX close 5–6pm ET | Active 08–21 UTC (scored, not gated) |
+| Extra intelligence | — | AIS tanker monitoring + RSS news | Polymarket Gamma API market URL auto-discovery |
+| Sentiment | None | Claude Haiku 4.5 (on trigger) | None |
+| Discord channels | `#btc-*` | `#bz!-*` | `#poly-btc-5*` |
 
 ---
 
@@ -36,13 +37,14 @@ Tangiers is the **Ace Trading System** — an automated multi-instrument trade s
 ├── .env.example                        ← all required env vars documented
 │
 ├── scripts/
-│   ├── lib/                            ← shared utilities (BZ uses these; BTC inlines its own)
+│   ├── lib/                            ← shared utilities
 │   │   ├── env.js                      ← .env loader, ROOT path
 │   │   ├── cdp.js                      ← TradingView CDP: connect, symbol/TF, price, studies, boxes, ATR
-│   │   ├── lock.js                     ← file-based mutex at .tradingview-lock (prevents BTC/BZ conflicts)
+│   │   ├── lock.js                     ← file-based mutex at .tradingview-lock (prevents CDP conflicts)
 │   │   ├── discord.js                  ← shared webhook poster (6 alert types)
 │   │   ├── zones.js                    ← classifyZones(), nearestZones(), session cooldowns
-│   │   └── sentiment.js               ← Claude Haiku 4.5 sentiment classifier (BZ only)
+│   │   ├── sentiment.js               ← Claude Haiku 4.5 sentiment classifier (BZ only)
+│   │   └── polymarket.js              ← Gamma API market URL discovery (Poly BTC-5)
 │   │
 │   ├── bz/                             ← BZ! (Brent Crude) instrument
 │   │   ├── trigger-check.js            ← 1-min session-aware zone poller
@@ -50,12 +52,20 @@ Tangiers is the **Ace Trading System** — an automated multi-instrument trade s
 │   │   ├── news-watch.js              ← AIS WebSocket + RSS monitor (pm2 process)
 │   │   └── weekly-report.js           ← Sunday 5pm ET war report → #bz!-weekly-war-report
 │   │
-│   ├── discord-bot/                    ← multi-channel Discord bot (BTC + BZ)
+│   ├── poly/
+│   │   ├── btc-5/                      ← Polymarket BTC 5-min module (active)
+│   │   │   ├── trigger-check.js        ← 5-min bar scorer, signals at ≥5/6, outcome tracking
+│   │   │   ├── analyze.js              ← on-demand sweep (!analyze), always posts score
+│   │   │   └── weekly-report.js       ← Monday 09:00 UTC performance report
+│   │   └── btc-15/                     ← deprecated (15-min Polymarket market no longer exists)
+│   │
+│   ├── discord-bot/                    ← multi-channel Discord bot (all instruments)
 │   │   ├── index.js                    ← main entry: polls channels, handles reactions
 │   │   ├── router.js                   ← channel prefix → handler (add new instrument here)
 │   │   └── handlers/
 │   │       ├── btc.js                  ← !analyze, !trades, !status
 │   │       ├── bz.js                   ← !analyze, !report, !trades, !took, !take, !exit
+│   │       ├── poly-btc-5.js          ← !analyze, !trades, !status, !report
 │   │       └── shared.js              ← !stop, !start (any channel)
 │   │
 │   ├── trigger-check.js                ← BTC zone poller (every 10m)
@@ -79,10 +89,12 @@ Tangiers is the **Ace Trading System** — an automated multi-instrument trade s
 │
 ├── trades.json                         ← BTC signals + outcomes (gitignored, auto-created)
 ├── bz-trades.json                      ← BZ! signals + outcomes (gitignored, auto-created)
+├── poly-btc-5-trades.json             ← Poly BTC-5 bar evaluations + outcomes (gitignored, auto-created)
 ├── .trigger-state.json                 ← BTC: zone cooldowns, OI history, reclaim list, signal IDs
 ├── .bz-trigger-state.json              ← BZ: zone cooldowns, signal IDs
 ├── .bz-news-state.json                 ← BZ news monitor: seen articles, AIS history/baseline
 ├── .discord-bot-state.json            ← Discord bot: last-seen message IDs per channel
+├── .poly-btc-5-state.json             ← Poly BTC-5: last bar fired, CVD prev, OI prev, market URL cache
 └── tradingview-mcp/                    ← TradingView MCP server (Claude Desktop only, git submodule)
 ```
 
@@ -124,6 +136,30 @@ Tangiers is the **Ace Trading System** — an automated multi-instrument trade s
   - New headline match → posts info alert + fires analyze.js
   - Deduplicates by article link; state in `.bz-news-state.json`
 - Both layers respect a **10-minute analysis cooldown** to prevent spam
+
+### `scripts/poly/btc-5/trigger-check.js` — Poly BTC-5 Bar Scorer
+- Runs **1 minute after each 5-min bar open** (`1,6,11,16,21,26,31,36,41,46,51,56 * * * *`)
+- Deduplicates by bar boundary: only fires once per `floor(minute/5)*5` bar
+- **TF sweep**: 5M (VWAP, CVD, OI, VRVP) → 1M (3 closes for micro momentum) → 1H (3 bars for structure)
+- **6 factors scored** (each worth 1 point, CVD up to 2):
+  - CVD: 1M momentum + CVD delta vs prior state (2pts if both agree, 1pt if momentum only)
+  - VWAP: price >0.15% above/below VWAP
+  - 1H structure: HH/HL or LL/LH over last 3 hourly bars
+  - OI rising: current OI > prior bar OI
+  - Clean air: price not within 0.3% of VRVP POC/VAH/VAL
+  - Session: 08–21 UTC
+- **Signal fires if score ≥ 5/6** — posts to `#poly-btc-5` with direction, probability, factor breakdown
+- **Outcome check**: on each run reads prior bar's close vs open — updates `poly-btc-5-trades.json`
+- **Market URL auto-discovery**: once per hour queries Polymarket Gamma API; posts Discord alert on URL change or discovery failure; cached in `state._marketUrl`
+- State: `.poly-btc-5-state.json` (CVD prev, OI prev, last bar fired, last market check, market URL)
+- Lock: `'poly-btc-5'`
+
+### `scripts/poly/btc-5/analyze.js` — Poly BTC-5 On-Demand
+- Triggered by `!analyze` Discord command or manually
+- Same 5M→1M→1H sweep; no state/dedup — always posts current bar score regardless of threshold
+- CVD limited to 1M momentum only (no prior CVD in state → max 1pt for CVD factor)
+- Probability displayed as `min(88, 50 + |upScore − downScore| × 9)`
+- Lock: `'poly-analyze-5'`
 
 ### `scripts/discord-bot/index.js` — Multi-Channel Bot
 - Runs every **1 minute** via crontab
@@ -180,6 +216,18 @@ Key shared helpers in `scripts/lib/cdp.js`:
 | Cumulative Volume Delta | Order flow |
 | Open Interest | Positioning |
 
+### Indicator Stack — Poly BTC-5 (BTCUSDT.P tab, same as BTC)
+Poly BTC-5 uses the same TradingView tab as BTC but sweeps three timeframes.
+
+| Indicator | TF | What's read |
+|---|---|---|
+| Visible Range Volume Profile | 5M | POC, VAH, VAL — clean air check (0.3% proximity) |
+| VWAP | 5M | Price vs VWAP (>0.15% threshold for directional score) |
+| Cumulative Volume Delta | 5M | CVD value — stored in state, delta vs prior bar = trend direction |
+| Open Interest | 5M | OI value — rising vs prior bar |
+| OHLCV (micro momentum) | 1M | Last 3 closes: consecutive direction |
+| OHLCV (macro structure) | 1H | Last 3 bars: HH/HL or LL/LH pattern |
+
 ---
 
 ## Discord Structure
@@ -194,9 +242,20 @@ Key shared helpers in `scripts/lib/cdp.js`:
 | `BZ_DISCORD_SIGNALS_WEBHOOK` | `#bz!-signals` | BZ alerts, approaching, errors |
 | `BZ_DISCORD_BACKTEST_WEBHOOK` | `#bz!-backtest` | BZ signal log, weekly report |
 | `BZ_DISCORD_WAR_REPORT_WEBHOOK` | `#bz!-weekly-war-report` | BZ Sunday war report |
+| `POLY_BTC_5_SIGNALS_WEBHOOK` | `#poly-btc-5` | Poly BTC-5 signals, analysis, errors |
+| `POLY_BTC_5_REPORT_WEBHOOK` | `#poly-btc-5-report` | Poly BTC-5 Monday weekly report |
 
 ### Bot Channel IDs (set in `.env`)
-`DISCORD_CHANNEL_ID`, `BZ_DISCORD_SIGNALS_CHANNEL_ID`, `BZ_DISCORD_WAR_REPORT_CHANNEL_ID`, `BZ_DISCORD_BACKTEST_CHANNEL_ID`
+`DISCORD_CHANNEL_ID`, `BZ_DISCORD_SIGNALS_CHANNEL_ID`, `BZ_DISCORD_WAR_REPORT_CHANNEL_ID`, `BZ_DISCORD_BACKTEST_CHANNEL_ID`, `POLY_BTC_5_SIGNALS_CHANNEL_ID`, `POLY_BTC_5_REPORT_CHANNEL_ID`
+
+### Poly BTC-5 env vars
+| Variable | Purpose |
+|---|---|
+| `POLY_BTC_5_SIGNALS_WEBHOOK` | Webhook for signals + analysis + errors |
+| `POLY_BTC_5_REPORT_WEBHOOK` | Webhook for weekly report |
+| `POLY_BTC_5_SIGNALS_CHANNEL_ID` | Channel for bot polling |
+| `POLY_BTC_5_REPORT_CHANNEL_ID` | Channel for bot polling |
+| `POLY_BTC_5_MARKET_URL` | Seed URL for Polymarket market (auto-updated by Gamma API) |
 
 ### Alert Types (6)
 `approaching` (yellow) · `long` (green) · `short` (red) · `info` (blue) · `error` (dark red) · `catalyst` (orange, BZ only)
@@ -206,12 +265,14 @@ Key shared helpers in `scripts/lib/cdp.js`:
 ## Cron Schedule
 
 ```
-*/10 * * * *   scripts/trigger-check.js               — BTC zone trigger + outcome tracking
-*/1  * * * *   scripts/discord-bot/index.js           — multi-channel bot (all instruments)
-*/1  * * * *   scripts/bz/trigger-check.js TZ=ET      — BZ! zone poller (session-gated)
-0    9 * * 1   scripts/weekly-report.js               — BTC Monday 09:00 UTC
-0   14 * * 0   scripts/weekly-war-report.js           — BTC Sunday 14:00 UTC
-0   21 * * 0   scripts/bz/weekly-report.js            — BZ! Sunday 21:00 UTC (17:00 ET)
+*/10 * * * *                                  scripts/trigger-check.js               — BTC zone trigger + outcome tracking
+*/1  * * * *                                  scripts/discord-bot/index.js           — multi-channel bot (all instruments)
+*/1  * * * *                                  scripts/bz/trigger-check.js TZ=ET      — BZ! zone poller (session-gated)
+1,6,11,16,21,26,31,36,41,46,51,56 * * * *    scripts/poly/btc-5/trigger-check.js   — Poly BTC-5 bar scorer (1 min after bar open)
+0    9 * * 1                                  scripts/weekly-report.js               — BTC Monday 09:00 UTC
+0    9 * * 1                                  scripts/poly/btc-5/weekly-report.js   — Poly Monday 09:00 UTC
+0   14 * * 0                                  scripts/weekly-war-report.js           — BTC Sunday 14:00 UTC
+0   21 * * 0                                  scripts/bz/weekly-report.js            — BZ! Sunday 21:00 UTC (17:00 ET)
 ```
 
 View installed jobs: `crontab -l`
@@ -238,8 +299,10 @@ pm2 restart bz-news-watch
 | `.bz-trigger-state.json` | BZ trigger/analyze + discord-bot | Zone cooldowns, CDP error cooldown, signal message IDs |
 | `.bz-news-state.json` | bz-news-watch | Seen article IDs, AIS vessel history, AIS baseline |
 | `.discord-bot-state.json` | discord-bot | Last-seen Discord message ID per channel |
+| `.poly-btc-5-state.json` | poly/btc-5/trigger-check.js | Last bar fired, CVD prev, OI prev, market URL cache, last market check timestamp |
 | `trades.json` | BTC pipeline | All BTC signals with lifecycle fields |
 | `bz-trades.json` | BZ pipeline | All BZ! signals with lifecycle fields |
+| `poly-btc-5-trades.json` | Poly BTC-5 pipeline | All 5-min bar evaluations: score, direction, signaled, outcome, correct |
 | `.tradingview-lock` | lib/lock.js | Ephemeral mutex (deleted after each CDP session) |
 
 ---

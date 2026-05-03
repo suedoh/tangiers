@@ -1,0 +1,180 @@
+//@version=5
+indicator(
+     title            = "Session Sweeps",
+     shorttitle       = "⬡ SESSION SWEEPS",
+     overlay          = true,
+     max_lines_count  = 500,
+     max_labels_count = 500
+ )
+
+// ╔══════════════════════════════════════════════════════════════════╗
+// ║                                                                  ║
+// ║    SESSION SWEEPS  ◈  Neo-Matrix Edition  ◈  Ace Trading         ║
+// ║                                                                  ║
+// ║  Marks Asia + London session H/L after each session closes.      ║
+// ║  Lines extend right. Labels float to chart edge.                 ║
+// ║  Auto-expires after 24h. Lookback toggle up to 7 days.           ║
+// ║                                                                  ║
+// ║  Best on: 1H, 30M, 15M, 5M. Higher TFs = session-boundary slop. ║
+// ║                                                                  ║
+// ╚══════════════════════════════════════════════════════════════════╝
+
+// ┌─────────────────────────────── SESSIONS ──────────────────────────────────┐
+
+GRP_SESS = "◈  Sessions"
+
+show_asia    = input.bool(true, "Asia Session",   group = GRP_SESS)
+show_london  = input.bool(true, "London Session", group = GRP_SESS)
+
+// input.session() gives a visual time-range picker in the settings panel
+asia_sess   = input.session("0000-0800", "Asia Session Time (UTC)",   group = GRP_SESS,
+     tooltip = "Default: 00:00–08:00 UTC  (Tokyo / Singapore)")
+london_sess = input.session("0800-1700", "London Session Time (UTC)", group = GRP_SESS,
+     tooltip = "Default: 08:00–17:00 UTC  (London open → NY pre-market)")
+
+// ┌─────────────────────────────── LOOKBACK ──────────────────────────────────┐
+
+GRP_LB = "◈  Lookback"
+
+lookback_on   = input.bool(false, "Enable Lookback",
+     group   = GRP_LB,
+     tooltip = "OFF → each level auto-expires after 24 h.\nON  → levels persist up to N days back.")
+lookback_days = input.int(7, "Days Back", minval = 1, maxval = 7, group = GRP_LB)
+
+// ┌──────────────────────────── NEO-MATRIX COLORS ────────────────────────────┐
+//  Set your chart theme to dark/black for full matrix effect.
+//  Recommended: TradingView → Appearance → Candlestick Colors (dark) + black BG.
+
+GRP_C = "◈  Colors  [ Neo-Matrix ]"
+
+C_ASIA_H  = input.color(#00ff41,                "Asia High",          group = GRP_C)
+C_ASIA_L  = input.color(color.new(#00c032, 30), "Asia Low",           group = GRP_C)
+C_LON_H   = input.color(#00e5ff,                "London High",        group = GRP_C)
+C_LON_L   = input.color(color.new(#00a8cc, 30), "London Low",         group = GRP_C)
+C_LBL_BG  = input.color(color.new(#000d05,  5), "Label Background",   group = GRP_C)
+
+// ┌─────────────────────────────────── STYLE ─────────────────────────────────┐
+
+GRP_X = "◈  Style"
+
+LINE_W  = input.int(1,        "Line Width",  minval = 1, maxval = 4,               group = GRP_X)
+LS_STR  = input.string("Dashed", "Line Style",  options = ["Solid","Dashed","Dotted"], group = GRP_X)
+LBL_SZ  = input.string("Small",  "Label Size",  options = ["Tiny","Small","Normal"],  group = GRP_X)
+
+// ─── RESOLVE ENUMS ──────────────────────────────────────────────────────────
+
+ls = LS_STR == "Dashed" ? line.style_dashed :
+     LS_STR == "Dotted" ? line.style_dotted : line.style_solid
+
+sz = LBL_SZ == "Tiny"   ? size.tiny   :
+     LBL_SZ == "Normal" ? size.normal : size.small
+
+// ─── SESSION DETECTION (UTC) ────────────────────────────────────────────────
+
+is_asia   = show_asia   and not na(time(timeframe.period, asia_sess,   "UTC"))
+is_london = show_london and not na(time(timeframe.period, london_sess, "UTC"))
+
+// ─── ACCUMULATE SESSION HIGH / LOW ──────────────────────────────────────────
+
+var float asia_h   = na
+var float asia_l   = na
+var float london_h = na
+var float london_l = na
+
+var bool prev_asia   = false
+var bool prev_london = false
+
+if is_asia
+    asia_h := na(asia_h) ? high : math.max(asia_h, high)
+    asia_l := na(asia_l) ? low  : math.min(asia_l, low)
+
+if is_london
+    london_h := na(london_h) ? high : math.max(london_h, high)
+    london_l := na(london_l) ? low  : math.min(london_l, low)
+
+asia_ended   = prev_asia   and not is_asia
+london_ended = prev_london and not is_london
+
+// ─── OBJECT POOLS ───────────────────────────────────────────────────────────
+// Parallel arrays — each index = one price level (line + label + creation time)
+
+var line[]  pool_lines  = array.new_line()
+var label[] pool_labels = array.new_label()
+var int[]   pool_times  = array.new_int()    // bar_time at creation (ms)
+
+MS_24H = 86400000  // milliseconds per day
+
+// ─── DRAW ONE LEVEL ─────────────────────────────────────────────────────────
+
+f_draw(float price, color col, string row1, string row2) =>
+    ln = line.new(
+         bar_index, price, bar_index + 2, price,
+         xloc   = xloc.bar_index,
+         extend = extend.right,
+         color  = col,
+         style  = ls,
+         width  = LINE_W
+     )
+    lb = label.new(
+         bar_index + 3, price,
+         text      = row1 + "\n" + row2,
+         xloc      = xloc.bar_index,
+         yloc      = yloc.price,
+         color     = C_LBL_BG,
+         textcolor = col,
+         style     = label.style_label_right,   // box to the left of anchor → visible on right edge
+         size      = sz
+     )
+    array.push(pool_lines,  ln)
+    array.push(pool_labels, lb)
+    array.push(pool_times,  time)
+
+// ─── FIRE ON SESSION END ────────────────────────────────────────────────────
+// Always draw up to 7-day history — cleanup controls what's actually shown.
+
+MAX_LB_MS   = 7 * MS_24H
+cutoff_draw = timenow - MAX_LB_MS
+
+if asia_ended
+    if show_asia and not na(asia_h) and time >= cutoff_draw
+        f_draw(asia_h, C_ASIA_H, "▲  ASIA  H", str.tostring(asia_h, format.mintick))
+        f_draw(asia_l, C_ASIA_L, "▼  ASIA  L", str.tostring(asia_l, format.mintick))
+    asia_h := na
+    asia_l := na
+
+if london_ended
+    if show_london and not na(london_h) and time >= cutoff_draw
+        f_draw(london_h, C_LON_H, "▲  LDN   H", str.tostring(london_h, format.mintick))
+        f_draw(london_l, C_LON_L, "▼  LDN   L", str.tostring(london_l, format.mintick))
+    london_h := na
+    london_l := na
+
+// ─── EXPIRY CLEANUP ─────────────────────────────────────────────────────────
+// Walks the pool backwards and deletes entries older than the expiry window.
+// Lookback OFF → 24 h  |  Lookback ON → N days
+
+expire_ms = lookback_on ? lookback_days * MS_24H : MS_24H
+
+i = array.size(pool_lines) - 1
+while i >= 0
+    if time - array.get(pool_times, i) > expire_ms
+        line.delete( array.get(pool_lines,  i))
+        label.delete(array.get(pool_labels, i))
+        array.remove(pool_lines,  i)
+        array.remove(pool_labels, i)
+        array.remove(pool_times,  i)
+    i -= 1
+
+// ─── FLOAT LABELS TO THE RIGHT EDGE ─────────────────────────────────────────
+// On each new bar (and the last bar), reposition all labels to bar_index + 5.
+// Because label.style_label_right anchors the tip on the right, the text box
+// appears WITHIN the visible chart area while the anchor sits just off-screen.
+
+if barstate.islast or barstate.isrealtime
+    for j = 0 to array.size(pool_labels) - 1
+        label.set_x(array.get(pool_labels, j), bar_index + 5)
+
+// ─── ADVANCE STATE ──────────────────────────────────────────────────────────
+
+prev_asia   := is_asia
+prev_london := is_london
