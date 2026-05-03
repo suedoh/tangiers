@@ -33,6 +33,7 @@ const { autoExit }      = require('./exit-monitor');
 const {
   fetchWeatherMarkets,
   getMarketPrice,
+  getNoTokenId,
   kellySizing,
   marketUrl,
 } = require('../lib/polymarket');
@@ -904,8 +905,9 @@ async function main() {
     // ── Live order execution: NO+Range only ────────────────────────────────────
     if (LIVE_EXECUTE && bestSide === 'no' && mp.direction === 'range' && aiAnalysis.decision === 'take' && !PAPER_ONLY_CITIES.has(mp.city?.toLowerCase())) {
       const { placeNoOrder, pollOrderFill } = require('../lib/polymarket-orders');
-      const noToken = (bestMarket.tokens || []).find(t => /^no$/i.test(t.outcome));
-      if (noToken) {
+      // Gamma API does not return token IDs — fetch NO token from CLOB
+      const noTokenId = await getNoTokenId(conditionId);
+      if (noTokenId) {
         // Duplicate live order guard: skip if a live position already exists for this market
         // (open = order pending fill, filled = position open awaiting settlement).
         // Prevents double-exposure when a superseded trade triggered a re-signal.
@@ -966,7 +968,7 @@ async function main() {
           } else if (liveDollars > 0) {
             (async () => {
               try {
-                const result = await placeNoOrder(conditionId, noToken.token_id, bestMarket.noPrice, liveDollars);
+                const result = await placeNoOrder(conditionId, noTokenId, bestMarket.noPrice, liveDollars);
                 // Merge liveOrder into the trade record we just pushed
                 const liveIdx = trades.findIndex(t => t.id === id);
                 if (liveIdx !== -1) {
@@ -1010,7 +1012,7 @@ async function main() {
         } // end if (available < LIVE_MIN_BALANCE) else
         } // end if (activeLiveOrder) else
       } else {
-        log(`${id}: NO token not found in bestMarket.tokens — skipping live order`);
+        log(`${id}: NO token not found on CLOB for conditionId=${conditionId} — skipping live order`);
       }
     }
     // ──────────────────────────────────────────────────────────────────────────

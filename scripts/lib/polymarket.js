@@ -543,6 +543,25 @@ async function getMarketPrice(conditionId) {
 }
 
 /**
+ * Fetch the NO token ID for a market from the CLOB API.
+ * The Gamma API does not return token IDs, so we must fetch them separately
+ * from the CLOB when we need to place a live order.
+ *
+ * @param {string} conditionId
+ * @returns {Promise<string|null>}  NO token_id, or null if unavailable
+ */
+async function getNoTokenId(conditionId) {
+  try {
+    const data   = await httpGet(CLOB_API, `/markets/${conditionId}`);
+    const tokens = data.tokens || [];
+    const no     = tokens.find(t => /^no$/i.test(t.outcome));
+    return no?.token_id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Build the Polymarket market URL using the event slug.
  */
 function marketUrl(market) {
@@ -577,6 +596,7 @@ function kellySizing(modelProb, marketPrice, side, bankroll = 500, kellyFrac = 0
 module.exports = {
   fetchWeatherMarkets,
   getMarketPrice,
+  getNoTokenId,
   parseQuestion,
   cityCoords,
   kellySizing,
