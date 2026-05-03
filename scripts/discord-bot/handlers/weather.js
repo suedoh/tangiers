@@ -14,6 +14,8 @@
  *   !sell <id> [--dry]          — exit open position at current Polymarket price
  *   !took <id>                  — log that you manually entered a paper trade
  *   !exit <id> <outcome>        — log manual exit (win|loss|manual)
+ *   !addlive <id> <dollars> <price_cents> [orderId]
+ *                               — attach a manually-placed Polymarket live order to a signal
  */
 
 const fs   = require('fs');
@@ -56,6 +58,7 @@ async function handle(message, api) {
   if (/^!resolve-status\b/i.test(text))  { await handleResolveStatus(user, api);     return true; }
   if (/^!took\b/i.test(text))            { await handleTook(user, args[0], api);     return true; }
   if (/^!exit\b/i.test(text))            { await handleExit(user, args, api);        return true; }
+  if (/^!addlive\b/i.test(text))         { await handleAddLive(user, args, api);     return true; }
 
   return false;
 }
@@ -337,7 +340,7 @@ async function handleTrades(user, api) {
     }
   }
 
-  pos.push('', `*\`!took <id>\` to log entry · \`!sell <id>\` to exit at live price · \`!exit <id> win|loss\` to close · \`!settle\` to resolve expired · \`!performance\` for deep analysis*`);
+  pos.push('', `*\`!took <id>\` to log entry · \`!sell <id>\` to exit at live price · \`!exit <id> win|loss\` to close · \`!addlive <id> <$> <¢>\` to attach manual order · \`!settle\` to resolve expired · \`!performance\` for deep analysis*`);
 
   await api.sendMessage(pos.join('\n').slice(0, 1950));
 }
@@ -581,6 +584,118 @@ async function handleSell(user, args, api) {
 
   if (!dry && BACKTEST_HOOK) {
     await postWebhook(BACKTEST_HOOK, pnl >= 0 ? 'long' : 'error', card, 'Weather • Paper Sell');
+  }
+}
+
+// ─── !addlive ────────────────────────────────────────────────────────────────
+//
+// Attach a manually-placed Polymarket live order to a signal record so it
+// is tracked for settlement, capital accounting, and P&L.
+//
+// Usage:
+//   !addlive <signal-id> <dollars> <price_cents> [polymarket-order-id]
+//
+// Example:
+//   !addlive wx-mopia8t186ef 15 45
+//   → $15 in at 45¢/share → 33.33 NO shares; status = filled
+//
+//   !addlive wx-mopia8t186ef 15 45 0x1234abcd
+//   → same but with Polymarket order ID stored for reference
+
+async function handleAddLive(user, args, api) {
+  const [tradeId, dollarsStr, priceStr, orderId] = args;
+
+  if (!tradeId || !dollarsStr || !priceStr) {
+    await api.sendMessage(
+      '**Usage:** `!addlive <signal-id> <dollars> <price_cents> [orderId]`\n' +
+      '**Example:** `!addlive wx-abc123 15 45` — $15 at 45¢/share\n' +
+      '*Get signal IDs from `!trades`. Price in cents (e.g. 45 = $0.45 per NO share).*'
+    );
+    return;
+  }
+
+  const dollars    = parseFloat(dollarsStr);
+  const priceCents = parseFloat(priceStr);
+
+  if (isNaN(dollars) || dollars <= 0) {
+    await api.sendMessage('❌ `dollars` must be a positive number (e.g. `15` for $15).');
+    return;
+  }
+  if (isNaN(priceCents) || priceCents <= 0 || priceCents >= 100) {
+    await api.sendMessage('❌ `price_cents` must be between 1 and 99 (e.g. `45` for 45¢ per share).');
+    return;
+  }
+
+  const trades = readTrades();
+  const idx    = trades.findIndex(t => t.id === tradeId);
+
+  if (idx === -1) {
+    await api.sendMessage(`❌ Signal \`${tradeId}\` not found. Use \`!trades\` to list open signals.`);
+    return;
+  }
+
+  const trade = trades[idx];
+
+  if (trade.outcome != null) {
+    await api.sendMessage(`⚠️ Signal \`${tradeId}\` is already closed (${trade.outcome || trade.signalResult}). Cannot attach a live order.`);
+    return;
+  }
+
+  if (trade.liveOrder && trade.liveOrder.status !== 'error' && trade.liveOrder.status !== 'cancelled') {
+    await api.sendMessage(
+      `⚠️ Signal \`${tradeId}\` already has a live order (status: **${trade.liveOrder.status}**).\n` +
+      `orderId: \`${trade.liveOrder.orderId || 'N/A'}\` | $${trade.liveOrder.sizeDollars} @ ${pct(trade.liveOrder.limitPrice)}\n` +
+      `Use \`!addlive ${tradeId} ${dollarsStr} ${priceStr}\` only if you want to replace it — reply \`!addlive ${tradeId} ${dollarsStr} ${priceStr} --force\` to overwrite.`
+    );
+    // Allow --force override
+    if (!args.includes('--force')) return;
+  }
+
+  const limitPrice    = Math.round(priceCents) / 100;
+  const filledShares  = Math.round((dollars / limitPrice) * 100) / 100;
+  const filledDollars = Math.round(dollars * 100) / 100;
+  const now           = new Date().toISOString();
+
+  trades[idx].liveOrder = {
+    orderId:        orderId && orderId !== '--force' ? orderId : null,
+    noTokenId:      null,  // not available for manually placed orders
+    sizeDollars:    filledDollars,
+    limitPrice,
+    status:         'filled',
+    filledDollars,
+    filledShares,
+    placedAt:       now,
+    filledAt:       now,
+    cancelledAt:    null,
+    error:          null,
+    livePnlDollars: null,
+    manualEntry:    true,
+    addedBy:        user,
+  };
+
+  writeTrades(trades);
+
+  const city    = (trade.parsed?.city || '').replace(/\b\w/g, c => c.toUpperCase());
+  const estWin  = Math.round(filledShares * (1 - limitPrice) * 100) / 100;
+  const estLoss = filledDollars;
+
+  const msg = [
+    `🔴 **LIVE ORDER ATTACHED — ${tradeId}**`,
+    `*${(trade.question || '').slice(0, 90)}*`,
+    '',
+    `City: **${city}** | Resolves: **${trade.parsed?.date || '?'}**`,
+    `Filled: **${filledShares.toFixed(2)} NO shares** @ **${priceCents}¢** ($${filledDollars.toFixed(2)})`,
+    `Est. win: **+$${estWin.toFixed(2)}** | Est. loss: **-$${estLoss.toFixed(2)}**`,
+    orderId && orderId !== '--force' ? `Polymarket order ID: \`${orderId}\`` : '',
+    '',
+    `✅ This trade will now settle with live P&L via \`!settle\` when the market resolves.`,
+    `*Added by: ${user}*`,
+  ].filter(l => l !== '').join('\n');
+
+  await api.sendMessage(msg);
+
+  if (SIGNALS_HOOK) {
+    await postWebhook(SIGNALS_HOOK, 'short', msg, 'Weather • Manual Live Order');
   }
 }
 
