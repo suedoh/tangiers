@@ -68,7 +68,8 @@ const MAX_BET       = parseFloat(process.env.WEATHER_MAX_BET    || '100');
 const MAX_SIDE_PRICE = parseFloat(process.env.WEATHER_MAX_SIDE_PRICE || '0.80');
 
 // ─── Live execution config ─────────────────────────────────────────────────────
-const LIVE_EXECUTE   = process.env.POLYMARKET_EXECUTE_ORDERS === 'true';
+// DISABLED: live execution off pending further testing — re-enable by removing this override
+const LIVE_EXECUTE   = false; // was: process.env.POLYMARKET_EXECUTE_ORDERS === 'true'
 const LIVE_BANKROLL  = parseFloat(process.env.POLYMARKET_LIVE_BANKROLL  || '100');
 const LIVE_MAX_BET   = parseFloat(process.env.POLYMARKET_MAX_LIVE_BET   || '10');
 const LIVE_TTL_MS    = (+process.env.POLYMARKET_ORDER_TTL_S || 1800) * 1000;
