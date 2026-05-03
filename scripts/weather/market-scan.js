@@ -64,6 +64,7 @@ const MIN_VOLUME    = parseFloat(process.env.WEATHER_MIN_VOLUME || '200');   // 
 const BANKROLL      = parseFloat(process.env.WEATHER_BANKROLL   || '500');   // paper bankroll
 const KELLY_FRAC    = parseFloat(process.env.WEATHER_KELLY_FRAC || '0.15');
 const MAX_BET       = parseFloat(process.env.WEATHER_MAX_BET    || '100');
+const MAX_SIDE_PRICE = parseFloat(process.env.WEATHER_MAX_SIDE_PRICE || '0.80');
 
 // ─── Live execution config ─────────────────────────────────────────────────────
 const LIVE_EXECUTE   = process.env.POLYMARKET_EXECUTE_ORDERS === 'true';
@@ -222,6 +223,10 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiA
     : 'N/A';
   const sigmaStr = dualSigma(forecast.sigmaF, marketUnit);
 
+  const sidePrice   = side === 'yes' ? market.yesPrice : market.noPrice;
+  const payoutRatio = ((1 - sidePrice) / sidePrice).toFixed(2);
+  const payoutLine  = `Payout odds:   win ${pct(1 - sidePrice)} / risk ${pct(sidePrice)} → **${payoutRatio}x**`;
+
   const lines = [
     `## 🌡️ WEATHER SIGNAL — ${cityLabel} ${typeLabel} TEMP`,
     `**${market.question}**`,
@@ -262,6 +267,7 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiA
     `Market price:  **${pct(market.yesPrice)} YES** / ${pct(market.noPrice)} NO`,
     `Model P(YES):  **${pct(modelProb)}** that temp is ${bucketLabel}`,
     `**Edge: ${edge > 0 ? '+' : ''}${(edge * 100).toFixed(1)}% → ${icon} ${sideLabel}**`,
+    payoutLine,
     '',
     '**📐 KELLY SIZING**',
     `Kelly: ${kelly.kelly}% → Fractional (${Math.round(KELLY_FRAC * 100)}%): **${usd(kelly.dollars)}** (bankroll ${usd(BANKROLL)})`,
@@ -726,6 +732,13 @@ async function main() {
     // ── Stage 1: Haiku pre-screen ─────────────────────────────────────────
     const daysToResolution = (new Date(mp.date) - now) / 86_400_000;
     const marketPrice      = bestSide === 'yes' ? bestMarket.yesPrice : bestMarket.noPrice;
+
+    // Skip if side price too high — poor risk/reward
+    if (marketPrice >= MAX_SIDE_PRICE) {
+      log(`${groupKey}: ${bestSide.toUpperCase()} price ${(marketPrice * 100).toFixed(0)}¢ ≥ ceiling ${(MAX_SIDE_PRICE * 100).toFixed(0)}¢ — skip (poor R:R)`);
+      continue;
+    }
+
     const stage1Signal = {
       question:             bestMarket.question,
       direction:            mp.direction,
