@@ -582,6 +582,22 @@ async function main() {
       continue;
     }
 
+    // Group-level cooldown: if ANY bucket in this city+date already has an open
+    // trade within the cooldown window, skip the whole group. This prevents
+    // re-signalling the same city/date when the best bucket shifts slightly,
+    // which wastes AI tokens and floods Discord with duplicate alerts.
+    const groupLastSignal = state.cooldowns?.[groupKey] || 0;
+    const groupCooledDown = (now - groupLastSignal) >= COOLDOWN_MS;
+    const groupHasOpenTrade = trades.some(t =>
+      t.outcome === null &&
+      t.parsed?.city?.toLowerCase() === parsed.city.toLowerCase() &&
+      t.parsed?.date === parsed.date
+    );
+    if (groupHasOpenTrade && !groupCooledDown) {
+      log(`${groupKey}: open trade exists within cooldown window — skipping group`);
+      continue;
+    }
+
     // Fetch temperature forecast ONCE per event group.
     // Pass ghcnStation so GHCN-Daily historical σ is used for sigma calibration
     // when NCEI_TOKEN is set (US cities only; international silently falls back).
@@ -1018,7 +1034,8 @@ async function main() {
     // ──────────────────────────────────────────────────────────────────────────
 
     if (!state.cooldowns) state.cooldowns = {};
-    state.cooldowns[conditionId] = now;
+    state.cooldowns[conditionId] = now;  // per-bucket cooldown (price-move re-eval after expiry)
+    state.cooldowns[groupKey]    = now;  // group-level cooldown (prevents same city+date re-signal)
     if (!state.signals) state.signals = {};
     if (msgId) state.signals[id] = msgId;
     writeState(state);
