@@ -70,6 +70,8 @@ const MAX_SIDE_PRICE = parseFloat(process.env.WEATHER_MAX_SIDE_PRICE || '0.80');
 // ─── Live execution config ─────────────────────────────────────────────────────
 // DISABLED: live execution off pending further testing — re-enable by removing this override
 const LIVE_EXECUTE   = false; // was: process.env.POLYMARKET_EXECUTE_ORDERS === 'true'
+// DISABLED: AI analysis off to conserve credits until live trading resumes — re-enable by removing this override
+const AI_ENABLED     = false; // was: true
 const LIVE_BANKROLL  = parseFloat(process.env.POLYMARKET_LIVE_BANKROLL  || '100');
 const LIVE_MAX_BET   = parseFloat(process.env.POLYMARKET_MAX_LIVE_BET   || '10');
 const LIVE_TTL_MS    = (+process.env.POLYMARKET_ORDER_TTL_S || 1800) * 1000;
@@ -783,11 +785,11 @@ async function main() {
     // ── AI quality filter (skipped when capital fully deployed) ───────────
     let aiAnalysis;
 
-    if (!capitalAvailable) {
-      // No capital to deploy — skip token spend, fire paper signal only.
+    if (!capitalAvailable || !AI_ENABLED) {
+      // No capital to deploy, or AI globally disabled — skip token spend, fire paper signal only.
       // aiDecision: null marks these trades as non-AI so calibration excludes them.
       aiAnalysis = { decision: 'take', sizeMultiplier: 1.0, confidence: null, reasoning: null, flags: [], stage: null, summary: null, steps: null, deepSkipped: true };
-      log('  AI skipped — capital fully deployed');
+      log(!AI_ENABLED ? '  AI skipped — disabled (conserving credits)' : '  AI skipped — capital fully deployed');
     } else {
       const stage1Result = await analyzeSignal(stage1Signal);
       log(`  Stage 1 (Haiku): decision=${stage1Result.decision} confidence=${stage1Result.confidence != null ? (stage1Result.confidence * 100).toFixed(0) + '%' : 'N/A'} size=${stage1Result.sizeMultiplier}× | ${stage1Result.reasoning || 'no reasoning'}`);
