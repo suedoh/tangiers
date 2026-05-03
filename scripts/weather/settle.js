@@ -31,6 +31,7 @@ const { loadEnv, ROOT, resolveWebhook } = require('../lib/env');
 const { postWebhook }                   = require('../lib/discord');
 const { fetchGHCNObserved, fetchNWSObserved, getObserved } = require('../lib/forecasts');
 const { computeLivePnl }               = require('../lib/polymarket-orders');
+const { getMarketPrice }               = require('../lib/polymarket');
 
 loadEnv();
 
@@ -177,7 +178,61 @@ async function main() {
     const observed = await fetchObserved(trade);
 
     if (!observed || observed.value == null) {
-      log(`  ↳ No observation data yet — skipping`);
+      // Path B: Polymarket oracle fallback — resolves when market settles to ≥99% YES or ≤1% YES.
+      // Covers international cities where GHCN/NWS/ERA5 are unavailable.
+      if (trade.conditionId) {
+        const lp = await getMarketPrice(trade.conditionId).catch(() => null);
+        if (lp && (lp.yes > 0.99 || lp.yes < 0.01)) {
+          const hit       = lp.yes > 0.99;
+          const signalWon = (trade.side === 'yes' && hit) || (trade.side === 'no' && !hit);
+          const price     = trade.side === 'yes' ? trade.yesPrice : trade.noPrice;
+          const pnl       = trade.betDollars > 0
+            ? signalWon
+              ? Math.round(trade.betDollars * (1 - price) / price * 100) / 100
+              : -trade.betDollars
+            : null;
+
+          computeLivePnl(trade, signalWon);
+
+          log(`  ↳ Polymarket oracle: YES=${lp.yes.toFixed(3)} → ${hit ? 'YES' : 'NO'} resolved → ${signalWon ? 'WIN' : 'LOSS'}`);
+
+          if (!DRY) {
+            trade.outcome        = hit ? 'yes-resolved' : 'no-resolved';
+            trade.observedTemp   = null;
+            trade.observedSource = 'polymarket-settlement';
+            trade.signalResult   = signalWon ? 'win' : 'loss';
+            trade.pnlDollars     = pnl;
+            trade.closedAt       = new Date().toISOString();
+            if (!trade.shadow) {
+              const icon  = signalWon ? '✅' : '❌';
+              const body  = [
+                `${icon} **WEATHER RESOLVED — ${signalWon ? 'WIN' : 'LOSS'}**`,
+                `${trade.question}`,
+                '',
+                `Side: **${trade.side.toUpperCase()}** at ${(price * 100).toFixed(1)}% | Bucket: ${bucketLabel(trade.parsed)}`,
+                `Settled: Polymarket oracle → **${hit ? 'YES' : 'NO'}**`,
+                pnl != null ? `P&L: **${pnl >= 0 ? '+' : ''}$${Math.abs(pnl).toFixed(2)}** (bet $${trade.betDollars?.toFixed(2)} @ ${(price * 100).toFixed(1)}%)` : '',
+                trade.liveOrder?.livePnlDollars != null
+                  ? `Live P&L: **${trade.liveOrder.livePnlDollars >= 0 ? '+' : ''}$${Math.abs(trade.liveOrder.livePnlDollars).toFixed(2)}** (${trade.liveOrder.filledShares?.toFixed(2)} shares @ ${(trade.liveOrder.limitPrice * 100).toFixed(1)}¢)`
+                  : '',
+                `\`ID: ${trade.id}\``,
+              ].filter(Boolean).join('\n');
+              await postWebhook(BACKTEST_HOOK, signalWon ? 'long' : 'error', body, 'Weather • Settlement');
+            }
+          } else {
+            log(`  ↳ [DRY] would write: outcome=${hit ? 'yes-resolved' : 'no-resolved'} signalResult=${signalWon ? 'win' : 'loss'} (oracle)`);
+          }
+
+          resolved++;
+          continue;
+        } else if (lp) {
+          log(`  ↳ Polymarket oracle not settled yet (YES=${lp.yes.toFixed(3)}) — skipping`);
+        } else {
+          log(`  ↳ No observation data and Polymarket price fetch failed — skipping`);
+        }
+      } else {
+        log(`  ↳ No observation data yet — skipping`);
+      }
       skipped++;
       continue;
     }

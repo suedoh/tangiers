@@ -330,7 +330,8 @@ async function cancelOrder(orderId) {
  * @param {boolean} won   true if NO won (temp was NOT in range)
  */
 function computeLivePnl(trade, won) {
-  if (!trade.liveOrder || trade.liveOrder.status !== 'filled') return;
+  const status = trade.liveOrder?.status;
+  if (!trade.liveOrder || (status !== 'filled' && status !== 'partial_expired')) return;
   const { filledShares, limitPrice } = trade.liveOrder;
   if (!filledShares || !limitPrice) return;
 
