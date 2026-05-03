@@ -869,9 +869,27 @@ async function main() {
       const { placeNoOrder, pollOrderFill } = require('../lib/polymarket-orders');
       const noToken = (bestMarket.tokens || []).find(t => /^no$/i.test(t.outcome));
       if (noToken) {
-        // Capital accountability: sum all open live orders to get deployed capital
+        // Duplicate live order guard: skip if a live position already exists for this market
+        // (open = order pending fill, filled = position open awaiting settlement).
+        // Prevents double-exposure when a superseded trade triggered a re-signal.
+        const activeLiveOrder = trades.find(t =>
+          t.conditionId === conditionId &&
+          (t.liveOrder?.status === 'open' || t.liveOrder?.status === 'filled')
+        );
+        if (activeLiveOrder) {
+          log(`${id}: live order skipped — active live position already exists for ${conditionId} (${activeLiveOrder.id}, status=${activeLiveOrder.liveOrder.status})`);
+          await postWebhook(
+            SIGNALS_HOOK, 'info',
+            `⚠️ **LIVE ORDER SKIPPED — POSITION EXISTS** | \`${id}\`\n` +
+            `Active live order on same market: \`${activeLiveOrder.id}\` (${activeLiveOrder.liveOrder.status})\n` +
+            `Paper signal logged. Exit or settle the existing position first.`,
+            `Weather • Live • ${mp.date}`
+          );
+        } else {
+
+        // Capital accountability: sum all active live orders (open + filled positions not yet settled)
         const deployed = trades
-          .filter(t => t.liveOrder?.status === 'open')
+          .filter(t => ['open', 'filled', 'partial_expired'].includes(t.liveOrder?.status))
           .reduce((sum, t) => sum + (t.liveOrder.sizeDollars || 0), 0);
         const available = Math.round((LIVE_BANKROLL - deployed) * 100) / 100;
 
@@ -952,7 +970,8 @@ async function main() {
               }
             })();
           }
-        }
+        } // end if (available < LIVE_MIN_BALANCE) else
+        } // end if (activeLiveOrder) else
       } else {
         log(`${id}: NO token not found in bestMarket.tokens — skipping live order`);
       }
