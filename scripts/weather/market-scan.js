@@ -886,7 +886,7 @@ async function main() {
     writeTrades(trades);
 
     // ── Live order execution: NO+Range only ────────────────────────────────────
-    if (LIVE_EXECUTE && bestSide === 'no' && mp.direction === 'range' && !PAPER_ONLY_CITIES.has(mp.city?.toLowerCase())) {
+    if (LIVE_EXECUTE && bestSide === 'no' && mp.direction === 'range' && aiAnalysis.decision === 'take' && !PAPER_ONLY_CITIES.has(mp.city?.toLowerCase())) {
       const { placeNoOrder, pollOrderFill } = require('../lib/polymarket-orders');
       const noToken = (bestMarket.tokens || []).find(t => /^no$/i.test(t.outcome));
       if (noToken) {
