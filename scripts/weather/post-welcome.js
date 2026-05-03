@@ -192,6 +192,22 @@ Close a paper trade by manually specifying the outcome. Calculates P&L based on 
 \`\`\`
 Use \`manual\` if closing early. Use \`!sell\` instead if you want the bot to fetch the current price automatically.
 
+\`\`\`
+!addlive <signal-id> <dollars> <price_cents> [polymarket-order-id]
+\`\`\`
+Attach a manually-placed Polymarket live order to a signal so the bot tracks it for settlement, capital accounting, and live P&L.
+\`\`\`
+!addlive wx-mob6otqe947e 15 45
+!addlive wx-mob6otqe947e 20 38 0xabc123def456
+\`\`\`
+• **signal-id** — from \`!trades\`
+• **dollars** — how much USDC you put in (e.g. \`15\` = $15)
+• **price_cents** — the NO price you paid in cents (e.g. \`45\` = 45¢ per share)
+• **orderId** — optional Polymarket order ID for reference
+
+The bot will calculate your share count automatically (\`dollars ÷ price\`) and track real P&L when the market settles — instead of using paper bet sizes.
+Add \`--force\` to overwrite an existing live order entry.
+
 ## 📊 Reports
 
 \`\`\`
