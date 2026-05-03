@@ -30,6 +30,7 @@ const fs   = require('fs');
 const { loadEnv, ROOT, resolveWebhook } = require('../lib/env');
 const { postWebhook }                   = require('../lib/discord');
 const { fetchGHCNObserved, fetchNWSObserved, getObserved } = require('../lib/forecasts');
+const { computeLivePnl }               = require('../lib/polymarket-orders');
 
 loadEnv();
 
@@ -127,6 +128,10 @@ async function postResolutionCard(trade, observed, hit, signalWon) {
     ? `P&L: **${trade.pnlDollars >= 0 ? '+' : ''}${usd(trade.pnlDollars)}** (bet ${usd(trade.betDollars)} @ ${pct(price)})`
     : '';
 
+  const livePnlStr = trade.liveOrder?.livePnlDollars != null
+    ? `Live P&L: **${trade.liveOrder.livePnlDollars >= 0 ? '+' : ''}${usd(trade.liveOrder.livePnlDollars)}** (${trade.liveOrder.filledShares?.toFixed(2)} shares @ ${pct(trade.liveOrder.limitPrice)})`
+    : '';
+
   const lines = [
     `${icon} **WEATHER RESOLVED — ${result}**`,
     `${trade.question}`,
@@ -136,6 +141,7 @@ async function postResolutionCard(trade, observed, hit, signalWon) {
     `Source: ${observed.source}${observed.obsCount ? ` (${observed.obsCount} obs)` : ''}`,
     biasStr,
     pnlStr,
+    livePnlStr,
     `\`ID: ${trade.id}\``,
   ].filter(Boolean);
 
@@ -185,6 +191,8 @@ async function main() {
         : -trade.betDollars
       : null;
 
+    computeLivePnl(trade, signalWon);
+
     const logLine = `  ↳ ${observed.source}: ${observed.value.toFixed(1)}°F | bucket ${bucketLabel(trade.parsed)} → ${hit ? 'HIT' : 'MISS'} → ${signalWon ? 'WIN' : 'LOSS'}`;
     log(logLine);
 
@@ -228,9 +236,12 @@ async function main() {
     const wins_this_run   = resolvedThisRun.filter(t => t.signalResult === 'win').length;
     const losses_this_run = resolvedThisRun.length - wins_this_run;
     const pnl_this_run    = resolvedThisRun.reduce((a, t) => a + (t.pnlDollars || 0), 0);
+    const livePnlTotal    = resolvedThisRun.reduce((a, t) => a + (t.liveOrder?.livePnlDollars ?? 0), 0);
+    const hasLiveTrades   = resolvedThisRun.some(t => t.liveOrder?.livePnlDollars != null);
     const summary = [
       `🏁 **SETTLEMENT RUN — ${resolved} resolved**`,
       `${wins_this_run}W / ${losses_this_run}L | P&L: ${pnl_this_run >= 0 ? '+' : ''}${usd(pnl_this_run)}`,
+      hasLiveTrades ? `Live P&L: ${livePnlTotal >= 0 ? '+' : ''}${usd(livePnlTotal)}` : '',
       skipped > 0 ? `${skipped} trade(s) skipped — GHCN/NWS data not yet available` : '',
       wr != null ? `Lifetime win rate: **${wr}%** (${wins}W / ${losses}L)` : '',
     ].filter(Boolean).join('\n');

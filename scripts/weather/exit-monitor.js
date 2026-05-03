@@ -193,6 +193,10 @@ async function postExitCard(trade, result) {
     : 'N/A';
   const pnlEmoji = pnlDollars == null ? '📊' : pnlDollars >= 0 ? '💚' : '🔴';
 
+  const liveStr = trade.liveOrder?.status === 'filled'
+    ? `💰 *Live order filled: ${trade.liveOrder.filledShares?.toFixed(2)} shares @ ${(trade.liveOrder.limitPrice * 100).toFixed(1)}¢ — exit on polymarket.com*`
+    : `📌 *Paper trade auto-closed — check polymarket.com to exit live position*`;
+
   const lines = [
     `**${trade.question}**`,
     '',
@@ -203,7 +207,7 @@ async function postExitCard(trade, result) {
     '',
     `📉 Edge captured: **${edgeCaptured}%** of original | Remaining: **${pct(Math.max(remainingEdge, 0))}**`,
     `⏱️ Resolves: **${date}**`,
-    `📌 *Paper trade auto-closed — check polymarket.com to exit live position*`,
+    liveStr,
     `\`\`\`ID: ${trade.id}\`\`\``,
   ];
 

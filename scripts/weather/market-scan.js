@@ -36,6 +36,7 @@ const {
   kellySizing,
   marketUrl,
 } = require('../lib/polymarket');
+const { computeLivePnl } = require('../lib/polymarket-orders');
 
 loadEnv();
 
@@ -385,6 +386,8 @@ async function resolveOutcomes(trades) {
                 : -trade.betDollars;
             }
 
+            computeLivePnl(trade, signalWon);
+
             changed = true;
             log(`[resolve] ${trade.id}: Polymarket-settled ${hit ? 'YES' : 'NO'} — ${signalWon ? 'WIN' : 'LOSS'}`);
 
@@ -397,6 +400,9 @@ async function resolveOutcomes(trades) {
                 `Settled: Polymarket oracle → **${hit ? 'YES' : 'NO'}**`,
                 trade.betDollars > 0
                   ? `P&L: **${trade.pnlDollars >= 0 ? '+' : ''}${usd(trade.pnlDollars)}** (bet ${usd(trade.betDollars)})`
+                  : '',
+                trade.liveOrder?.livePnlDollars != null
+                  ? `Live P&L: **${trade.liveOrder.livePnlDollars >= 0 ? '+' : ''}${usd(trade.liveOrder.livePnlDollars)}** (${trade.liveOrder.filledShares?.toFixed(2)} shares @ ${pct(trade.liveOrder.limitPrice)})`
                   : '',
                 `\`ID: ${trade.id}\``,
               ].filter(Boolean).join('\n');
@@ -443,6 +449,8 @@ async function resolveOutcomes(trades) {
           : -trade.betDollars;
       }
 
+      computeLivePnl(trade, signalWon);
+
       changed = true;
       const bucketLbl = thresholdLabel(trade.parsed);
       log(`[resolve] ${trade.id}: ${trade.parsed.city} ${trade.parsed.date} ${bucketLbl} — observed ${value.toFixed(1)}°F → ${signalWon ? 'WIN' : 'LOSS'}`);
@@ -456,6 +464,9 @@ async function resolveOutcomes(trades) {
           `Observed: **${value.toFixed(1)}°F** (bucket ${bucketLbl})`,
           trade.betDollars > 0
             ? `P&L: **${trade.pnlDollars >= 0 ? '+' : ''}${usd(trade.pnlDollars)}** (bet ${usd(trade.betDollars)})`
+            : '',
+          trade.liveOrder?.livePnlDollars != null
+            ? `Live P&L: **${trade.liveOrder.livePnlDollars >= 0 ? '+' : ''}${usd(trade.liveOrder.livePnlDollars)}** (${trade.liveOrder.filledShares?.toFixed(2)} shares @ ${pct(trade.liveOrder.limitPrice)})`
             : '',
           `\`ID: ${trade.id}\``,
         ].filter(Boolean).join('\n');
