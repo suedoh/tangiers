@@ -18,8 +18,11 @@
 
 const fs   = require('fs');
 const path = require('path');
-const { spawnSync } = require('child_process');
-const { ROOT }      = require('../../lib/env');
+const { spawnSync, execFile } = require('child_process');
+const { promisify }           = require('util');
+const { ROOT }                = require('../../lib/env');
+
+const execFileAsync = promisify(execFile);
 
 const ANALYZE_SCRIPT     = path.join(ROOT, 'scripts', 'mtf-analyze.js');
 const WAR_REPORT_SCRIPT  = path.join(ROOT, 'scripts', 'weekly-war-report.js');
@@ -39,11 +42,9 @@ function notify(type, message) {
   try { spawnSync('bash', [NOTIFY_SH, type, message], { stdio: 'pipe', encoding: 'utf8' }); } catch {}
 }
 
-function runAnalysis() {
-  const result = spawnSync(NODE, [ANALYZE_SCRIPT, '--print'], { encoding: 'utf8', timeout: 90_000 });
-  if (result.error) throw result.error;
-  if (result.status !== 0) throw new Error(result.stderr?.trim() || 'mtf-analyze exited non-zero');
-  return result.stdout?.trim();
+async function runAnalysis() {
+  const { stdout } = await execFileAsync(NODE, [ANALYZE_SCRIPT, '--print'], { encoding: 'utf8', timeout: 90_000 });
+  return stdout?.trim();
 }
 
 async function handle(message, api) {
@@ -67,7 +68,7 @@ async function handleAnalyze(user, api) {
 
   let report;
   try {
-    report = runAnalysis();
+    report = await runAnalysis();
   } catch (e) {
     notify('error', [
       `❌ **MTF Analysis failed** (triggered by ${user})`,
@@ -125,19 +126,13 @@ async function handleReport(user, api) {
   await api.sendTyping();
   notify('info', `📊 **BTC Weekly War Report triggered by ${user}**\nGenerating report (~20 seconds)...`);
 
-  const result = spawnSync(NODE, [WAR_REPORT_SCRIPT, '--force'], { encoding: 'utf8', timeout: 120_000 });
-  if (result.error) {
+  try {
+    await execFileAsync(NODE, [WAR_REPORT_SCRIPT, '--force'], { encoding: 'utf8', timeout: 120_000 });
+  } catch (e) {
     notify('error', [
       `❌ **War Report failed** (triggered by ${user})`,
-      `**Error:** ${result.error.message}`,
+      `**Error:** ${e.stderr?.trim() || e.message}`,
       `**Fix:** Ensure TradingView Desktop is open on the 🕵Ace layout`,
-    ].join('\n'));
-    return;
-  }
-  if (result.status !== 0) {
-    notify('error', [
-      `❌ **War Report failed** (triggered by ${user})`,
-      `**Error:** ${result.stderr?.trim() || 'weekly-war-report exited non-zero'}`,
     ].join('\n'));
     return;
   }
@@ -152,18 +147,12 @@ async function handleBacktest(user, args, api) {
   await api.sendTyping();
   notify('info', `📈 **BTC Backtest triggered by ${user}**\nRunning ${lookback}-day stats report...`);
 
-  const result = spawnSync(NODE, [WEEKLY_REPORT_SCRIPT, '--days', String(lookback)], { encoding: 'utf8', timeout: 30_000 });
-  if (result.error) {
+  try {
+    await execFileAsync(NODE, [WEEKLY_REPORT_SCRIPT, '--days', String(lookback)], { encoding: 'utf8', timeout: 30_000 });
+  } catch (e) {
     notify('error', [
       `❌ **Backtest failed** (triggered by ${user})`,
-      `**Error:** ${result.error.message}`,
-    ].join('\n'));
-    return;
-  }
-  if (result.status !== 0) {
-    notify('error', [
-      `❌ **Backtest failed** (triggered by ${user})`,
-      `**Error:** ${result.stderr?.trim() || 'weekly-report exited non-zero'}`,
+      `**Error:** ${e.stderr?.trim() || e.message}`,
     ].join('\n'));
     return;
   }
