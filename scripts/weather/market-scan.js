@@ -4,8 +4,8 @@
 /**
  * weather/market-scan.js — Polymarket Weather Signal Poller
  *
- * Runs every 15 minutes via crontab. For each active temperature market on
- * Polymarket it:
+ * Runs every 30 minutes via Windows Task Scheduler (Weathermen-Scan task).
+ * For each active temperature market on Polymarket it:
  *   1. Fetches active bucket markets via event slugs (city × next 5 days)
  *   2. Groups markets by event (city + date)
  *   3. Calls getTemperatureForecast() ONCE per event group
@@ -16,8 +16,7 @@
  * State: .weather-state.json (cooldowns, signal IDs)
  * Trades: weather-trades.json (all signals with outcomes)
  *
- * Crontab:
- *   \/15 * * * *  node /path/to/trading/scripts/weather/market-scan.js
+ * Task Scheduler: see scripts/weather/schedule-windows.ps1
  */
 
 const path   = require('path');
@@ -60,9 +59,8 @@ if (process.env.PRIMARY === 'false') {
 
 const SIGNALS_HOOK  = resolveWebhook('WEATHER_DISCORD_SIGNALS_WEBHOOK');
 const BACKTEST_HOOK = resolveWebhook('WEATHER_DISCORD_BACKTEST_WEBHOOK');
-const MIN_EDGE           = parseFloat(process.env.WEATHER_MIN_EDGE           || '0.08');  // 8%
-const YES_RANGE_MIN_EDGE = parseFloat(process.env.WEATHER_YES_RANGE_MIN_EDGE || '0.20');  // 20% for YES+range (historically 10.7% WR pre-correction)
-const MIN_VOLUME    = parseFloat(process.env.WEATHER_MIN_VOLUME || '200');   // $200 min volume
+const MIN_EDGE      = parseFloat(process.env.WEATHER_MIN_EDGE    || '0.08');  // 8%
+const MIN_VOLUME    = parseFloat(process.env.WEATHER_MIN_VOLUME  || '200');   // $200 min volume
 const BANKROLL      = parseFloat(process.env.WEATHER_BANKROLL   || '500');   // paper bankroll
 const KELLY_FRAC    = parseFloat(process.env.WEATHER_KELLY_FRAC || '0.15');
 const MAX_BET       = parseFloat(process.env.WEATHER_MAX_BET    || '100');
@@ -668,6 +666,33 @@ async function resolveOutcomes(trades) {
   return changed;
 }
 
+// ─── Scan lock (prevents concurrent instances from Task Scheduler overlap) ────
+
+const SCAN_LOCK_FILE  = path.join(ROOT, '.market-scan.lock');
+const SCAN_LOCK_TTL_MS = 35 * 60 * 1000; // 35 min — longer than the 30-min schedule
+
+function acquireScanLock() {
+  try {
+    if (fs.existsSync(SCAN_LOCK_FILE)) {
+      const ts = parseInt(fs.readFileSync(SCAN_LOCK_FILE, 'utf8'), 10);
+      if (Date.now() - ts < SCAN_LOCK_TTL_MS) {
+        log('Lock held by another instance — exiting');
+        return false;
+      }
+      log('Stale lock found — overwriting');
+    }
+    fs.writeFileSync(SCAN_LOCK_FILE, String(Date.now()));
+    return true;
+  } catch (e) {
+    log(`Lock acquire failed: ${e.message} — proceeding without lock`);
+    return true;
+  }
+}
+
+function releaseScanLock() {
+  try { fs.unlinkSync(SCAN_LOCK_FILE); } catch { /* ignore */ }
+}
+
 // ─── Main scan ────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -853,7 +878,6 @@ async function main() {
     let bestEdge            = -Infinity;
     let bestSide            = null;
     let bestModelProb       = null;
-    let bestEffectiveMinEdge = MIN_EDGE;
     const shadowCandidates  = [];
     const tailCandidates    = [];
 
@@ -866,7 +890,7 @@ async function main() {
       const lastSignal = state.cooldowns?.[conditionId] || 0;
       const cooledDown = (now - lastSignal) >= COOLDOWN_MS;
 
-      const existingTrade = trades.find(t => t.conditionId === conditionId && t.outcome === null);
+      const existingTrade = trades.find(t => t.conditionId === conditionId && t.outcome === null && !t.shadow);
       if (existingTrade && !cooledDown) continue;
 
       const modelProb = bucketModelProb(mp, correctedMeanF, forecast.sigmaF);
@@ -927,11 +951,10 @@ async function main() {
       }
 
       if (edge > bestEdge) {
-        bestEdge             = edge;
-        bestMarket           = market;
-        bestSide             = side;
-        bestModelProb        = modelProb;
-        bestEffectiveMinEdge = MIN_EDGE;
+        bestEdge      = edge;
+        bestMarket    = market;
+        bestSide      = side;
+        bestModelProb = modelProb;
       }
     }
 
@@ -966,9 +989,9 @@ async function main() {
       writeTrades(trades);
     }
 
-    if (bestMarket == null || bestEdge < bestEffectiveMinEdge) {
+    if (bestMarket == null || bestEdge < MIN_EDGE) {
       if (bestMarket != null) {
-        log(`${groupKey}: best edge ${(bestEdge * 100).toFixed(1)}% below ${(bestEffectiveMinEdge * 100).toFixed(0)}% threshold (${bestSide}+${bestMarket.parsed?.direction}) — skip`);
+        log(`${groupKey}: best edge ${(bestEdge * 100).toFixed(1)}% below ${(MIN_EDGE * 100).toFixed(0)}% threshold (${bestSide}+${bestMarket.parsed?.direction}) — skip`);
       }
       continue;
     }
@@ -1016,6 +1039,8 @@ async function main() {
       historicalMean:       forecast.historical?.mean ?? null,            // fetchGHCNStats remaps historicalMean → mean
       thresholdPercentile:  forecast.historical?.thresholdPercentile ?? null,
       sources:              forecast.sources,
+      thresholdF:           mp.thresholdF,
+      thresholdHighF:       mp.thresholdHighF ?? null,
     };
 
     // ── AI quality filter (skipped when capital fully deployed) ───────────
@@ -1116,7 +1141,7 @@ async function main() {
     }
 
     // Save trade record
-    const existingTrade = trades.find(t => t.conditionId === conditionId && t.outcome === null);
+    const existingTrade = trades.find(t => t.conditionId === conditionId && t.outcome === null && !t.shadow);
     const tradeRecord = {
       id,
       conditionId,
@@ -1360,7 +1385,11 @@ async function main() {
   log(`Scan complete. ${signalsFired} signal(s) fired.`);
 }
 
-main().catch(err => {
-  console.error('[weather-scan] Fatal error:', err);
-  process.exit(1);
-});
+if (!acquireScanLock()) process.exit(0);
+
+main()
+  .catch(err => {
+    console.error('[weather-scan] Fatal error:', err);
+    process.exit(1);
+  })
+  .finally(releaseScanLock);

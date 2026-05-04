@@ -320,7 +320,7 @@ async function fetchGHCNBaseRate(ghcnStation, targetDate, thresholdF, direction)
     const sorted = [...tempsF].sort((a, b) => a - b);
     const thresholdPercentile = sorted.filter(v => v <= thresholdF).length / sorted.length;
 
-    const variance = tempsF.reduce((a, v) => a + (v - mean) ** 2, 0) / tempsF.length;
+    const variance = tempsF.reduce((a, v) => a + (v - mean) ** 2, 0) / (tempsF.length - 1);
     const historicalSigma = Math.sqrt(variance);
 
     return {
@@ -411,46 +411,53 @@ async function fetchNWS(lat, lon, targetDate) {
 async function fetchHistoricalBaseRate(lat, lon, targetDate, thresholdF, direction) {
   const [, mm, dd] = targetDate.split('-');
   const field = direction === 'below' ? 'temperature_2m_min' : 'temperature_2m_max';
-
-  const years = [];
   const currentYear = new Date().getFullYear();
+  const years = [];
   for (let y = currentYear - 10; y < currentYear; y++) years.push(y);
 
-  // Fetch all years in one call using a date range per year is expensive;
-  // instead batch by fetching the same date across multiple years via archive.
-  // Open-Meteo archive supports multi-year queries with start/end date.
-  const startYear = currentYear - 10;
-  const endYear   = currentYear - 1;
+  // Fetch one ±7-day window per year in parallel (~150 rows total vs ~3650 for a full-year query).
+  function windowDates(y) {
+    const d0 = new Date(Date.UTC(y, Number(mm) - 1, Number(dd)));
+    const d1 = new Date(d0.getTime() - 7 * 86_400_000);
+    const d2 = new Date(d0.getTime() + 7 * 86_400_000);
+    const fmt = d => d.toISOString().slice(0, 10);
+    return [fmt(d1), fmt(d2)];
+  }
 
-  const path = `/v1/archive?latitude=${lat}&longitude=${lon}` +
-    `&daily=${field}&temperature_unit=fahrenheit&timezone=auto` +
-    `&start_date=${startYear}-01-01&end_date=${endYear}-12-31`;
+  const requests = years.map(y => {
+    const [lo, hi] = windowDates(y);
+    return httpGet(
+      ARCHIVE_API,
+      `/v1/archive?latitude=${lat}&longitude=${lon}` +
+        `&daily=${field}&temperature_unit=fahrenheit&timezone=auto` +
+        `&start_date=${lo}&end_date=${hi}`,
+      15_000,
+    ).catch(() => null);
+  });
 
-  try {
-    const data = await httpGet(ARCHIVE_API, path, 20_000);
-    const dates  = data.daily?.time  || [];
+  const results = await Promise.all(requests);
+
+  const sameDayValues = results.flatMap(data => {
+    if (!data) return [];
+    const dates  = data.daily?.time   || [];
     const values = data.daily?.[field] || [];
-
-    // Find entries matching this month/day
-    const sameDayValues = dates
+    return dates
       .map((d, i) => ({ d, v: values[i] }))
       .filter(({ d }) => d.slice(5) === `${mm}-${dd}`)
       .map(({ v }) => v)
       .filter(v => v != null && !isNaN(v));
+  });
 
-    if (sameDayValues.length < 3) return null;
+  if (sameDayValues.length < 3) return null;
 
-    const aboveCount = sameDayValues.filter(v =>
-      direction === 'above' ? v > thresholdF : v < thresholdF
-    ).length;
+  const aboveCount = sameDayValues.filter(v =>
+    direction === 'above' ? v > thresholdF : v < thresholdF
+  ).length;
 
-    const prob = aboveCount / sameDayValues.length;
-    const mean = sameDayValues.reduce((a, b) => a + b, 0) / sameDayValues.length;
+  const prob = aboveCount / sameDayValues.length;
+  const mean = sameDayValues.reduce((a, b) => a + b, 0) / sameDayValues.length;
 
-    return { prob, sampleSize: sameDayValues.length, historicalMean: mean };
-  } catch {
-    return null;
-  }
+  return { prob, sampleSize: sameDayValues.length, historicalMean: mean };
 }
 
 // ─── Master forecast function ─────────────────────────────────────────────────
@@ -555,19 +562,43 @@ async function getForecast(lat, lon, targetDate, thresholdF, direction = 'above'
 
 /**
  * Convert a local calendar date to a UTC time range covering the full local day.
- * Uses simplified DST detection (April–October = DST for US cities).
+ * Uses Intl.DateTimeFormat with 'longOffset' to read the exact UTC offset for
+ * the given date, so DST transitions are accurate to the day (not month-approximate).
  */
 function localDayUtcRange(date, tz) {
-  const DST = { 'America/New_York': 4, 'America/Chicago': 5, 'America/Denver': 6, 'America/Los_Angeles': 7, 'America/Phoenix': 7, 'America/Anchorage': 8, 'Pacific/Honolulu': 10 };
-  const STD = { 'America/New_York': 5, 'America/Chicago': 6, 'America/Denver': 7, 'America/Los_Angeles': 8, 'America/Phoenix': 7, 'America/Anchorage': 9, 'Pacific/Honolulu': 10 };
   const [y, m, d] = date.split('-').map(Number);
-  const hoursAhead = (m >= 4 && m <= 10 ? DST : STD)[tz] ?? 5;
-  const startUTC = new Date(Date.UTC(y, m - 1, d, hoursAhead, 0, 0));
-  const endUTC   = new Date(startUTC.getTime() + 24 * 3_600_000);
-  return [
-    startUTC.toISOString().slice(0, 19) + '+00:00',
-    endUTC.toISOString().slice(0, 19) + '+00:00',
-  ];
+  if (!tz) {
+    const startUTC = new Date(Date.UTC(y, m - 1, d, 0, 0, 0));
+    return [
+      startUTC.toISOString().slice(0, 19) + '+00:00',
+      new Date(startUTC.getTime() + 24 * 3_600_000).toISOString().slice(0, 19) + '+00:00',
+    ];
+  }
+  try {
+    // Sample noon UTC on the target day to determine the active offset
+    const noonUtc = new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+    const parts   = new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'longOffset' })
+      .formatToParts(noonUtc);
+    const tzPart  = parts.find(p => p.type === 'timeZoneName')?.value || 'GMT+0';
+    const match   = tzPart.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/);
+    const sign    = match?.[1] === '-' ? -1 : 1;
+    const hours   = parseInt(match?.[2] || '0', 10);
+    const minutes = parseInt(match?.[3] || '0', 10);
+    const offsetMs = sign * (hours * 60 + minutes) * 60_000;
+    // midnight local = UTC midnight - offset
+    const startUTC = new Date(Date.UTC(y, m - 1, d, 0, 0, 0) - offsetMs);
+    return [
+      startUTC.toISOString().slice(0, 19) + '+00:00',
+      new Date(startUTC.getTime() + 24 * 3_600_000).toISOString().slice(0, 19) + '+00:00',
+    ];
+  } catch {
+    // Fallback: UTC
+    const startUTC = new Date(Date.UTC(y, m - 1, d, 0, 0, 0));
+    return [
+      startUTC.toISOString().slice(0, 19) + '+00:00',
+      new Date(startUTC.getTime() + 24 * 3_600_000).toISOString().slice(0, 19) + '+00:00',
+    ];
+  }
 }
 
 /**

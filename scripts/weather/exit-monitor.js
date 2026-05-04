@@ -124,7 +124,7 @@ async function checkTrade(trade) {
   // YES: edge = model YES prob − market YES price. NO: edge = market NO price − model NO prob.
   const remainingEdge = trade.side === 'yes'
     ? modelProb - currentPrice
-    : currentPrice + modelProb - 1;
+    : (1 - modelProb) - currentPrice;
 
   let exitReason = null;
 

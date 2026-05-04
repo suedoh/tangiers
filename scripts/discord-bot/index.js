@@ -4,15 +4,14 @@
 /**
  * discord-bot/index.js — Ace Trading System multi-channel bot
  *
- * Polls all registered Discord channels every minute (via crontab).
+ * Polls all registered Discord channels every minute.
  * Routes incoming messages to the correct instrument handler.
  * Scans for 📊 reactions on signal messages and re-triggers analysis.
  *
  * Adding a new instrument: one handler file + two lines in router.js.
  * This file never changes.
  *
- * Crontab entry (add once):
- *   * * * * * node /Users/vpm/trading/scripts/discord-bot/index.js >> /Users/vpm/trading/logs/discord-bot.log 2>&1
+ * Windows Task Scheduler: Weathermen-Bot task, every 1 min (schedule-windows.ps1)
  */
 
 const https  = require('https');

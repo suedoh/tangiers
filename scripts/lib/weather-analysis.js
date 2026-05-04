@@ -25,7 +25,7 @@
  * Only called when a signal already passes the MIN_EDGE threshold.
  *
  * Stage 2 — deepAnalyzeSignal():
- * Fires only when Stage 1 returns 'take' or 'reduce'. Uses claude-sonnet-4-5
+ * Fires only when Stage 1 returns 'take' or 'reduce'. Uses claude-sonnet-4-6
  * to run a structured 5-step meteorological analysis: individual model biases,
  * synoptic pattern, microclimate factors, observational reality check, and
  * market pricing comparison. ~$0.015 per call. Falls back to Stage 1 result
@@ -37,7 +37,7 @@ const https = require('https');
 const API_HOST     = 'api.anthropic.com';
 const API_PATH     = '/v1/messages';
 const MODEL        = 'claude-haiku-4-5-20251001';
-const SONNET_MODEL = 'claude-sonnet-4-5-20250929';
+const SONNET_MODEL = 'claude-sonnet-4-6';
 
 // ─── Prompt ───────────────────────────────────────────────────────────────────
 
@@ -245,8 +245,11 @@ async function _analyzeSignal(signal) {
 
           const parsed = JSON.parse(jsonStr);
 
-          const VALID_FLAGS    = ['high_conviction','wide_uncertainty','extreme_threshold',
-                                   'bimodal_risk','far_out','short_runway','tail_risk','strong_ensemble'];
+          const VALID_FLAGS    = [
+            'high_conviction', 'mean_near_range', 'mean_far_from_range',
+            'weak_ensemble', 'strong_ensemble', 'extreme_threshold',
+            'high_edge_suspicious', 'marginal_edge', 'settled_pattern', 'unsettled_pattern',
+          ];
           const decision       = ['take', 'reduce', 'skip'].includes(parsed.decision) ? parsed.decision : 'take';
           const confidence     = typeof parsed.confidence === 'number'    ? Math.min(1, Math.max(0, parsed.confidence)) : null;
           const sizeMultiplier = [1.0, 0.75, 0.5, 0.25].includes(parsed.sizeMultiplier) ? parsed.sizeMultiplier : 1.0;
@@ -283,7 +286,7 @@ async function _analyzeSignal(signal) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// STAGE 2 — Deep Analysis (claude-sonnet-4-5)
+// STAGE 2 — Deep Analysis (claude-sonnet-4-6)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 // ─── Weather Underground PWS fetch ────────────────────────────────────────────
@@ -531,7 +534,7 @@ sizeMultiplier rules:
 // ─── Stage 2 API call ─────────────────────────────────────────────────────────
 
 /**
- * Stage 2 deep analysis — calls claude-sonnet-4-5 with a structured 5-section prompt.
+ * Stage 2 deep analysis — calls claude-sonnet-4-6 with a structured 5-section prompt.
  *
  * @param {object} signal         Stage 1 signal + stageOneDecision + stageOneSizeMultiplier
  * @param {object} ctx            Extended context (perModels, nwsObs, wuObs, cityProfile, historicalSigma)
@@ -622,7 +625,15 @@ async function _deepAnalyzeSignal(signal, ctx, stage1Result) {
             observations: String(parsed.steps.observations || '').slice(0, 220),
             pricing:      String(parsed.steps.pricing      || '').slice(0, 220),
           } : null;
-          const flags         = Array.isArray(parsed.flags) ? parsed.flags.filter(f => typeof f === 'string').slice(0, 10) : [];
+          const STAGE2_VALID_FLAGS = [
+            'model_agreement', 'model_divergence', 'settled_synoptic', 'unsettled_synoptic',
+            'uhi_relevant', 'marine_layer_active', 'lake_breeze_active', 'chinook_risk',
+            'front_timing_risk', 'obs_warm_bias', 'obs_cold_bias', 'structural_edge',
+            'noise_edge', 'climatology_aligned', 'climatology_opposed', 'hrrr_diverging',
+          ];
+          const flags         = Array.isArray(parsed.flags)
+            ? parsed.flags.filter(f => typeof f === 'string' && STAGE2_VALID_FLAGS.includes(f)).slice(0, 10)
+            : [];
 
           resolve({
             decision,
