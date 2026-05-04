@@ -39,6 +39,20 @@ function writeTrades(t) { try { fs.writeFileSync(TRADES_FILE, JSON.stringify(t, 
 function pct(v)         { return v != null ? (v * 100 ).toFixed(1) + '%' : 'N/A'; }
 function usd(v)         { return v != null ? '$' + Math.abs(v).toFixed(2) : '?'; }
 
+async function sendChunked(api, lines, maxLen = 1950) {
+  let chunk = '';
+  for (const line of lines) {
+    const addition = chunk ? '\n' + line : line;
+    if (chunk.length + addition.length > maxLen) {
+      await api.sendMessage(chunk);
+      chunk = line;
+    } else {
+      chunk += addition;
+    }
+  }
+  if (chunk) await api.sendMessage(chunk);
+}
+
 // ─── Main dispatcher ──────────────────────────────────────────────────────────
 
 async function handle(message, api) {
@@ -286,7 +300,7 @@ async function handleTrades(user, api) {
     }
   }
 
-  await api.sendMessage(dash.join('\n').slice(0, 1950));
+  await sendChunked(api, dash);
 
   // ── Positions message ────────────────────────────────────────────────────
   const allOpen = trades
@@ -339,7 +353,7 @@ async function handleTrades(user, api) {
 
   pos.push('', `*\`!took <id>\` to log entry · \`!sell <id>\` to exit at live price · \`!exit <id> win|loss\` to close · \`!settle\` to resolve expired · \`!performance\` for deep analysis*`);
 
-  await api.sendMessage(pos.join('\n').slice(0, 1950));
+  await sendChunked(api, pos);
 }
 
 // ─── !settle ─────────────────────────────────────────────────────────────────
