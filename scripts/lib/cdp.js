@@ -381,6 +381,44 @@ function calcATR(bars, period = 14) {
   return { atr14: Math.round(atr14 * 100) / 100, buffer: Math.round(buffer * 100) / 100 };
 }
 
+// ─── Screenshot ──────────────────────────────────────────────────────────────
+
+/**
+ * Capture a PNG screenshot of the active TradingView chart and write it to
+ * disk. Uses CDP's native Page.captureScreenshot — no MCP, no external deps.
+ *
+ * Refuses files >9 MB (Discord webhook attachment cap is 10 MB; we keep
+ * a safety margin). On too-large or write failure, throws so callers can
+ * fall back to text-only posts.
+ *
+ * @param {*} client     CDP client from cdpConnect()
+ * @param {string} outPath Absolute path where the PNG should be written.
+ *                         Caller is responsible for ensuring the directory exists.
+ * @returns {Promise<string>} The absolute path written.
+ */
+async function captureScreenshot(client, outPath) {
+  await client.Page.enable();
+  const { data } = await client.Page.captureScreenshot({
+    format: 'png',
+    captureBeyondViewport: false,
+  });
+  if (!data) throw new Error('Page.captureScreenshot returned no data');
+
+  const buf = Buffer.from(data, 'base64');
+  if (buf.length > 9 * 1024 * 1024) {
+    throw Object.assign(
+      new Error(`Screenshot too large: ${buf.length} bytes (>9MB cap for Discord)`),
+      { code: 'SCREENSHOT_TOO_LARGE' }
+    );
+  }
+
+  const fs   = require('fs');
+  const path = require('path');
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
+  fs.writeFileSync(outPath, buf);
+  return outPath;
+}
+
 // ─── Utilities ───────────────────────────────────────────────────────────────
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -393,5 +431,6 @@ module.exports = {
   getQuote, getStudyValues,
   getPineBoxes, getPineLabels,
   getOHLCV, calcATR,
+  captureScreenshot,
   sleep,
 };

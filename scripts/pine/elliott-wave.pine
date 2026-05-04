@@ -1,0 +1,190 @@
+//@version=5
+// =============================================================================
+// Ace Trading System — Elliott Wave pivot detector
+// =============================================================================
+// Lives on the EW TradingView layout (BINANCE:BTCUSDT.P), one instance per pane
+// or per timeframe. Detects ATR-scaled ZigZag pivots and emits them as a JSON
+// summary in a hidden label so the Node orchestrator (scripts/ew/protocol.js)
+// can read them via cdp.getPineLabels(client, 'EW-DATA').
+//
+// Division of responsibility:
+//   Pine (this file): pivot detection + visual labels + JSON data emit
+//   Node orchestrator: rule validation, personality scoring, confidence
+//                      computation, tiered invalidation, multi-degree synthesis
+//
+// Two reasons Pine stays minimal:
+//   1. EW rule logic is easier to express, test, and tune in JS than in Pine v5.
+//   2. Multi-degree synthesis (1D + 4H + 1H confluence) needs cross-TF data,
+//      which is awkward in Pine v5 but trivial in Node after collecting all
+//      three TF passes.
+//
+// The orchestrator filters labels by the literal prefix "EW-DATA" (set via the
+// `dataPrefix` input). It also reads visible numbered pivot labels via
+// cdp.getPineLabels(client, 'EW-PIV') for visual provability.
+// =============================================================================
+
+indicator("Elliott Wave — Pivot Detector (Ace)", "EW", overlay=true,
+          max_labels_count=500, max_lines_count=100)
+
+// ─── Inputs ──────────────────────────────────────────────────────────────────
+
+pivotK     = input.float(2.0, "Pivot threshold = ATR(14) × K", minval=0.3, step=0.1,
+                        tooltip="Lower = more pivots (noisy); higher = fewer pivots (cleaner). Defaults: 1H=2.0, 4H=2.5, 1D=2.0")
+maxPivots  = input.int(15, "Max pivots to retain", minval=6, maxval=40,
+                        tooltip="Older pivots are dropped from the array. 15 covers a full 5-3 EW cycle plus context.")
+showVisual = input.bool(true, "Show numbered pivot labels on chart", tooltip="Disable to keep the chart clean during data-only runs.")
+dataPrefix = input.string("EW-DATA", "Hidden JSON label prefix",
+                        tooltip="The Node orchestrator filters labels by this exact prefix. Don't change unless you also update protocol.js.")
+visualPrefix = input.string("EW-PIV", "Visible pivot label prefix",
+                        tooltip="Each numbered pivot label starts with this prefix. Filterable from the orchestrator for visual readout.")
+
+// ─── ATR-scaled threshold ────────────────────────────────────────────────────
+
+atr14     = ta.atr(14)
+threshold = atr14 * pivotK
+
+// ─── Pivot state (kept across bars via `var`) ────────────────────────────────
+
+// Parallel arrays — Pine v5 has no struct types
+var float[] pivPrice = array.new_float()
+var int[]   pivBar   = array.new_int()    // bar_index of the pivot
+var int[]   pivTime  = array.new_int()    // ms timestamp of the pivot bar
+var int[]   pivType  = array.new_int()    // +1 = swing high, -1 = swing low
+var int     lastDir  = 0                   // direction of the trend since the last confirmed pivot
+
+// ─── Pivot detection ─────────────────────────────────────────────────────────
+// Algorithm:
+//   - Track the running extremum (swing high or low) since the last confirmed pivot.
+//   - When price reverses by `threshold` from the running extremum, the extremum
+//     becomes a confirmed pivot in the array, and we flip direction.
+//   - If price extends in the same direction beyond the running extremum, update
+//     the running extremum (no new pivot yet — pivots only confirm on reversal).
+
+var float runExt    = na   // running extremum price (the candidate next pivot)
+var int   runExtBar = na
+var int   runExtTime = na
+
+if barstate.isconfirmed
+    if array.size(pivPrice) == 0
+        // Bootstrap: first bar establishes initial direction by candle bias
+        if close > open
+            array.push(pivPrice, low)
+            array.push(pivBar,   bar_index)
+            array.push(pivTime,  time)
+            array.push(pivType,  -1)
+            lastDir := 1
+            runExt    := high
+            runExtBar := bar_index
+            runExtTime := time
+        else
+            array.push(pivPrice, high)
+            array.push(pivBar,   bar_index)
+            array.push(pivTime,  time)
+            array.push(pivType,  +1)
+            lastDir := -1
+            runExt    := low
+            runExtBar := bar_index
+            runExtTime := time
+    else
+        if lastDir == 1
+            // Looking for a swing high; running extremum tracks the highest high
+            if high > runExt
+                runExt    := high
+                runExtBar := bar_index
+                runExtTime := time
+            // Reversal confirms when low drops below runExt - threshold
+            if (runExt - low) > threshold
+                array.push(pivPrice, runExt)
+                array.push(pivBar,   runExtBar)
+                array.push(pivTime,  runExtTime)
+                array.push(pivType,  +1)
+                lastDir := -1
+                runExt    := low
+                runExtBar := bar_index
+                runExtTime := time
+        else if lastDir == -1
+            // Looking for a swing low; running extremum tracks the lowest low
+            if low < runExt
+                runExt    := low
+                runExtBar := bar_index
+                runExtTime := time
+            if (high - runExt) > threshold
+                array.push(pivPrice, runExt)
+                array.push(pivBar,   runExtBar)
+                array.push(pivTime,  runExtTime)
+                array.push(pivType,  -1)
+                lastDir := +1
+                runExt    := high
+                runExtBar := bar_index
+                runExtTime := time
+
+    // Trim oldest pivots if we exceed maxPivots
+    while array.size(pivPrice) > maxPivots
+        array.shift(pivPrice)
+        array.shift(pivBar)
+        array.shift(pivTime)
+        array.shift(pivType)
+
+// ─── Visual labels (numbered) ────────────────────────────────────────────────
+// We redraw labels on every confirmed bar so they stay synced with the array.
+
+var label[] visLabels = array.new_label()
+
+if barstate.islast and showVisual
+    // Clear prior visual labels
+    while array.size(visLabels) > 0
+        label.delete(array.shift(visLabels))
+
+    sz = array.size(pivPrice)
+    // Number the most recent up to 8 pivots: P-(N-7), ..., P-N where N=sz
+    startIdx = math.max(0, sz - 8)
+    for i = startIdx to sz - 1
+        p   = array.get(pivPrice, i)
+        b   = array.get(pivBar,   i)
+        ty  = array.get(pivType,  i)
+        n   = i - startIdx + 1
+        col = ty == 1 ? color.new(color.red, 30) : color.new(color.green, 30)
+        ystyle = ty == 1 ? label.style_label_down : label.style_label_up
+        lbl = label.new(b, p, visualPrefix + " " + str.tostring(n),
+                        xloc=xloc.bar_index, yloc=yloc.price,
+                        color=col, textcolor=color.white,
+                        style=ystyle, size=size.normal)
+        array.push(visLabels, lbl)
+
+// ─── JSON data emit (hidden label, latest bar only) ──────────────────────────
+// One JSON-encoded label per chart, filtered by dataPrefix from the orchestrator.
+// Uses CSV-style price-time-type triples (compact) plus metadata header.
+//
+// Format: "EW-DATA|tf=<period>|atr=<atr14>|pivots=p1,t1,y1;p2,t2,y2;..."
+//   y is "1" for high, "-1" for low
+// Pine v5 label text can be long but we keep it under ~5kb to avoid edge cases.
+
+var label dataLabel = na
+
+if barstate.islast
+    // Build pivot CSV from oldest to newest
+    pivCsv = ""
+    sz = array.size(pivPrice)
+    for i = 0 to sz - 1
+        if i > 0
+            pivCsv := pivCsv + ";"
+        p  = array.get(pivPrice, i)
+        t  = array.get(pivTime,  i)
+        ty = array.get(pivType,  i)
+        pivCsv := pivCsv + str.tostring(p, "#.##") + "," + str.tostring(t) + "," + str.tostring(ty)
+
+    txt = dataPrefix + "|tf=" + timeframe.period + "|atr=" + str.tostring(atr14, "#.##") + "|sym=" + syminfo.tickerid + "|pivots=" + pivCsv
+
+    if not na(dataLabel)
+        label.delete(dataLabel)
+    // Place the data label at the latest bar but visually hidden:
+    // very small text, transparent color
+    dataLabel := label.new(bar_index, close, txt,
+                           xloc=xloc.bar_index, yloc=yloc.price,
+                           color=color.new(color.black, 100),
+                           textcolor=color.new(color.black, 100),
+                           style=label.style_none, size=size.tiny)
+
+// ─── End ─────────────────────────────────────────────────────────────────────
+// Visual labels appear on chart (filterable by visualPrefix);
+// data label is hidden but readable via cdp.getPineLabels(client, dataPrefix).

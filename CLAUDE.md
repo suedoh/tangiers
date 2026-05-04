@@ -168,6 +168,33 @@ Tangiers is the **Ace Trading System** — an automated multi-instrument trade s
 - Reaction tracking: reads `_signal_messages` from `.trigger-state.json` / `.bz-trigger-state.json`
 - Respects rate limits: 1.1s between reaction API calls, max 6 checks per run
 
+### `scripts/ew/run.js` — EW Scheduled Analysis
+- Cron: 6×/day at 4H bar close +5min (`5 0,4,8,12,16,20 * * *`)
+- Acquires `.tradingview-lock` mutex (competes with trigger-check & bz)
+- `cdpConnect('EW')` — finds EW tab by title match; never touches `🕵Ace`
+- Cycles 1D → 4H → 1H via `setTimeframe`; reads Pine pivot data via `getPineLabels('EW-DATA')` + study values + `captureScreenshot` per TF
+- Validates EW rules in JS (`validateImpulse`), computes tiered invalidation (hard/soft/truncation), confidence (Bayesian-flavored), confluence flag, stability vs prior run
+- Confidence floor 0.50 → ambiguous post when not met (no forced low-conf calls)
+- Posts to `#btc-ew-signals` via multipart webhook with all 3 screenshots inline
+- Persists to `ew-forecasts.json` (schema-identical to future Mongo `wave_forecasts`)
+- `!ew` Discord handler invokes the same script with `--manual --user=...`
+
+### `scripts/ew/backtest.js` — EW Lifecycle Tracker
+- Cron: +5min after each run (`10 0,4,8,12,16,20 * * *`)
+- Reads BTCUSDT price + 5m klines via Binance Futures public API (no CDP/TV needed)
+- Walks open forecasts × {1D,4H,1H} × {primary,alternate}
+- Detects hard / soft / truncation crossings + Fib target hits (1.0×, 1.618×, 2.618×W1)
+- Posts state-transition events to `#btc-ew-backtest` with original generation-time screenshot re-attached
+- Updates calibration buckets (50/60/70/80/90 conf bands per TF+slot) in `.ew-state.json`
+- Auto-expires forecasts older than 7 days
+
+### `scripts/ew/daily-summary.js`, `daily-brief.js`, `weekly-outlook.js`, `monthly-review.js`
+- All template-rendered (no LLM, no MCP) — preserves the project's no-LLM-in-cron rule
+- daily-summary @ 23:55 UTC → stats + calibration table → `#btc-ew-backtest`
+- daily-brief @ 12:15 UTC → narrative morning brief → `#btc-ew-report` (with screenshots)
+- weekly-outlook @ Sun 22:00 UTC → week-in-review + count-evolution screenshot strip
+- monthly-review @ 1st of month 14:00 UTC → cycle-degree commentary + ~4 screenshots
+
 ### `scripts/lib/lock.js` — Mutex
 - File-based lock at `.tradingview-lock` (project root)
 - Both BTC and BZ scripts compete for the same TradingView Desktop session
@@ -246,7 +273,21 @@ Poly BTC-5 uses the same TradingView tab as BTC but sweeps three timeframes.
 | `POLY_BTC_5_REPORT_WEBHOOK` | `#poly-btc-5-report` | Poly BTC-5 Monday weekly report |
 
 ### Bot Channel IDs (set in `.env`)
-`DISCORD_CHANNEL_ID`, `BZ_DISCORD_SIGNALS_CHANNEL_ID`, `BZ_DISCORD_WAR_REPORT_CHANNEL_ID`, `BZ_DISCORD_BACKTEST_CHANNEL_ID`, `POLY_BTC_5_SIGNALS_CHANNEL_ID`, `POLY_BTC_5_REPORT_CHANNEL_ID`
+`DISCORD_CHANNEL_ID`, `BZ_DISCORD_SIGNALS_CHANNEL_ID`, `BZ_DISCORD_WAR_REPORT_CHANNEL_ID`, `BZ_DISCORD_BACKTEST_CHANNEL_ID`, `POLY_BTC_5_SIGNALS_CHANNEL_ID`, `POLY_BTC_5_REPORT_CHANNEL_ID`, `BTC_EW_SIGNALS_CHANNEL_ID`, `BTC_EW_BACKTEST_CHANNEL_ID`, `BTC_EW_REPORT_CHANNEL_ID`
+
+### BTC Elliott Wave (EW) channels
+| Variable | Channel | Used by |
+|---|---|---|
+| `BTC_EW_SIGNALS_WEBHOOK` | `#btc-ew-signals` | `ew/run.js` (scheduled + `!ew`) |
+| `BTC_EW_BACKTEST_WEBHOOK` | `#btc-ew-backtest` | `ew/backtest.js`, `ew/daily-summary.js` |
+| `BTC_EW_REPORT_WEBHOOK` | `#btc-ew-report` | `ew/daily-brief.js`, `ew/weekly-outlook.js`, `ew/monthly-review.js` |
+
+EW lives in its own TradingView Desktop tab on the **`EW` layout**
+(separate from `🕵Ace`). The `EW` layout has `BINANCE:BTCUSDT.P` plus
+the custom Pine indicator (`scripts/pine/elliott-wave.pine`) + VWAP +
+CVD + Volume. The cron pipeline reads it via `cdpConnect('EW')` and
+never touches the Ace tab. See `strategies/elliott-wave.md` for the
+full operator guide.
 
 ### Poly BTC-5 env vars
 | Variable | Purpose |
@@ -273,6 +314,12 @@ Poly BTC-5 uses the same TradingView tab as BTC but sweeps three timeframes.
 0    9 * * 1                                  scripts/poly/btc-5/weekly-report.js   — Poly Monday 09:00 UTC
 0   14 * * 0                                  scripts/weekly-war-report.js           — BTC Sunday 14:00 UTC
 0   21 * * 0                                  scripts/bz/weekly-report.js            — BZ! Sunday 21:00 UTC (17:00 ET)
+5   0,4,8,12,16,20 * * *                     scripts/ew/run.js                      — EW analysis 6×/day at 4H bar close +5min
+10  0,4,8,12,16,20 * * *                     scripts/ew/backtest.js                 — EW backtest sweep 6×/day +5min after run
+55  23 * * *                                  scripts/ew/daily-summary.js            — EW daily stats post (#btc-ew-backtest)
+15  12 * * *                                  scripts/ew/daily-brief.js              — EW daily narrative brief (#btc-ew-report)
+0   22 * * 0                                  scripts/ew/weekly-outlook.js           — EW Sunday weekly outlook
+0   14 1 * *                                  scripts/ew/monthly-review.js           — EW 1st-of-month cycle review
 ```
 
 View installed jobs: `crontab -l`
@@ -304,6 +351,8 @@ pm2 restart bz-news-watch
 | `bz-trades.json` | BZ pipeline | All BZ! signals with lifecycle fields |
 | `poly-btc-5-trades.json` | Poly BTC-5 pipeline | All 5-min bar evaluations: score, direction, signaled, outcome, correct |
 | `.tradingview-lock` | lib/lock.js | Ephemeral mutex (deleted after each CDP session) |
+| `ew-forecasts.json` | EW pipeline | All EW forecasts — schema-identical to future Mongo `wave_forecasts` collection |
+| `.ew-state.json` | EW pipeline | Last run/backtest/brief timestamps, open forecast IDs, calibration buckets |
 
 ---
 

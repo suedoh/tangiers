@@ -10,6 +10,10 @@ poly-btc-15-trades.json
 .bz-news-state.json
 .poly-btc-5-state.json
 .poly-btc-15-state.json
+ew-forecasts.json
+.ew-state.json
+ew-forecasts.json.lock
+.ew-state.json.lock
 node_modules/
 tradingview-mcp/node_modules/
 tradingview-mcp/screenshots/
