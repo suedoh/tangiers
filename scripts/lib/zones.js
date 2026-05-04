@@ -59,8 +59,17 @@ function currentSession(now) {
   const utc  = d.getUTCHours() * 60 + d.getUTCMinutes();
   const date = d.toISOString().slice(0, 10);
 
-  // ET = UTC-5 (EST) or UTC-4 (EDT). We approximate with UTC-4 (summer 2026)
-  const etHour = (d.getUTCHours() - 4 + 24) % 24;
+  // ET = UTC-4 (EDT, Mar 2nd Sun → Nov 1st Sun) or UTC-5 (EST, otherwise)
+  const year  = d.getUTCFullYear();
+  const getNthSunday = (y, month, n) => {
+    const first = new Date(Date.UTC(y, month, 1));
+    const offset = (7 - first.getUTCDay()) % 7;
+    return new Date(Date.UTC(y, month, 1 + offset + (n - 1) * 7));
+  };
+  const dstStart = getNthSunday(year, 2, 2);  // 2nd Sunday in March
+  const dstEnd   = getNthSunday(year, 10, 1); // 1st Sunday in November
+  const etOffset = (d >= dstStart && d < dstEnd) ? 4 : 5;
+  const etHour   = (d.getUTCHours() - etOffset + 24) % 24;
 
   let session;
   if (etHour >= 18 || etHour < 1)  session = 'asia';     // 18:00–01:00 ET
