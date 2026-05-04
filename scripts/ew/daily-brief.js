@@ -18,10 +18,10 @@ const storage = require('./storage');
 const { postWithFiles, postEmbedsOnly } = require('./discord-upload');
 const shared  = require('./reports-shared');
 
-const PRIMARY        = process.env.PRIMARY === 'true';
-const REPORT_WEBHOOK = process.env.BTC_EW_REPORT_WEBHOOK;
+const PRIMARY_DISABLED = process.env.PRIMARY === 'false';
+const REPORT_WEBHOOK   = process.env.BTC_EW_REPORT_WEBHOOK;
 
-if (!PRIMARY) { console.log('[ew/daily-brief] skipping: PRIMARY != true'); process.exit(0); }
+if (PRIMARY_DISABLED) { console.log('[ew/daily-brief] skipping: PRIMARY=false'); process.exit(0); }
 if (!REPORT_WEBHOOK || REPORT_WEBHOOK.startsWith('PENDING')) {
   console.error('[ew/daily-brief] BTC_EW_REPORT_WEBHOOK not set'); process.exit(1);
 }

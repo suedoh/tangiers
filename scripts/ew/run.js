@@ -12,7 +12,7 @@
  * Posts the result to #btc-ew-signals and persists to ew-forecasts.json.
  *
  * Architecture conformance:
- *   - PRIMARY=true and TRADINGVIEW_ENABLED=true required (matches all CDP scripts)
+ *   - Skips when PRIMARY=false or TRADINGVIEW_ENABLED=false (default = run; matches trigger-check.js)
  *   - Uses scripts/lib/cdp.js (no MCP)
  *   - Loads .env via scripts/lib/env.js
  *   - Errors post to #btc-ew-signals as `error` alert and exit non-zero
@@ -30,8 +30,10 @@ const storage        = require('./storage');
 
 // ─── Guards ──────────────────────────────────────────────────────────────────
 
-const PRIMARY             = process.env.PRIMARY === 'true';
-const TRADINGVIEW_ENABLED = process.env.TRADINGVIEW_ENABLED === 'true';
+// Match the project convention used in trigger-check.js / bz/trigger-check.js:
+// guards are strict opt-OUT (=== 'false'), not strict opt-in. Default = run.
+const PRIMARY_DISABLED   = process.env.PRIMARY === 'false';
+const TRADINGVIEW_BLOCKED = process.env.TRADINGVIEW_ENABLED === 'false';
 const SIGNALS_WEBHOOK     = process.env.BTC_EW_SIGNALS_WEBHOOK;
 
 function exitGuard(reason) {
@@ -49,8 +51,8 @@ const userName = userArg ? userArg.slice('--user='.length) : null;
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 (async () => {
-  if (!PRIMARY)             return exitGuard('PRIMARY != true');
-  if (!TRADINGVIEW_ENABLED) return exitGuard('TRADINGVIEW_ENABLED != true');
+  if (PRIMARY_DISABLED)    return exitGuard('PRIMARY=false (secondary machine)');
+  if (TRADINGVIEW_BLOCKED) return exitGuard('TRADINGVIEW_ENABLED=false');
   if (!SIGNALS_WEBHOOK || SIGNALS_WEBHOOK.startsWith('PENDING')) {
     console.error('[ew/run] BTC_EW_SIGNALS_WEBHOOK not set in .env — aborting');
     process.exit(1);

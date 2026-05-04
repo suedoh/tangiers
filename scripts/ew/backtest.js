@@ -26,12 +26,12 @@ const storage   = require('./storage');
 const formatter = require('./formatter');
 const { postWithFiles, postEmbedsOnly } = require('./discord-upload');
 
-const PRIMARY            = process.env.PRIMARY === 'true';
-const BACKTEST_WEBHOOK   = process.env.BTC_EW_BACKTEST_WEBHOOK;
+const PRIMARY_DISABLED  = process.env.PRIMARY === 'false';
+const BACKTEST_WEBHOOK  = process.env.BTC_EW_BACKTEST_WEBHOOK;
 
 // ─── Guards ──────────────────────────────────────────────────────────────────
 
-if (!PRIMARY) { console.log('[ew/backtest] skipping: PRIMARY != true'); process.exit(0); }
+if (PRIMARY_DISABLED) { console.log('[ew/backtest] skipping: PRIMARY=false'); process.exit(0); }
 if (!BACKTEST_WEBHOOK || BACKTEST_WEBHOOK.startsWith('PENDING')) {
   console.error('[ew/backtest] BTC_EW_BACKTEST_WEBHOOK not set — aborting'); process.exit(1);
 }

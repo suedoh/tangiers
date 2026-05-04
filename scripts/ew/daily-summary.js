@@ -18,10 +18,10 @@ loadEnv();
 const storage   = require('./storage');
 const { postEmbedsOnly } = require('./discord-upload');
 
-const PRIMARY          = process.env.PRIMARY === 'true';
+const PRIMARY_DISABLED = process.env.PRIMARY === 'false';
 const BACKTEST_WEBHOOK = process.env.BTC_EW_BACKTEST_WEBHOOK;
 
-if (!PRIMARY) { console.log('[ew/daily-summary] skipping: PRIMARY != true'); process.exit(0); }
+if (PRIMARY_DISABLED) { console.log('[ew/daily-summary] skipping: PRIMARY=false'); process.exit(0); }
 if (!BACKTEST_WEBHOOK || BACKTEST_WEBHOOK.startsWith('PENDING')) {
   console.error('[ew/daily-summary] BTC_EW_BACKTEST_WEBHOOK not set'); process.exit(1);
 }
