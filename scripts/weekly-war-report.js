@@ -603,6 +603,16 @@ function buildScenarios(price, lwHigh, lwLow, lwOpen, monthlyHigh, quarterOpen, 
 
 // ─── External APIs ────────────────────────────────────────────────────────────
 
+async function fetchMonthlyBarsFromBinance(count = 12) {
+  try {
+    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1M&limit=${count}`;
+    const raw = await httpGet(url);
+    if (!Array.isArray(raw)) { log('Binance monthly klines: unexpected response'); return []; }
+    // Binance kline format: [openTime, o, h, l, c, volume, closeTime, ...]
+    return raw.map(k => ({ t: Math.floor(k[0] / 1000), o: parseFloat(k[1]), h: parseFloat(k[2]), l: parseFloat(k[3]), c: parseFloat(k[4]) }));
+  } catch (e) { log(`Binance monthly klines error: ${e.message}`); return []; }
+}
+
 async function fetchFundingRate() {
   try {
     const d = await httpGet('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT');
@@ -1027,18 +1037,6 @@ async function main() {
       weeklyRSI    = computeRSI(weeklyBars.map(b => b.c), 14);
     }
 
-    // Monthly bars (12 bars = 12 months of history)
-    const monthlyBars = await fetchHTFBars(client, '1M', 12, originalTF);
-    log(`Monthly bars: ${monthlyBars.length}`);
-    if (monthlyBars.length >= 2) {
-      const cm     = monthlyBars[monthlyBars.length - 1]; // current month
-      monthlyOpen  = cm.o;
-      monthlyHigh  = cm.h;
-      monthlyLow   = cm.l;
-      quarterOpen  = getQuarterOpen(monthlyBars);
-      monthlyTrend = analyseMonthlyTrend(monthlyBars);
-    }
-
     log('TradingView data collection complete');
   } catch (e) {
     log(`TradingView error: ${e.message || JSON.stringify(e)}`);
@@ -1048,12 +1046,22 @@ async function main() {
 
   // ── 2. External APIs (parallel) ────────────────────────────────────────────
   log('Fetching external data...');
-  const [fundingRate, fearGreed, options, calendar] = await Promise.all([
+  const [fundingRate, fearGreed, options, calendar, monthlyBars] = await Promise.all([
     fetchFundingRate(),
     fetchFearAndGreed(),
     fetchOptionsData(),
     fetchEconomicCalendar(),
+    fetchMonthlyBarsFromBinance(12),
   ]);
+  log(`Monthly bars (Binance): ${monthlyBars.length}`);
+  if (monthlyBars.length >= 2) {
+    const cm     = monthlyBars[monthlyBars.length - 1]; // current (incomplete) month
+    monthlyOpen  = cm.o;
+    monthlyHigh  = cm.h;
+    monthlyLow   = cm.l;
+    quarterOpen  = getQuarterOpen(monthlyBars);
+    monthlyTrend = analyseMonthlyTrend(monthlyBars);
+  }
   log(`Funding: ${fundingRate}, F&G: ${fearGreed?.value}, MaxPain: ${options?.maxPain}, Events: ${calendar.length}`);
 
   // ── 3. Analysis ────────────────────────────────────────────────────────────
