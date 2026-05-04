@@ -1042,6 +1042,30 @@ function writeState(state) {
   } catch (e) { console.error(`[writeState] write failed: ${e.message}`); }
 }
 
+// ─── CVD History ─────────────────────────────────────────────────────────────
+// Thin storage wrappers. Migration note: when moving to MongoDB, replace these
+// two functions with an insert to a cvd_readings collection (TTL index) and a
+// nearest-by-timestamp query. checkPendingConfirmation() is unchanged.
+
+const CVD_HISTORY_KEY = '_cvdHistory';
+const CVD_HISTORY_MAX = 200; // ~33 hours at 10-min polls
+
+function appendCVDReading(state, cvd) {
+  if (cvd == null) return;
+  if (!Array.isArray(state[CVD_HISTORY_KEY])) state[CVD_HISTORY_KEY] = [];
+  state[CVD_HISTORY_KEY].push({ ts: Date.now(), cvd });
+  if (state[CVD_HISTORY_KEY].length > CVD_HISTORY_MAX)
+    state[CVD_HISTORY_KEY] = state[CVD_HISTORY_KEY].slice(-CVD_HISTORY_MAX);
+}
+
+function lookupCVDAt(state, targetTs) {
+  const history = state[CVD_HISTORY_KEY];
+  if (!Array.isArray(history) || history.length === 0) return null;
+  return history.reduce((best, entry) =>
+    Math.abs(entry.ts - targetTs) < Math.abs(best.ts - targetTs) ? entry : best
+  ).cvd;
+}
+
 function isCoolingDown(zoneKey, incomingDir, cvd) {
   try {
     const entry = readState()[zoneKey];
@@ -1359,9 +1383,14 @@ function checkReclaimWatch(price, indicators) {
 // zone is removed (the move didn't materialise).
 
 function checkPendingConfirmation(price, indicators) {
-  const { cvd, oi } = indicators;
+  const { oi } = indicators;
   const state = readState();
   const results = [];
+
+  // Use CVD at the last 30M bar close rather than current poll-time CVD.
+  // Poll fires up to 10 min after the bar close; CVD can reverse in that window.
+  const barCloseTs = Math.floor(Date.now() / (30 * 60 * 1000)) * (30 * 60 * 1000);
+  const cvd = lookupCVDAt(state, barCloseTs) ?? indicators.cvd;
 
   for (const [key, pending] of Object.entries(state)) {
     if (!key.startsWith('_pending_')) continue;
@@ -1841,6 +1870,11 @@ async function main() {
   indicators.volumes     = studies._volumes    ?? [];
   indicators.vrvpLevels  = computeVRVPLevels(studies._vrvpRaw);
   log(`CVD: ${indicators.cvd} | OI: ${indicators.oi} (${indicators.oiTrend ?? 'no trend yet'}) | VWAP: ${indicators.vwap} | Weekly: ${indicators.weeklyTrend ?? 'n/a'}`);
+
+  // Append CVD snapshot to history for use by checkPendingConfirmation
+  const stateForCVD = readState();
+  appendCVDReading(stateForCVD, indicators.cvd);
+  writeState(stateForCVD);
 
   // Update outcomes and confirmations BEFORE closing the CDP connection —
   // both functions use the client to fetch OHLCV bars from TradingView.
