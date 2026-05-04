@@ -148,6 +148,7 @@ async function setTimeframe(client, tf, timeoutMs = 5000) {
     if (current === tf || String(current) === String(tf)) return;
   }
   // Non-fatal — some TF representations differ (e.g. '60' vs '1H'), just add a safety pause
+  console.warn(`[setTimeframe] ${tf} did not confirm within ${timeoutMs}ms — data may be from wrong TF`);
   await sleep(800);
 }
 
