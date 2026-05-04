@@ -31,6 +31,7 @@ const REPORT_SCRIPT  = path.join(ROOT, 'scripts', 'weather', 'weekly-report.js')
 const PERF_SCRIPT    = path.join(ROOT, 'scripts', 'weather', 'analyze-performance.js');
 const SETTLE_SCRIPT  = path.join(ROOT, 'scripts', 'weather', 'settle.js');
 const TRADES_FILE    = path.join(ROOT, 'weather-trades.json');
+const CALIBRATION_FILE = path.join(ROOT, 'scripts', 'lib', 'city-calibration.json');
 
 const SIGNALS_HOOK  = resolveWebhook('WEATHER_DISCORD_SIGNALS_WEBHOOK');
 const BACKTEST_HOOK = resolveWebhook('WEATHER_DISCORD_BACKTEST_WEBHOOK');
@@ -155,6 +156,33 @@ async function handlePerformance(user, args, api) {
     await api.sendMessage(`❌ **Performance analysis failed:** ${err.slice(0, 200)}`);
   } else {
     await api.sendMessage(`✅ **Analysis posted to #weather-backtest** (3 embeds)`);
+
+    // Brier score calibration table
+    try {
+      const calib = JSON.parse(fs.readFileSync(CALIBRATION_FILE, 'utf8'));
+      const cities = Object.keys(calib).sort();
+      if (cities.length > 0) {
+        const KELLY_MULT_THRESHOLDS = [
+          { bs: 0.15, mult: 1.1 },
+          { bs: 0.25, mult: 1.0 },
+          { bs: 0.35, mult: 0.75 },
+          { bs: Infinity, mult: 0.5 },
+        ];
+        const rows = cities.map(city => {
+          const c = calib[city];
+          const recent = (c.recentTrades || []).slice(-30);
+          const n   = recent.length;
+          const bs  = n >= 2 ? (recent.reduce((s, t) => s + Math.pow(t.forecastProb - t.outcome, 2), 0) / n) : null;
+          const wins = recent.filter(t => t.outcome === 1).length;
+          const wr   = n > 0 ? (wins / n * 100).toFixed(0) + '%' : '—';
+          const mult = n < 10 ? '1.0×' :
+            bs < 0.15 ? '1.1×' : bs < 0.25 ? '1.0×' : bs < 0.35 ? '0.75×' : '0.5×';
+          const bsStr = bs != null ? bs.toFixed(3) : '—';
+          return `\`${city.padEnd(12)}\` BS: \`${bsStr}\` WR: \`${wr.padStart(4)}\` n: \`${String(n).padStart(2)}\` Kelly: \`${mult}\``;
+        });
+        await api.sendMessage(`**📐 City Calibration (30-day rolling)**\n${rows.join('\n')}`);
+      }
+    } catch {}
   }
 }
 
@@ -209,7 +237,11 @@ async function handleTrades(user, api) {
   const weekTo      = new Date(now).toISOString().slice(5, 10).replace('-', '/');
   const weekWR      = weekRes.length > 0 ? Math.round(100 * weekWins.length / weekRes.length) : null;
 
-  dash.push(`## 🌡️ WEATHERMEN — TRADES`);
+  const todayISO  = new Date().toISOString().slice(0, 10);
+  const todayPnl  = resolved.filter(t => t.closedAt?.startsWith(todayISO)).reduce((a, t) => a + (t.pnlDollars || 0), 0);
+  const todayStr  = todayPnl !== 0 ? (todayPnl >= 0 ? ` · Today: +$${todayPnl.toFixed(2)}` : ` · Today: -$${Math.abs(todayPnl).toFixed(2)}`) : '';
+
+  dash.push(`## 🌡️ WEATHERMEN — TRADES${todayStr}`);
   dash.push(`### 📅 This Week (${weekFrom}–${weekTo})`);
   if (weekRes.length === 0 && weekOpen.length === 0) {
     dash.push('*No signals this week.*');

@@ -748,6 +748,17 @@ async function getTemperatureForecast(lat, lon, targetDate, opts = {}) {
     sigmaF = leadTimeSigma(targetDate);
   }
 
+  // Inter-model spread: max-min across the deterministic model forecasts.
+  // High spread (>5°F) indicates models disagree on the atmospheric regime — a signal
+  // to widen sigma or skip the trade. Returned for use by the scanner.
+  let interModelSpread = null;
+  if (models?.models) {
+    const modelTemps = Object.values(models.models).map(mv => mv.forecast).filter(v => v != null);
+    if (modelTemps.length >= 2) {
+      interModelSpread = Math.max(...modelTemps) - Math.min(...modelTemps);
+    }
+  }
+
   const sources = [];
   if (ensemble) sources.push(`GFS Ensemble (${ensemble.memberCount} members)`);
   if (models) {
@@ -759,7 +770,7 @@ async function getTemperatureForecast(lat, lon, targetDate, opts = {}) {
   }
   if (historical) sources.push(`GHCN-Daily station ${historical.station} (${historical.sampleSize} seasons)`);
 
-  return { meanF, sigmaF, ensemble, models, historical, sources };
+  return { meanF, sigmaF, ensemble, models, historical, sources, interModelSpread };
 }
 
 module.exports = { getForecast, getObserved, fetchGHCNObserved, fetchNWSObserved, fetchNWS, normalCDF, thresholdProbability, getTemperatureForecast, fetchGHCNStats, leadTimeSigma };

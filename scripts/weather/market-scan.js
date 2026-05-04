@@ -34,6 +34,7 @@ const {
   fetchWeatherMarkets,
   getMarketPrice,
   getNoTokenId,
+  simulateSlippage,
   kellySizing,
   marketUrl,
 } = require('../lib/polymarket');
@@ -102,8 +103,13 @@ const PAPER_ONLY_CITIES = new Set([
   'milan',        // 53.8% WR (26 trades) — Po Valley cold-air pooling poorly modeled; below live threshold
 ]);
 
-const STATE_FILE  = path.join(ROOT, '.weather-state.json');
-const TRADES_FILE = path.join(ROOT, 'weather-trades.json');
+const STATE_FILE         = path.join(ROOT, '.weather-state.json');
+const TRADES_FILE        = path.join(ROOT, 'weather-trades.json');
+const STATION_CACHE_FILE = path.join(__dirname, '.station-cache.json');
+const CALIBRATION_FILE   = path.join(ROOT, 'scripts/lib/city-calibration.json');
+
+// Rolling Brier score calibration window (days)
+const CALIBRATION_WINDOW_DAYS = 30;
 
 function log(msg) { console.log(`[${new Date().toISOString()}] [weather-scan] ${msg}`); }
 function readState()    { try { return JSON.parse(fs.readFileSync(STATE_FILE,  'utf8')); } catch (e) { console.error('[weather-scan] readState error:', e.message);  return { cooldowns: {}, signals: {} }; } }
@@ -249,6 +255,10 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiA
     lines.push(`GFS Ensemble:    ${bar(e.prob)}  **${pct(e.prob)}** above ${refTemp} ref (${e.memberCount} members)`);
   }
   if (forecast.models?.models) {
+    const modelTemps = Object.values(forecast.models.models).map(mv => mv.forecast).filter(v => v != null);
+    const spread = modelTemps.length >= 2 ? Math.max(...modelTemps) - Math.min(...modelTemps) : null;
+    const spreadIcon = spread == null ? '' : spread > 8 ? ' ⚠️ HIGH' : spread > 5 ? ' ⚡ MOD' : '';
+    if (spread != null) lines.push(`Model spread:    ${spread.toFixed(1)}°F${spreadIcon}`);
     for (const [model, mv] of Object.entries(forecast.models.models)) {
       const label = {
         ecmwf_aifs025: 'AIFS   ',
@@ -331,6 +341,129 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiA
   return lines.join('\n');
 }
 
+// ─── Per-city Brier score calibration ────────────────────────────────────────
+
+function loadCityCalibration() {
+  try { return JSON.parse(fs.readFileSync(CALIBRATION_FILE, 'utf8')); } catch { return {}; }
+}
+
+function saveCityCalibration(calib) {
+  try { fs.writeFileSync(CALIBRATION_FILE, JSON.stringify(calib, null, 2)); } catch (e) {
+    log(`[calibration] write error: ${e.message}`);
+  }
+}
+
+/**
+ * Record a resolved trade for Brier score calibration.
+ * Prunes entries older than CALIBRATION_WINDOW_DAYS automatically.
+ *
+ * @param {string} city         Lowercase city name
+ * @param {number} forecastProb Model probability for the signal's side (0–1)
+ * @param {boolean} won         Whether the signal resolved in our favour
+ */
+function updateCityCalibration(city, forecastProb, won) {
+  if (!city || forecastProb == null) return;
+  const calib   = loadCityCalibration();
+  const cityKey = city.toLowerCase();
+
+  if (!calib[cityKey]) calib[cityKey] = { recentTrades: [] };
+
+  const cutoff = Date.now() - CALIBRATION_WINDOW_DAYS * 86_400_000;
+  calib[cityKey].recentTrades = (calib[cityKey].recentTrades || []).filter(t => t.ts >= cutoff);
+
+  calib[cityKey].recentTrades.push({
+    ts:           Date.now(),
+    forecastProb: Math.round(forecastProb * 1000) / 1000,
+    outcome:      won ? 1 : 0,
+    brierContrib: Math.round((forecastProb - (won ? 1 : 0)) ** 2 * 10000) / 10000,
+  });
+
+  // Recompute rolling Brier score (lower = better calibrated)
+  const trades = calib[cityKey].recentTrades;
+  const bs = trades.reduce((a, t) => a + t.brierContrib, 0) / trades.length;
+  calib[cityKey].brierScore   = Math.round(bs * 10000) / 10000;
+  calib[cityKey].winRate      = Math.round(trades.filter(t => t.outcome === 1).length / trades.length * 1000) / 10;
+  calib[cityKey].n            = trades.length;
+  calib[cityKey].updatedAt    = new Date().toISOString();
+
+  saveCityCalibration(calib);
+}
+
+/**
+ * Returns a Kelly multiplier for a city based on its rolling Brier score.
+ * Requires ≥10 trades in the window to activate; otherwise returns 1.0.
+ *
+ * BS < 0.15 (well-calibrated)  → 1.1×
+ * BS 0.15–0.25 (normal)        → 1.0×
+ * BS 0.25–0.35 (degraded)      → 0.75×
+ * BS > 0.35  (poor)            → 0.5×
+ */
+function getCityKellyMultiplier(city) {
+  if (!city) return 1.0;
+  const calib   = loadCityCalibration();
+  const cityKey = city.toLowerCase();
+  const entry   = calib[cityKey];
+  if (!entry || (entry.n || 0) < 10) return 1.0;  // insufficient data
+  const bs = entry.brierScore;
+  if (bs < 0.15) return 1.1;
+  if (bs < 0.25) return 1.0;
+  if (bs < 0.35) return 0.75;
+  return 0.5;
+}
+
+// ─── Resolution-source watchdog ──────────────────────────────────────────────
+
+/**
+ * Compares station IDs in fetched market coords against a cached snapshot.
+ * Alerts to Discord if any city's resolution station has changed — catches
+ * silent station switches like the Paris CDG→Le Bourget incident.
+ */
+async function checkStationChanges(markets) {
+  let cache = {};
+  try { cache = JSON.parse(fs.readFileSync(STATION_CACHE_FILE, 'utf8')); } catch { /* first run */ }
+
+  const seen   = new Set();
+  let   dirty  = false;
+  const alerts = [];
+
+  for (const market of markets) {
+    const city   = market.parsed?.city?.toLowerCase();
+    const coords = market.parsed?.coords || {};
+    if (!city || seen.has(city)) continue;
+    seen.add(city);
+
+    const current = {
+      ghcnStation: coords.ghcnStation ?? null,
+      nwsStation:  coords.nwsStation  ?? null,
+    };
+    const cached = cache[city];
+
+    if (cached &&
+        (cached.ghcnStation !== current.ghcnStation ||
+         cached.nwsStation  !== current.nwsStation)) {
+      const msg = `⚠️ **STATION CHANGE DETECTED: ${city}**\n` +
+        `Old GHCN: \`${cached.ghcnStation}\` → New: \`${current.ghcnStation}\`\n` +
+        `Old NWS:  \`${cached.nwsStation}\` → New: \`${current.nwsStation}\`\n` +
+        `Verify resolution source in Polymarket market rules before trading this city.`;
+      log(`[station-watchdog] CHANGE for ${city}: GHCN ${cached.ghcnStation}→${current.ghcnStation}, NWS ${cached.nwsStation}→${current.nwsStation}`);
+      alerts.push(msg);
+    }
+
+    cache[city] = current;
+    dirty = true;
+  }
+
+  if (dirty) {
+    try { fs.writeFileSync(STATION_CACHE_FILE, JSON.stringify(cache, null, 2)); } catch (e) {
+      log(`[station-watchdog] cache write error: ${e.message}`);
+    }
+  }
+
+  for (const msg of alerts) {
+    if (BACKTEST_HOOK) await postWebhook(BACKTEST_HOOK, 'error', msg, 'Weather • Station Watchdog').catch(() => null);
+  }
+}
+
 // ─── Outcome resolution ───────────────────────────────────────────────────────
 
 /**
@@ -377,6 +510,42 @@ async function resolveOutcomes(trades) {
         if (era5?.value != null) { value = era5.value; observedSource = 'Open-Meteo ERA5'; }
       }
 
+      // Oracle anomaly check: cross-reference resolution value against neighboring stations.
+      // A single-station spike that disagrees with neighbors by >3°F is flagged — catches
+      // CDG-style data tampering or sensor faults before they silently resolve a trade.
+      if (value != null && nwsEligible) {
+        const cityProfile   = getCityProfile(trade.parsed.city);
+        const neighborSt    = cityProfile?.neighborStations || [];
+        if (neighborSt.length > 0) {
+          const neighborResults = await Promise.all(
+            neighborSt.map(s => fetchNWSObserved(s, trade.parsed.date, coords.tz || 'America/New_York').catch(() => null))
+          );
+          const neighborValues = neighborResults
+            .map(n => n ? (wantHigh ? n.high : n.low) : null)
+            .filter(v => v != null);
+
+          if (neighborValues.length > 0) {
+            const sorted  = [...neighborValues].sort((a, b) => a - b);
+            const median  = sorted[Math.floor(sorted.length / 2)];
+            const gap     = Math.abs(value - median);
+            if (gap > 3.0) {
+              trade.suspiciousResolution = true;
+              log(`[resolve] ${trade.id}: ORACLE ANOMALY — station ${value.toFixed(1)}°F vs neighbor median ${median.toFixed(1)}°F (gap ${gap.toFixed(1)}°F) — flagged for review`);
+              if (BACKTEST_HOOK) {
+                await postWebhook(BACKTEST_HOOK, 'error',
+                  `⚠️ **ORACLE ANOMALY DETECTED** | \`${trade.id}\`\n` +
+                  `${trade.question}\n` +
+                  `Resolution station: **${value.toFixed(1)}°F** (${observedSource})\n` +
+                  `Neighbor median: **${median.toFixed(1)}°F** (${neighborSt.join(', ')})\n` +
+                  `Gap: **${gap.toFixed(1)}°F** — manual review recommended.`,
+                  'Weather • Oracle Risk'
+                ).catch(() => null);
+              }
+            }
+          }
+        }
+      }
+
       // Path B: Polymarket settlement price — fallback when observation data unavailable.
       // Resolves as soon as the oracle posts (typically 12–24h after the event).
       if (value == null) {
@@ -400,6 +569,7 @@ async function resolveOutcomes(trades) {
             }
 
             computeLivePnl(trade, signalWon);
+            updateCityCalibration(trade.parsed?.city, (trade.modelProb || 50) / 100, signalWon);
 
             changed = true;
             log(`[resolve] ${trade.id}: Polymarket-settled ${hit ? 'YES' : 'NO'} — ${signalWon ? 'WIN' : 'LOSS'}`);
@@ -463,6 +633,7 @@ async function resolveOutcomes(trades) {
       }
 
       computeLivePnl(trade, signalWon);
+      updateCityCalibration(trade.parsed?.city, (trade.modelProb || 50) / 100, signalWon);
 
       changed = true;
       const bucketLbl = thresholdLabel(trade.parsed);
@@ -506,6 +677,24 @@ async function main() {
   const state  = readState();
   const trades = readTrades();
 
+  // ── Circuit breaker: halt if daily paper losses exceed configured limit ───
+  // Resets at UTC midnight. Checked before any new signals are fired.
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const todayPnl = trades
+    .filter(t => t.closedAt?.startsWith(todayISO) && !t.shadow && t.pnlDollars != null)
+    .reduce((sum, t) => sum + t.pnlDollars, 0);
+  const CIRCUIT_BREAKER_LIMIT = -(BANKROLL * parseFloat(process.env.WEATHER_CIRCUIT_BREAKER_PCT || '0.10'));
+  if (todayPnl < CIRCUIT_BREAKER_LIMIT) {
+    log(`CIRCUIT BREAKER: daily P&L $${todayPnl.toFixed(2)} below limit $${CIRCUIT_BREAKER_LIMIT.toFixed(2)} — halting scan for today`);
+    if (BACKTEST_HOOK) {
+      await postWebhook(BACKTEST_HOOK, 'error',
+        `🚨 **CIRCUIT BREAKER TRIGGERED**\nDaily paper P&L: **$${todayPnl.toFixed(2)}** (limit: $${CIRCUIT_BREAKER_LIMIT.toFixed(2)})\nNo new signals will fire until UTC midnight.\nSet \`WEATHER_CIRCUIT_BREAKER_PCT\` to adjust (default 10%).`,
+        'Weather • Risk Control');
+    }
+    process.exit(0);
+  }
+  if (todayPnl !== 0) log(`Daily P&L check: $${todayPnl >= 0 ? '+' : ''}${todayPnl.toFixed(2)} (circuit breaker at $${CIRCUIT_BREAKER_LIMIT.toFixed(2)})`);
+
   // ── Step 1: resolve any settled positions ─────────────────────────────────
   const resolved = await resolveOutcomes(trades);
   if (resolved) writeTrades(trades);
@@ -532,6 +721,9 @@ async function main() {
     process.exit(1);
   }
 
+  // Resolution-source watchdog: alert if any city's settlement station has changed
+  await checkStationChanges(markets).catch(err => log(`[station-watchdog] error: ${err.message}`));
+
   // Filter by minimum volume
   const candidates = markets.filter(m => m.volume >= MIN_VOLUME);
   log(`${candidates.length} markets meet volume threshold ($${MIN_VOLUME})`);
@@ -543,10 +735,12 @@ async function main() {
   for (const market of candidates) {
     const { parsed } = market;
 
-    // Skip markets resolving today or beyond reliable ensemble window
+    // Skip markets resolving too soon or beyond reliable ensemble window.
+    // <2h: observation noise dominates, forecast no longer informative.
+    // >7d: beyond the reliable temperature ensemble horizon.
     const daysToResolution = (new Date(parsed.date) - now) / 86_400_000;
-    if (daysToResolution < 0.25) continue;
-    if (daysToResolution > 10)   continue;
+    if (daysToResolution < 0.083) continue;  // 2h minimum
+    if (daysToResolution > 7)     continue;  // 7-day reliable horizon
 
     const groupKey = `${parsed.city}|${parsed.date}`;
     if (!eventGroups.has(groupKey)) eventGroups.set(groupKey, []);
@@ -632,6 +826,25 @@ async function main() {
       : '';
     log(`${groupKey}: mean=${forecast.meanF != null ? forecast.meanF.toFixed(1) + '°F' : 'N/A'}${biasNote} σ=${forecast.sigmaF.toFixed(1)}°F [${sigmaSource}] (${forecast.sources.join(', ')})`);
 
+    // ── Inter-model spread filter ──────────────────────────────────────────────
+    // When models fundamentally disagree on the regime, the Gaussian CDF is unreliable.
+    // >8°F spread: skip entirely (models on different atmospheric solutions).
+    // 5–8°F spread: widen sigma by 15% to reflect genuine regime uncertainty.
+    const interModelSpread = forecast.interModelSpread;
+    const SPREAD_SKIP_F  = parseFloat(process.env.WEATHER_SPREAD_SKIP_F  || '8');
+    const SPREAD_WIDEN_F = parseFloat(process.env.WEATHER_SPREAD_WIDEN_F || '5');
+    if (interModelSpread != null) {
+      if (interModelSpread > SPREAD_SKIP_F) {
+        log(`${groupKey}: inter-model spread ${interModelSpread.toFixed(1)}°F > ${SPREAD_SKIP_F}°F threshold — models disagree on regime, skipping`);
+        continue;
+      }
+      if (interModelSpread > SPREAD_WIDEN_F) {
+        const widenedSigma = Math.round(forecast.sigmaF * 1.15 * 10) / 10;
+        log(`${groupKey}: inter-model spread ${interModelSpread.toFixed(1)}°F — sigma widened from ${forecast.sigmaF.toFixed(1)}°F to ${widenedSigma.toFixed(1)}°F`);
+        forecast = { ...forecast, sigmaF: widenedSigma };
+      }
+    }
+
     // Score each bucket market in this group
     let bestMarket          = null;
     let bestEdge            = -Infinity;
@@ -639,6 +852,7 @@ async function main() {
     let bestModelProb       = null;
     let bestEffectiveMinEdge = MIN_EDGE;
     const shadowCandidates  = [];
+    const tailCandidates    = [];
 
     for (const market of groupMarkets) {
       const { conditionId, parsed: mp } = market;
@@ -651,11 +865,6 @@ async function main() {
 
       const existingTrade = trades.find(t => t.conditionId === conditionId && t.outcome === null);
       if (existingTrade && !cooledDown) continue;
-      if (existingTrade && cooledDown) {
-        const priceDiff = Math.abs(market.yesPrice - existingTrade.yesPrice);
-        if (priceDiff < 0.10) continue;
-        log(`Market ${conditionId} price moved ${(priceDiff * 100).toFixed(1)}pts after cooldown — re-evaluating`);
-      }
 
       const modelProb = bucketModelProb(mp, correctedMeanF, forecast.sigmaF);
       if (modelProb == null) continue;
@@ -665,6 +874,18 @@ async function main() {
 
       const side = yesEdge >= noEdge ? 'yes' : 'no';
       const edge = Math.max(yesEdge, noEdge);
+
+      // Flip-flop guard: when re-evaluating a cooled-down market with an existing open trade,
+      // require stricter price movement to re-signal in the opposite direction.
+      // Prevents oscillation when the model mean hovers near the bucket boundary.
+      if (existingTrade && cooledDown) {
+        const priceDiff = Math.abs(market.yesPrice - existingTrade.yesPrice);
+        const lastSide  = state.lastSignalSide?.[conditionId];
+        const isFlip    = lastSide && lastSide !== side;
+        const minMove   = isFlip ? 0.15 : 0.10;
+        if (priceDiff < minMove) continue;
+        log(`Market ${conditionId} price moved ${(priceDiff * 100).toFixed(1)}pts after cooldown${isFlip ? ' (DIRECTION FLIP — required 15%)' : ''} — re-evaluating`);
+      }
 
       // YES+range: fully blocked (13% WR all-time, structural model-accuracy problem).
       // Shadow-log candidates meeting the sigma+bias filter for future validation —
@@ -689,6 +910,17 @@ async function main() {
       // below-threshold NO bets; market pricing of cold extremes is more reliable than GFS).
       if (side === 'no' && mp.direction === 'below') {
         continue;
+      }
+
+      // Tail under-pricing: collect YES buckets priced ≤ TAIL_MAX_PRICE where model
+      // doesn't actively predict impossibility (modelProb > 5%). Fired as a fixed small
+      // bet regardless of Kelly; priced separately from the main signal path.
+      // Default OFF — enable with WEATHER_TAIL_ENABLED=true.
+      if (process.env.WEATHER_TAIL_ENABLED === 'true') {
+        const TAIL_MAX_PRICE = parseFloat(process.env.WEATHER_TAIL_MAX_PRICE || '0.10');
+        if (market.yesPrice <= TAIL_MAX_PRICE && modelProb > 0.05 && side !== 'no') {
+          tailCandidates.push({ market, modelProb, tailEdge: modelProb - market.yesPrice });
+        }
       }
 
       if (edge > bestEdge) {
@@ -770,6 +1002,7 @@ async function main() {
       meanF:                correctedMeanF,
       sigmaF:               forecast.sigmaF,
       ensembleSpread:       forecast.ensemble?.spread      ?? null,
+      interModelSpread:     interModelSpread               ?? null,
       memberCount:          forecast.ensemble?.memberCount ?? null,
       membersOnSide:        forecast.ensemble
         ? Math.round((bestSide === 'yes'
@@ -844,9 +1077,11 @@ async function main() {
       continue;  // suppressed — don't count as a fired signal
     }
 
-    // Apply size multiplier from AI assessment
-    const baseKelly      = kellySizing(bestModelProb, bestMarket.yesPrice, bestSide, BANKROLL, KELLY_FRAC, MAX_BET);
-    const adjustedDollars = Math.round(baseKelly.dollars * aiAnalysis.sizeMultiplier * 100) / 100;
+    // Apply size multiplier from AI assessment + city calibration multiplier
+    const cityCalibMult   = getCityKellyMultiplier(mp.city);
+    if (cityCalibMult !== 1.0) log(`${groupKey}: city Kelly multiplier ${cityCalibMult}× (Brier score calibration)`);
+    const baseKelly       = kellySizing(bestModelProb, bestMarket.yesPrice, bestSide, BANKROLL, KELLY_FRAC, MAX_BET);
+    const adjustedDollars = Math.round(baseKelly.dollars * aiAnalysis.sizeMultiplier * cityCalibMult * 100) / 100;
     const kelly           = { ...baseKelly, dollars: adjustedDollars };
 
     // Skip if Kelly is $0 after live price refresh — means the market moved against us
@@ -894,6 +1129,8 @@ async function main() {
       correctedMeanF:  correctedMeanF != null ? Math.round(correctedMeanF * 10) / 10 : null,
       biasCorrF:       biasCorrF !== 0 ? biasCorrF : undefined,
       sigmaF:          Math.round(forecast.sigmaF * 10) / 10,
+      interModelSpread:    interModelSpread != null ? Math.round(interModelSpread * 10) / 10 : null,
+      cityCalibMultiplier: cityCalibMult !== 1.0 ? cityCalibMult : undefined,
       betDollars:      kelly.dollars,
       aiDecision:       aiAnalysis.stage === null ? null : aiAnalysis.decision,
       aiConfidence:     aiAnalysis.confidence,
@@ -987,6 +1224,20 @@ async function main() {
           } else if (liveDollars > 0) {
             (async () => {
               try {
+                // Slippage simulation: reject if estimated order book slippage > 2.5%
+                const LIVE_MAX_SLIPPAGE = parseFloat(process.env.POLYMARKET_MAX_SLIPPAGE || '0.025');
+                const slippage = await simulateSlippage(conditionId, 'no', liveDollars).catch(() => null);
+                if (slippage != null && slippage > LIVE_MAX_SLIPPAGE) {
+                  log(`${id}: live order skipped — simulated slippage ${(slippage * 100).toFixed(1)}% > ${(LIVE_MAX_SLIPPAGE * 100).toFixed(1)}% limit`);
+                  await postWebhook(
+                    SIGNALS_HOOK, 'info',
+                    `🌊 **LIVE ORDER SKIPPED — HIGH SLIPPAGE** | \`${id}\`\n` +
+                    `Estimated slippage: **${(slippage * 100).toFixed(1)}%** (limit ${(LIVE_MAX_SLIPPAGE * 100).toFixed(1)}%)\n` +
+                    `Thin order book at $${liveDollars} — paper signal still active.`,
+                    `Weather • Live • ${mp.date}`
+                  );
+                  return;
+                }
                 const result = await placeNoOrder(conditionId, noTokenId, bestMarket.noPrice, liveDollars);
                 // Merge liveOrder into the trade record we just pushed
                 const liveIdx = trades.findIndex(t => t.id === id);
@@ -1039,12 +1290,68 @@ async function main() {
     if (!state.cooldowns) state.cooldowns = {};
     state.cooldowns[conditionId] = now;  // per-bucket cooldown (price-move re-eval after expiry)
     state.cooldowns[groupKey]    = now;  // group-level cooldown (prevents same city+date re-signal)
+    if (!state.lastSignalSide) state.lastSignalSide = {};
+    state.lastSignalSide[conditionId] = bestSide;  // flip-flop guard: track last fired direction
     if (!state.signals) state.signals = {};
     if (msgId) state.signals[id] = msgId;
     writeState(state);
 
     log(`Signal fired: ${id} | ${bestSide.toUpperCase()} | edge ${(bestEdge * 100).toFixed(1)}% | $${kelly.dollars}`);
     signalsFired++;
+
+    // ── Tail under-pricing signals (same group, different markets) ─────────────
+    if (process.env.WEATHER_TAIL_ENABLED === 'true' && tailCandidates.length > 0) {
+      const TAIL_MIN_BET = parseFloat(process.env.WEATHER_TAIL_MIN_BET || '2.00');
+      const TAIL_MAX_BET = parseFloat(process.env.WEATHER_TAIL_MAX_BET || '5.00');
+      const tailBet      = Math.min(Math.max(TAIL_MIN_BET, TAIL_MIN_BET), TAIL_MAX_BET);
+
+      for (const tc of tailCandidates) {
+        if (tc.market.conditionId === conditionId) continue;  // same market as main signal — skip
+
+        const existingTail = trades.find(t => t.conditionId === tc.market.conditionId && t.outcome === null);
+        if (existingTail) continue;  // already open
+
+        const tailId      = signalId();
+        const tailMp      = tc.market.parsed;
+        const tailPrice   = tc.market.yesPrice;
+        const tailCard    = [
+          `🎯 **TAIL BUY** | YES @ ${(tailPrice * 100).toFixed(0)}¢ (model: ${(tc.modelProb * 100).toFixed(0)}%)`,
+          `${tc.market.question}`,
+          `Edge: ${(tc.tailEdge * 100).toFixed(1)}% | Bet: $${tailBet.toFixed(2)} fixed (no Kelly)`,
+          `\`ID: ${tailId}\``,
+        ].join('\n');
+
+        if (SIGNALS_HOOK) await postWebhook(SIGNALS_HOOK, 'long', tailCard, `Weather • Tail • ${tailMp?.city} • ${tailMp?.date}`);
+
+        const tailRecord = {
+          id:           tailId,
+          conditionId:  tc.market.conditionId,
+          question:     tc.market.question,
+          parsed:       tailMp,
+          eventSlug:    tc.market.eventSlug || null,
+          side:         'yes',
+          signalType:   'tail',
+          edge:         Math.round(tc.tailEdge * 1000) / 10,
+          yesPrice:     tailPrice,
+          noPrice:      tc.market.noPrice,
+          modelProb:    Math.round(tc.modelProb * 1000) / 10,
+          meanF:        forecast.meanF != null ? Math.round(forecast.meanF * 10) / 10 : null,
+          correctedMeanF: correctedMeanF != null ? Math.round(correctedMeanF * 10) / 10 : null,
+          sigmaF:       Math.round(forecast.sigmaF * 10) / 10,
+          betDollars:   tailBet,
+          firedAt:      new Date().toISOString(),
+          sources:      forecast.sources,
+          outcome:      null,
+          observedTemp: null,
+          signalResult: null,
+          pnlDollars:   null,
+          closedAt:     null,
+        };
+        trades.push(tailRecord);
+        writeTrades(trades);
+        log(`Tail signal fired: ${tailId} | YES @ ${(tailPrice * 100).toFixed(0)}¢ | model ${(tc.modelProb * 100).toFixed(0)}% | $${tailBet}`);
+      }
+    }
   }
 
   log(`Scan complete. ${signalsFired} signal(s) fired.`);

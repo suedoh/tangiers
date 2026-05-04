@@ -20,16 +20,18 @@
 const CITY_PROFILES = {
 
   'new york': {
-    uhi:       4.5,
-    coastal:   'bay',      // Upper New York Bay / Atlantic
-    elevation: 11,         // KNYC (Central Park) — unusual: not an airport
+    uhi:              4.5,
+    coastal:          'bay',      // Upper New York Bay / Atlantic
+    elevation:        11,         // KNYC (Central Park) — unusual: not an airport
+    neighborStations: ['KJFK', 'KEWR'],  // JFK + Newark: cross-check for oracle anomalies
     notes: 'Settlement station KNYC is Central Park, not an airport — UHI is partially baked in already. Sea-breeze from the Atlantic/Lower Bay suppresses summer afternoon highs by 3–6°F when winds are southerly. Cold-air pooling in the Hudson River corridor can trap cold air overnight in winter. ECMWF AIFS tends to over-smooth the urban heat signature. GFS has a documented cold bias overnight in winter over the Northeast corridor.',
   },
 
   'chicago': {
-    uhi:       3.5,
-    coastal:   'lake',     // Lake Michigan
-    elevation: 672,        // KORD (O\'Hare Intl) — 17 miles NW of downtown
+    uhi:              3.5,
+    coastal:          'lake',     // Lake Michigan
+    elevation:        672,        // KORD (O\'Hare Intl) — 17 miles NW of downtown
+    neighborStations: ['KMDW', 'KARR'],  // Midway + Aurora: cross-check for oracle anomalies
     notes: 'KORD is at O\'Hare, 17 miles northwest of downtown. Lake Michigan drives a pronounced sea-breeze that suppresses lakefront summer highs by 5–10°F vs inland readings. Downtown Chicago is warmer than O\'Hare in summer due to urban mass and reduced lake exposure. ICON performs well in the Great Lakes corridor. GFS systematically underestimates lake-breeze suppression. January lake-effect snow events cause sharp model divergence; ensemble spread widens considerably during these setups.',
   },
 
@@ -41,16 +43,18 @@ const CITY_PROFILES = {
   },
 
   'miami': {
-    uhi:       2.5,
-    coastal:   'ocean',    // Biscayne Bay / Atlantic
-    elevation: 9,          // KMIA (Miami Intl)
+    uhi:              2.5,
+    coastal:          'ocean',    // Biscayne Bay / Atlantic
+    elevation:        9,          // KMIA (Miami Intl)
+    neighborStations: ['KFLL', 'KOPF'],  // Fort Lauderdale + Opa-Locka: cross-check for oracle anomalies
     notes: 'Subtropical maritime climate with structurally small temperature variability — model σ is inherently low here. Sea-breeze convergence triggers afternoon convection that regularly caps and sometimes depresses afternoon high temperatures. Models agree closely in winter; they diverge in summer convective season when mesoscale interactions drive daily outcomes. Extreme thresholds (very high or very low) are historically rare, making tail trades higher-risk. IFS and AIFS both perform well in the tropics.',
   },
 
   'phoenix': {
-    uhi:       5.0,
-    coastal:   null,
-    elevation: 1083,       // KPHX (Phoenix Sky Harbor)
+    uhi:              5.0,
+    coastal:          null,
+    elevation:        1083,       // KPHX (Phoenix Sky Harbor)
+    neighborStations: ['KCHD', 'KSDL'],  // Chandler + Scottsdale: cross-check for oracle anomalies
     notes: 'Desert urban environment with the strongest UHI in this city set. Sky Harbor airport is embedded in the urban core and captures most of the city heat signal — station bias is lower than most airports. Monsoon season (July–September) brings moisture surges that suppress afternoon highs via cloud cover and evaporative cooling; models frequently miss monsoon onset timing. Dry heat in spring and fall makes high-temperature thresholds among the most predictable of any US city. GFS underestimates overnight heat retention in summer.',
   },
 
@@ -62,9 +66,10 @@ const CITY_PROFILES = {
   },
 
   'dallas': {
-    uhi:       3.5,
-    coastal:   null,
-    elevation: 596,        // KDFW (Dallas/Fort Worth Intl) — between the two cities
+    uhi:              3.5,
+    coastal:          null,
+    elevation:        596,        // KDFW (Dallas/Fort Worth Intl) — between the two cities
+    neighborStations: ['KDAL', 'KADS'],  // Love Field + Addison: cross-check for oracle anomalies
     notes: 'Continental climate with high temperature variability — model σ is structurally wider than coastal cities. Fast-moving cold fronts ("blue northers") can drop temperatures 30°F in 2–3 hours; timing errors in front arrival are the primary source of model disagreement. KDFW is between Dallas and Fort Worth, not in either city centre. ECMWF IFS handles synoptic-scale fronts better than GFS at 3–5 day range. Summer heat is persistent and well-forecast; winter extremes carry higher uncertainty.',
   },
 
@@ -90,9 +95,10 @@ const CITY_PROFILES = {
   },
 
   'atlanta': {
-    uhi:       4.0,
-    coastal:   null,
-    elevation: 1026,       // KATL (Hartsfield-Jackson) — south of downtown
+    uhi:              4.0,
+    coastal:          null,
+    elevation:        1026,       // KATL (Hartsfield-Jackson) — south of downtown
+    neighborStations: ['KFTY', 'KPDK'],  // Fulton Co. + Peachtree-Dekalb: cross-check for oracle anomalies
     notes: 'Subtropical humid climate with a meaningful UHI signal that has intensified as urban tree canopy has declined. Hartsfield-Jackson is south of downtown at 1026 ft — city centre runs warmer. Summer afternoon convective activity routinely limits afternoon highs by 2–5°F via cloud shading and rain-cooled outflow; models frequently overestimate summer peaks. Models agree well in fall and spring; they diverge in summer convective season. Winter ice storm events (rare but high-impact) carry significant model timing uncertainty.',
   },
 

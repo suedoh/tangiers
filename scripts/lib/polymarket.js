@@ -562,6 +562,57 @@ async function getNoTokenId(conditionId) {
 }
 
 /**
+ * Simulate order book fill for a given dollar amount and return estimated slippage.
+ * Walks the ask side (for BUY orders) to compute the volume-weighted average fill price,
+ * then returns slippage as a fraction of the best ask.
+ *
+ * Only relevant for live execution. Returns null if order book is unavailable.
+ *
+ * @param {string} conditionId
+ * @param {'yes'|'no'} side
+ * @param {number} dollars  Dollar amount to simulate buying
+ * @returns {Promise<number|null>}  Slippage fraction (e.g. 0.025 = 2.5%), or null
+ */
+async function simulateSlippage(conditionId, side, dollars) {
+  try {
+    const data   = await httpGet(CLOB_API, `/markets/${conditionId}`);
+    const tokens = data.tokens || [];
+    const token  = tokens.find(t => t.outcome?.toLowerCase() === side);
+    if (!token?.token_id) return null;
+
+    const book = await httpGet(CLOB_API, `/book?token_id=${token.token_id}`).catch(() => null);
+    if (!book) return null;
+
+    // asks are sorted ascending by price (best ask = asks[0])
+    const asks = (book.asks || []).map(a => ({ price: parseFloat(a.price), size: parseFloat(a.size) }))
+      .filter(a => !isNaN(a.price) && !isNaN(a.size) && a.size > 0);
+
+    if (asks.length === 0) return null;
+
+    const bestAsk = asks[0].price;
+    let remaining = dollars;
+    let totalShares = 0;
+
+    for (const ask of asks) {
+      if (remaining <= 0) break;
+      const sharesAvailable = ask.size;
+      const dollarsFillable = sharesAvailable * ask.price;
+      const dollarsFilled   = Math.min(remaining, dollarsFillable);
+      totalShares += dollarsFilled / ask.price;
+      remaining   -= dollarsFilled;
+    }
+
+    if (totalShares === 0) return null;
+    if (remaining > 0) return 1.0; // order too large for book — infinite slippage
+
+    const avgFillPrice = dollars / totalShares;
+    return (avgFillPrice - bestAsk) / bestAsk;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Build the Polymarket market URL using the event slug.
  */
 function marketUrl(market) {
@@ -597,6 +648,7 @@ module.exports = {
   fetchWeatherMarkets,
   getMarketPrice,
   getNoTokenId,
+  simulateSlippage,
   parseQuestion,
   cityCoords,
   kellySizing,
