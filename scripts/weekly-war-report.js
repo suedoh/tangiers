@@ -572,7 +572,7 @@ function buildScenarios(price, lwHigh, lwLow, lwOpen, monthlyHigh, quarterOpen, 
       ? `LWH already cleared — hold longs above ${suppLevel}${vrvp ? ' VRVP level' : ''}, trail stops higher`
       : `Long entries from ${suppLevel}${vrvp ? ' VRVP level' : ''} on Setup A/C confirmation`,
     targets:      aboveLWH
-      ? `Next resistance: ${firstRes}`
+      ? `next resistance: ${firstRes}`
       : `LWH sweep $${Math.round(lwHigh).toLocaleString()} → ${firstRes}`,
     invalidation: `Daily close below $${Math.round(lwLow).toLocaleString()} (LWL) negates`,
   };
@@ -855,8 +855,8 @@ function formatReport(d) {
     { price: d.lwHigh,          label: 'Last Week High — liquidity pool',              stars: '★★',  side: d.lwHigh  > p ? 'R' : 'S' },
     { price: d.lwLow,           label: 'Last Week Low — liquidity pool',               stars: '★★',  side: d.lwLow   > p ? 'R' : 'S' },
     { price: d.lwOpen,          label: 'Last Week Open — structural pivot',            stars: '★★',  side: d.lwOpen  > p ? 'R' : 'S' },
-    { price: d.monthlyHigh,     label: 'Monthly High',                                 stars: '★★★', side: d.monthlyHigh > p ? 'R' : 'S' },
-    { price: d.monthlyLow,      label: 'Monthly Low',                                  stars: '★★★', side: d.monthlyLow  > p ? 'R' : 'S' },
+    d.monthlyHigh != null ? { price: d.monthlyHigh, label: 'Monthly High', stars: '★★★', side: d.monthlyHigh > p ? 'R' : 'S' } : null,
+    d.monthlyLow  != null ? { price: d.monthlyLow,  label: 'Monthly Low',  stars: '★★★', side: d.monthlyLow  > p ? 'R' : 'S' } : null,
     d.quarterOpen
       ? { price: d.quarterOpen.open, label: `${d.quarterOpen.name} Open — institutional pivot`, stars: '★★★', side: d.quarterOpen.open > p ? 'R' : 'S' }
       : null,
