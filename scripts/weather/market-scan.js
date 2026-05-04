@@ -70,7 +70,10 @@ const LIVE_BANKROLL  = parseFloat(process.env.POLYMARKET_LIVE_BANKROLL  || '100'
 const LIVE_MAX_BET   = parseFloat(process.env.POLYMARKET_MAX_LIVE_BET   || '10');
 const LIVE_TTL_MS    = (+process.env.POLYMARKET_ORDER_TTL_S || 1800) * 1000;
 const LIVE_MIN_BALANCE  = parseFloat(process.env.POLYMARKET_MIN_BALANCE   || '20');
-const LIVE_MIN_PROFIT   = parseFloat(process.env.POLYMARKET_MIN_WIN_PROFIT || '2.00');
+const LIVE_MIN_PROFIT        = parseFloat(process.env.POLYMARKET_MIN_WIN_PROFIT    || '2.00');
+const LIVE_MIN_EDGE          = parseFloat(process.env.POLYMARKET_LIVE_MIN_EDGE       || '0.12'); // 12% — stricter than paper's 8%
+const LIVE_MAX_POSITIONS     = parseInt(  process.env.POLYMARKET_LIVE_MAX_POSITIONS  || '10', 10); // max concurrent live slots
+const LIVE_MIN_AI_CONFIDENCE = parseFloat(process.env.POLYMARKET_LIVE_MIN_CONFIDENCE || '0.70'); // min AI confidence for live order
 const COOLDOWN_MS   = 4 * 60 * 60 * 1000; // 4 hours between signals on same market
 
 // Cities excluded from signal generation.
@@ -580,10 +583,11 @@ async function main() {
   // AI analysis is skipped when capital is fully deployed — no point spending tokens
   // on signals we can't enter. Paper signals still fire; aiDecision stored as null
   // so calibration stats exclude these trades.
-  const deployedNow = LIVE_EXECUTE
+  const activeLiveOrders  = LIVE_EXECUTE
     ? trades.filter(t => ['open', 'filled', 'partial_expired'].includes(t.liveOrder?.status))
-            .reduce((sum, t) => sum + (t.liveOrder.sizeDollars || 0), 0)
-    : 0;
+    : [];
+  const deployedNow       = activeLiveOrders.reduce((sum, t) => sum + (t.liveOrder.sizeDollars || 0), 0);
+  const livePositionCount = activeLiveOrders.length;
   const capitalAvailable = !LIVE_EXECUTE || Math.round((LIVE_BANKROLL - deployedNow) * 100) / 100 > LIVE_MIN_BALANCE;
   if (!capitalAvailable) log(`AI analysis disabled this cycle — capital fully deployed ($${deployedNow.toFixed(2)} of $${LIVE_BANKROLL}, reserve $${LIVE_MIN_BALANCE})`);
 
@@ -947,6 +951,39 @@ async function main() {
             `Paper signal logged. Exit or settle the existing position first.`,
             `Weather • Live • ${mp.date}`
           );
+        } else if (bestEdge < LIVE_MIN_EDGE) {
+          // ── Guardrail 1: edge below live minimum ─────────────────────────
+          log(`${id}: live order skipped — edge ${(bestEdge * 100).toFixed(1)}% below LIVE_MIN_EDGE ${(LIVE_MIN_EDGE * 100).toFixed(0)}% (paper signal active)`);
+          await postWebhook(
+            SIGNALS_HOOK, 'info',
+            `📉 **LIVE ORDER SKIPPED — EDGE TOO LOW** | \`${id}\`\n` +
+            `Edge: **${(bestEdge * 100).toFixed(1)}%** | Live minimum: **${(LIVE_MIN_EDGE * 100).toFixed(0)}%**\n` +
+            `Paper signal posted. Tune \`POLYMARKET_LIVE_MIN_EDGE\` to adjust.`,
+            `Weather • Live • ${mp.date}`
+          );
+        } else if (livePositionCount >= LIVE_MAX_POSITIONS) {
+          // ── Guardrail 2: concurrent position cap ──────────────────────────
+          log(`${id}: live order skipped — ${livePositionCount} active positions at cap LIVE_MAX_POSITIONS=${LIVE_MAX_POSITIONS} (paper signal active)`);
+          await postWebhook(
+            SIGNALS_HOOK, 'info',
+            `🚦 **LIVE ORDER SKIPPED — POSITION CAP** | \`${id}\`\n` +
+            `Active live positions: **${livePositionCount}** | Cap: **${LIVE_MAX_POSITIONS}**\n` +
+            `Paper signal posted. Wait for a position to settle or raise \`POLYMARKET_LIVE_MAX_POSITIONS\`.`,
+            `Weather • Live • ${mp.date}`
+          );
+        } else if (aiAnalysis.confidence == null || aiAnalysis.confidence < LIVE_MIN_AI_CONFIDENCE) {
+          // ── Guardrail 3: AI confidence below minimum ──────────────────────
+          const confStr = aiAnalysis.confidence != null
+            ? `${(aiAnalysis.confidence * 100).toFixed(0)}%`
+            : 'null (AI skipped)';
+          log(`${id}: live order skipped — AI confidence ${confStr} below LIVE_MIN_AI_CONFIDENCE ${(LIVE_MIN_AI_CONFIDENCE * 100).toFixed(0)}% (paper signal active)`);
+          await postWebhook(
+            SIGNALS_HOOK, 'info',
+            `🤖 **LIVE ORDER SKIPPED — LOW AI CONFIDENCE** | \`${id}\`\n` +
+            `AI confidence: **${confStr}** | Minimum: **${(LIVE_MIN_AI_CONFIDENCE * 100).toFixed(0)}%**\n` +
+            `Paper signal posted. Tune \`POLYMARKET_LIVE_MIN_CONFIDENCE\` or wait for higher-conviction setup.`,
+            `Weather • Live • ${mp.date}`
+          );
         } else {
 
         // Capital accountability: sum all active live orders (open + filled positions not yet settled)
@@ -1033,6 +1070,7 @@ async function main() {
             })();
           }
         } // end if (available < LIVE_MIN_BALANCE) else
+        } // end guardrails else (capital + order block)
         } // end if (activeLiveOrder) else
       } else {
         log(`${id}: NO token not found in bestMarket.tokens — skipping live order`);
