@@ -561,13 +561,19 @@ function buildScenarios(price, lwHigh, lwLow, lwOpen, monthlyHigh, quarterOpen, 
   }
 
   const qStr = quarterOpen ? `$${Math.round(quarterOpen).toLocaleString()} (Q open)` : null;
+  const aboveLWH = price > lwHigh;
+  const firstRes = vrvp && resLevel !== `$${Math.round(lwHigh).toLocaleString()}` ? resLevel : `MH $${Math.round(monthlyHigh).toLocaleString()}`;
 
   const bull = {
     label:        'BULL CASE',
     prob:         isBull ? '60%' : '40%',
     trigger:      `Price holds above $${Math.round(lwOpen).toLocaleString()} (LW open) on daily close`,
-    play:         `Long entries from ${suppLevel}${vrvp ? ' VRVP level' : ''} on Setup A/C confirmation`,
-    targets:      `LWH sweep $${Math.round(lwHigh).toLocaleString()} → ${vrvp && resLevel !== `$${Math.round(lwHigh).toLocaleString()}` ? resLevel : `MH $${Math.round(monthlyHigh).toLocaleString()}`}`,
+    play:         aboveLWH
+      ? `LWH already cleared — hold longs above ${suppLevel}${vrvp ? ' VRVP level' : ''}, trail stops higher`
+      : `Long entries from ${suppLevel}${vrvp ? ' VRVP level' : ''} on Setup A/C confirmation`,
+    targets:      aboveLWH
+      ? `Next resistance: ${firstRes}`
+      : `LWH sweep $${Math.round(lwHigh).toLocaleString()} → ${firstRes}`,
     invalidation: `Daily close below $${Math.round(lwLow).toLocaleString()} (LWL) negates`,
   };
 
@@ -764,14 +770,16 @@ function buildSummaryParagraph(d) {
   const scenDirection = d.scenarios.primary.label === 'BULL CASE' ? 'bullish' : 'bearish';
   const scenNote = `The primary thesis is ${scenDirection} (${d.scenarios.primary.prob}): ${d.scenarios.primary.play}, targeting ${d.scenarios.primary.targets}. Invalidation: ${d.scenarios.primary.invalidation}.`;
 
-  const vrvpLevelCount = vrvp4h
-    ? [vrvp4h.poc, vrvp4h.vah, vrvp4h.val].filter(Boolean).length + (vrvp4h.hvns?.length || 0)
-    : 0;
-  const zoneNote = vrvpLevelCount
-    ? ` VRVP shows ${vrvpLevelCount} key levels${vrvp4h.poc ? ` (POC $${Math.round(vrvp4h.poc).toLocaleString()}` : ''}${vrvp4h.vah ? `, VAH $${Math.round(vrvp4h.vah).toLocaleString()}` : ''}${vrvp4h.val ? `, VAL $${Math.round(vrvp4h.val).toLocaleString()}` : ''}${vrvp4h.hvns?.length ? `, plus ${vrvp4h.hvns.length} HVN cluster${vrvp4h.hvns.length > 1 ? 's' : ''}` : ''}${vrvp4h.poc ? ')' : ''} — the closest levels above and below current price are the primary areas to watch for reactions and entry triggers.`
-    : '';
+  const vaNote = (() => {
+    if (!vrvp4h?.vah || !vrvp4h?.val) return '';
+    const insideVA = price > vrvp4h.val && price < vrvp4h.vah;
+    const aboveVA  = price >= vrvp4h.vah;
+    if (insideVA) return ` Volume analysis shows the bulk of recent trading concentrated between ${$n(vrvp4h.val)} (floor) and ${$n(vrvp4h.vah)} (ceiling) — this is the market's current comfort zone. Price at ${$n(price)} is sitting inside this zone, which means neither buyers nor sellers have a clear edge yet. Watch for a decisive daily close above ${$n(vrvp4h.vah)} to confirm bullish momentum, or a break below ${$n(vrvp4h.val)} as a warning sign for bulls.`;
+    if (aboveVA)  return ` Volume analysis shows price at ${$n(price)} has pushed above the high-volume zone (ceiling: ${$n(vrvp4h.vah)}), meaning buyers are willing to pay a premium — a bullish continuation signal. On any pullback, ${$n(vrvp4h.vah)} becomes the key level to hold.`;
+    return ` Volume analysis shows price at ${$n(price)} has dropped below the high-volume zone (floor: ${$n(vrvp4h.val)}), meaning sellers have pushed into discount territory. Reclaiming ${$n(vrvp4h.val)} on a daily close is the first signal that buyers are back in control.`;
+  })();
 
-  return `BTC enters the week in a ${structureWord} on the weekly timeframe, with the overall bias reading ${biasWord} at ${bias.total >= 0 ? '+' : ''}${bias.total}/${bias.maxPossible}.${vwapWord ? ` Price is currently ${vwapWord} the VWAP at ${$n(vwap)}, which ${vwapWord === 'above' ? 'supports the bullish read and suggests institutional positioning is net positive' : 'argues caution — institutions are underwater and selling into strength is the likely behaviour'}.` : ''}${fundingNote}${fgNote} Last week's range was ${$n(lwLow)}–${$n(lwHigh)} and both the LWH and LWL are live liquidity pools — price will seek to sweep at least one of them before the week closes.${optNote}${macroNote}${zoneNote} ${scenNote}`;
+  return `BTC enters the week in an ${structureWord} on the weekly timeframe, with the overall bias reading ${biasWord} at ${bias.total >= 0 ? '+' : ''}${bias.total}/${bias.maxPossible}.${vwapWord ? ` Price is currently ${vwapWord} the VWAP at ${$n(vwap)}, which ${vwapWord === 'above' ? 'supports the bullish read and suggests institutional positioning is net positive' : 'argues caution — institutions are underwater and selling into strength is the likely behaviour'}.` : ''}${fundingNote}${fgNote} Last week's range was ${$n(lwLow)}–${$n(lwHigh)} and both the LWH and LWL are live liquidity pools — price will seek to sweep at least one of them before the week closes.${optNote}${macroNote}${vaNote} ${scenNote}`;
 }
 
 function formatReport(d) {
@@ -803,13 +811,42 @@ function formatReport(d) {
   const vrvpLevels = (() => {
     const v = d.vrvp4h;
     if (!v) return [];
-    const out = [];
-    if (v.poc != null) out.push({ price: v.poc, label: `VRVP POC $${Math.round(v.poc).toLocaleString()}`, stars: '★★', side: v.poc > p ? 'R' : 'S' });
-    if (v.vah != null) out.push({ price: v.vah, label: `VRVP VAH $${Math.round(v.vah).toLocaleString()}`, stars: '★★', side: v.vah > p ? 'R' : 'S' });
-    if (v.val != null) out.push({ price: v.val, label: `VRVP VAL $${Math.round(v.val).toLocaleString()}`, stars: '★★', side: v.val > p ? 'R' : 'S' });
+
+    // Build individual VRVP levels with novice-readable labels
+    const raw = [];
+    if (v.poc != null) raw.push({ price: v.poc, lo: v.poc, hi: v.poc, type: 'POC', label: 'Volume peak (POC) — strongest price magnet', stars: '★★', side: v.poc > p ? 'R' : 'S' });
+    if (v.vah != null) raw.push({ price: v.vah, lo: v.vah, hi: v.vah, type: 'VAH', label: 'Volume ceiling (VAH) — top of value area', stars: '★★', side: v.vah > p ? 'R' : 'S' });
+    if (v.val != null) raw.push({ price: v.val, lo: v.val, hi: v.val, type: 'VAL', label: 'Volume floor (VAL) — base of value area', stars: '★★', side: v.val > p ? 'R' : 'S' });
     for (const h of (v.hvns || [])) {
       const mid = (h.lo + h.hi) / 2;
-      out.push({ price: mid, label: `VRVP HVN $${Math.round(h.lo).toLocaleString()}–$${Math.round(h.hi).toLocaleString()}`, stars: '★', side: h.lo > p ? 'R' : h.hi < p ? 'S' : 'AT' });
+      raw.push({ price: mid, lo: h.lo, hi: h.hi, type: 'HVN', label: `High-volume zone (HVN) $${Math.round(h.lo).toLocaleString()}–$${Math.round(h.hi).toLocaleString()}`, stars: '★', side: h.lo > p ? 'R' : h.hi < p ? 'S' : 'AT' });
+    }
+
+    // Merge levels within 0.5% of each other into a single cluster entry
+    const threshold = p * 0.005;
+    const sorted = [...raw].sort((a, b) => a.price - b.price);
+    const out = [];
+    let i = 0;
+    while (i < sorted.length) {
+      let j = i + 1;
+      while (j < sorted.length && sorted[j].price - sorted[i].price <= threshold) j++;
+      const group = sorted.slice(i, j);
+      if (group.length === 1) {
+        out.push(group[0]);
+      } else {
+        const lo   = Math.min(...group.map(l => l.lo));
+        const hi   = Math.max(...group.map(l => l.hi));
+        const mid  = (lo + hi) / 2;
+        const side = mid > p ? 'R' : 'S';
+        const types = group.map(l => l.type).join('+');
+        out.push({
+          price: mid,
+          label: `Volume wall $${Math.round(lo).toLocaleString()}–$${Math.round(hi).toLocaleString()} (${types}) — major ${side === 'R' ? 'resistance' : 'support'}`,
+          stars: '★★★',
+          side,
+        });
+      }
+      i = j;
     }
     return out;
   })();
@@ -964,8 +1001,12 @@ async function main() {
 
     // Indicator readings + VRVP — read from current chart state before any TF switch.
     // VRVP is visible-range based (not TF-specific), so no switch needed.
-    const studies = await cdpEval(client, STUDY_VALUES_EXPR);
-    const parsed  = parseStudies(studies || []);
+    let parsed = parseStudies(await cdpEval(client, STUDY_VALUES_EXPR) || []);
+    // Retry up to 2× if CVD or OI haven't loaded yet (chart may still be initialising)
+    for (let retry = 0; retry < 2 && (parsed.cvd == null || parsed.oi == null); retry++) {
+      await new Promise(r => setTimeout(r, 1500 + retry * 1000));
+      parsed = parseStudies(await cdpEval(client, STUDY_VALUES_EXPR) || []);
+    }
     cvd  = parsed.cvd;
     oi   = parsed.oi;
     vwap = parsed.vwap;
