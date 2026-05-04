@@ -6,7 +6,7 @@
  * every Sunday at 14:00 UTC (09:00 EST / 10:00 EDT).
  *
  * Data sources (all public, zero auth required):
- *   - TradingView Desktop (CDP)  : price, OHLCV bars, LuxAlgo zones, CVD, OI, VWAP
+ *   - TradingView Desktop (CDP)  : price, OHLCV bars, VRVP levels, CVD, OI, VWAP
  *   - Binance Futures REST API   : current funding rate
  *   - Alternative.me API         : Fear & Greed Index
  *   - Deribit public API         : BTC options expiry, max pain, notional OI
@@ -260,6 +260,86 @@ function buildBoxesExpr(filter) {
 })()`;
 }
 
+const VRVP_EXPR = `
+(function() {
+  try {
+    var chart = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
+    var sources = chart.model().model().dataSources();
+    for (var si = 0; si < sources.length; si++) {
+      var s = sources[si];
+      if (!s.metaInfo) continue;
+      var name = '';
+      try { name = s.metaInfo().description || ''; } catch(e) { continue; }
+      if (name !== 'Visible Range Volume Profile') continue;
+
+      var poc = null, vah = null, val = null;
+      try {
+        var lastVal = s._data.last().value;
+        if (lastVal) { poc = lastVal[1]; vah = lastVal[2]; val = lastVal[3]; }
+      } catch(e) {}
+
+      var rows = [];
+      try {
+        var hhists = s.graphics().hhists();
+        var histBars = hhists.get('histBars2');
+        if (histBars && histBars._primitivesDataById) {
+          histBars._primitivesDataById.forEach(function(v) {
+            if (v.priceLow != null && v.rate) {
+              rows.push({
+                lo: Math.round(v.priceLow * 10) / 10,
+                hi: Math.round(v.priceHigh * 10) / 10,
+                uv: v.rate[0] || 0,
+                dv: v.rate[1] || 0,
+                tv: (v.rate[0] || 0) + (v.rate[1] || 0)
+              });
+            }
+          });
+          rows.sort(function(a, b) { return a.lo - b.lo; });
+        }
+      } catch(e) {}
+
+      return { poc: poc, vah: vah, val: val, rows: rows };
+    }
+    return null;
+  } catch(e) { return { error: e.message }; }
+})()`;
+
+function computeVRVPLevels(data) {
+  if (!data || !data.rows || data.rows.length < 5) return null;
+
+  const rows     = data.rows;
+  const totalVol = rows.reduce((s, r) => s + r.tv, 0);
+  const avgVol   = totalVol / rows.length;
+
+  const pocRow = rows.reduce((best, r) => r.tv > best.tv ? r : best, rows[0]);
+  const poc    = Math.round((pocRow.lo + pocRow.hi) / 2);
+  const vah    = data.vah != null ? Math.round(data.vah) : null;
+  const val    = data.val != null ? Math.round(data.val) : null;
+
+  const inner   = rows.slice(2, -2);
+  const hvnRows = inner.filter(r => r.tv > avgVol * 1.5);
+
+  function cluster(rws) {
+    if (!rws.length) return [];
+    const out = [];
+    let cur = { lo: rws[0].lo, hi: rws[0].hi, maxVol: rws[0].tv };
+    for (let i = 1; i < rws.length; i++) {
+      if (rws[i].lo <= cur.hi + 50) {
+        cur.hi     = rws[i].hi;
+        cur.maxVol = Math.max(cur.maxVol, rws[i].tv);
+      } else {
+        out.push(cur);
+        cur = { lo: rws[i].lo, hi: rws[i].hi, maxVol: rws[i].tv };
+      }
+    }
+    out.push(cur);
+    return out;
+  }
+
+  const hvns = cluster(hvnRows).sort((a, b) => b.maxVol - a.maxVol).slice(0, 6);
+  return { poc, vah, val, hvns };
+}
+
 // Expected bar spacing in seconds per timeframe — used to validate bars loaded correctly
 const TF_SPACING = { 'W': 604800, '1M': 2419200, '240': 14400, '60': 3600, '30': 1800 };
 
@@ -457,21 +537,37 @@ function computeBiasScore({ weeklyTrend, cvd, fundingRate, price, vwap, weeklyRS
   return { scores, total, maxPossible, biasLabel, biasEmoji, verdict };
 }
 
-function buildScenarios(price, lwHigh, lwLow, lwOpen, monthlyHigh, quarterOpen, zones, biasTotal) {
-  const isBull   = biasTotal >= 0;
-  const nearSupp = zones.filter(z => z.high < price).sort((a, b) => b.high - a.high)[0];
-  const nearRes  = zones.filter(z => z.low  > price).sort((a, b) => a.low  - b.low)[0];
+function buildScenarios(price, lwHigh, lwLow, lwOpen, monthlyHigh, quarterOpen, vrvp, biasTotal) {
+  const isBull = biasTotal >= 0;
 
-  const suppLevel = nearSupp ? `$${Math.round(nearSupp.low).toLocaleString()}–$${Math.round(nearSupp.high).toLocaleString()}` : `$${Math.round(lwLow).toLocaleString()}`;
-  const resLevel  = nearRes  ? `$${Math.round(nearRes.low).toLocaleString()}–$${Math.round(nearRes.high).toLocaleString()}`  : `$${Math.round(lwHigh).toLocaleString()}`;
-  const qStr      = quarterOpen ? `$${Math.round(quarterOpen).toLocaleString()} (Q open)` : null;
+  // Build nearest VRVP support / resistance from POC, VAH, VAL, HVNs
+  let suppLevel, resLevel;
+  if (vrvp) {
+    const levels = [];
+    if (vrvp.val != null) levels.push({ price: vrvp.val, label: `$${Math.round(vrvp.val).toLocaleString()} VAL` });
+    if (vrvp.poc != null) levels.push({ price: vrvp.poc, label: `$${Math.round(vrvp.poc).toLocaleString()} POC` });
+    if (vrvp.vah != null) levels.push({ price: vrvp.vah, label: `$${Math.round(vrvp.vah).toLocaleString()} VAH` });
+    for (const h of (vrvp.hvns || [])) {
+      const mid = Math.round((h.lo + h.hi) / 2);
+      levels.push({ price: mid, label: `$${Math.round(h.lo).toLocaleString()}–$${Math.round(h.hi).toLocaleString()} HVN` });
+    }
+    const below = levels.filter(l => l.price < price).sort((a, b) => b.price - a.price);
+    const above = levels.filter(l => l.price > price).sort((a, b) => a.price - b.price);
+    suppLevel = below[0]?.label ?? `$${Math.round(lwLow).toLocaleString()}`;
+    resLevel  = above[0]?.label ?? `$${Math.round(lwHigh).toLocaleString()}`;
+  } else {
+    suppLevel = `$${Math.round(lwLow).toLocaleString()}`;
+    resLevel  = `$${Math.round(lwHigh).toLocaleString()}`;
+  }
+
+  const qStr = quarterOpen ? `$${Math.round(quarterOpen).toLocaleString()} (Q open)` : null;
 
   const bull = {
     label:        'BULL CASE',
     prob:         isBull ? '60%' : '40%',
     trigger:      `Price holds above $${Math.round(lwOpen).toLocaleString()} (LW open) on daily close`,
-    play:         `Long entries from ${suppLevel} demand zone on Setup A/C confirmation`,
-    targets:      `LWH sweep $${Math.round(lwHigh).toLocaleString()} → ${nearRes ? resLevel : `MH $${Math.round(monthlyHigh).toLocaleString()}`}`,
+    play:         `Long entries from ${suppLevel} VRVP level on Setup A/C confirmation`,
+    targets:      `LWH sweep $${Math.round(lwHigh).toLocaleString()} → ${resLevel}`,
     invalidation: `Daily close below $${Math.round(lwLow).toLocaleString()} (LWL) negates`,
   };
 
@@ -629,7 +725,7 @@ function $n(n) { return n != null ? `$${Math.round(n).toLocaleString()}` : '—'
 function buildSummaryParagraph(d) {
   const { price, lwHigh, lwLow, lwOpen, lwClose, monthlyHigh, monthlyLow, monthlyOpen,
           quarterOpen, weeklyTrend, weeklyRSI, cvd, vwap, fundingRate,
-          fearGreed, options, calendar, bias, zones4h } = d;
+          fearGreed, options, calendar, bias, vrvp4h } = d;
 
   const structureWord = weeklyTrend.trend.includes('Up') ? 'uptrend' : weeklyTrend.trend.includes('Down') ? 'downtrend' : 'sideways range';
   const biasWord      = bias.total >= 2 ? 'bullish' : bias.total <= -2 ? 'bearish' : 'neutral';
@@ -668,9 +764,11 @@ function buildSummaryParagraph(d) {
   const scenDirection = d.scenarios.primary.label === 'BULL CASE' ? 'bullish' : 'bearish';
   const scenNote = `The primary thesis is ${scenDirection} (${d.scenarios.primary.prob}): ${d.scenarios.primary.play}, targeting ${d.scenarios.primary.targets}. Invalidation: ${d.scenarios.primary.invalidation}.`;
 
-  const zoneCount = zones4h.length;
-  const zoneNote  = zoneCount
-    ? ` LuxAlgo has drawn ${zoneCount} active supply/demand zones on the 4H chart — the closest levels above and below current price are the primary areas to watch for reactions and entry triggers.`
+  const vrvpLevelCount = vrvp4h
+    ? [vrvp4h.poc, vrvp4h.vah, vrvp4h.val].filter(Boolean).length + (vrvp4h.hvns?.length || 0)
+    : 0;
+  const zoneNote = vrvpLevelCount
+    ? ` The 4H VRVP shows ${vrvpLevelCount} key levels (POC $${Math.round(vrvp4h.poc).toLocaleString()}, VAH $${Math.round(vrvp4h.vah).toLocaleString()}, VAL $${Math.round(vrvp4h.val).toLocaleString()}${vrvp4h.hvns?.length ? `, plus ${vrvp4h.hvns.length} HVN cluster${vrvp4h.hvns.length > 1 ? 's' : ''}` : ''}) — the closest levels above and below current price are the primary areas to watch for reactions and entry triggers.`
     : '';
 
   return `BTC enters the week in a ${structureWord} on the weekly timeframe, with the overall bias reading ${biasWord} at ${bias.total >= 0 ? '+' : ''}${bias.total}/${bias.maxPossible}.${vwapWord ? ` Price is currently ${vwapWord} the VWAP at ${$n(vwap)}, which ${vwapWord === 'above' ? 'supports the bullish read and suggests institutional positioning is net positive' : 'argues caution — institutions are underwater and selling into strength is the likely behaviour'}.` : ''}${fundingNote}${fgNote} Last week's range was ${$n(lwLow)}–${$n(lwHigh)} and both the LWH and LWL are live liquidity pools — price will seek to sweep at least one of them before the week closes.${optNote}${macroNote}${zoneNote} ${scenNote}`;
@@ -702,13 +800,21 @@ function formatReport(d) {
 
   // ── Key levels ──
   const p = d.price;
+  const vrvpLevels = (() => {
+    const v = d.vrvp4h;
+    if (!v) return [];
+    const out = [];
+    if (v.poc != null) out.push({ price: v.poc, label: `VRVP POC $${Math.round(v.poc).toLocaleString()}`, stars: '★★', side: v.poc > p ? 'R' : 'S' });
+    if (v.vah != null) out.push({ price: v.vah, label: `VRVP VAH $${Math.round(v.vah).toLocaleString()}`, stars: '★★', side: v.vah > p ? 'R' : 'S' });
+    if (v.val != null) out.push({ price: v.val, label: `VRVP VAL $${Math.round(v.val).toLocaleString()}`, stars: '★★', side: v.val > p ? 'R' : 'S' });
+    for (const h of (v.hvns || [])) {
+      const mid = (h.lo + h.hi) / 2;
+      out.push({ price: mid, label: `VRVP HVN $${Math.round(h.lo).toLocaleString()}–$${Math.round(h.hi).toLocaleString()}`, stars: '★', side: h.lo > p ? 'R' : h.hi < p ? 'S' : 'AT' });
+    }
+    return out;
+  })();
   const allLevels = [
-    ...d.zones4h.map(z => ({
-      price:  (z.high + z.low) / 2,
-      label:  `LuxAlgo zone $${Math.round(z.low).toLocaleString()}–$${Math.round(z.high).toLocaleString()}`,
-      stars:  '★',
-      side:   z.low > p ? 'R' : z.high < p ? 'S' : 'AT',
-    })),
+    ...vrvpLevels,
     { price: d.lwHigh,          label: 'Last Week High — liquidity pool',              stars: '★★',  side: d.lwHigh  > p ? 'R' : 'S' },
     { price: d.lwLow,           label: 'Last Week Low — liquidity pool',               stars: '★★',  side: d.lwLow   > p ? 'R' : 'S' },
     { price: d.lwOpen,          label: 'Last Week Open — structural pivot',            stars: '★★',  side: d.lwOpen  > p ? 'R' : 'S' },
@@ -843,7 +949,7 @@ async function main() {
   let monthlyHigh = null, monthlyLow = null, monthlyOpen = null, quarterOpen = null;
   let cvd = null, oi = null, vwap = null;
   let weeklyCandle = 'Data unavailable', weeklyTrend = { trend: 'Unknown', detail: '' };
-  let monthlyTrend = 'Unknown', weeklyRSI = null, zones4h = [];
+  let monthlyTrend = 'Unknown', weeklyRSI = null, vrvp4h = null;
 
   try {
     client = await cdpConnect();
@@ -864,11 +970,12 @@ async function main() {
     vwap = parsed.vwap;
     log(`CVD: ${cvd}, OI: ${oi}, VWAP: ${vwap}`);
 
-    // 4H LuxAlgo zones
+    // 4H VRVP levels (BTC uses VRVP, not LuxAlgo)
     await cdpEval(client, buildSetTFExpr('240'));
     await new Promise(r => setTimeout(r, 1500));
-    zones4h = await cdpEval(client, buildBoxesExpr('LuxAlgo')) || [];
-    log(`4H zones: ${zones4h.length}`);
+    const vrvpRaw4h = await cdpEval(client, VRVP_EXPR);
+    vrvp4h = computeVRVPLevels(vrvpRaw4h);
+    log(`4H VRVP: poc=${vrvp4h?.poc}, vah=${vrvp4h?.vah}, val=${vrvp4h?.val}, hvns=${vrvp4h?.hvns?.length ?? 0}`);
     await cdpEval(client, buildSetTFExpr(originalTF));
     await new Promise(r => setTimeout(r, 800));
 
@@ -920,7 +1027,7 @@ async function main() {
 
   const scenarios = buildScenarios(
     price, lwHigh, lwLow, lwOpen,
-    monthlyHigh, quarterOpen?.open, zones4h, bias.total
+    monthlyHigh, quarterOpen?.open, vrvp4h, bias.total
   );
 
   // ── 4. Format ──────────────────────────────────────────────────────────────
@@ -928,7 +1035,7 @@ async function main() {
     price, lwHigh, lwLow, lwOpen, lwClose,
     monthlyHigh, monthlyLow, monthlyOpen, quarterOpen,
     weeklyCandle, weeklyTrend, monthlyTrend,
-    zones4h, cvd, oi, vwap, weeklyRSI,
+    vrvp4h, cvd, oi, vwap, weeklyRSI,
     fundingRate, fearGreed, options, calendar,
     bias, scenarios,
   };
