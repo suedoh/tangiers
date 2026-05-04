@@ -93,9 +93,17 @@ async function discoverActiveMarket() {
 }
 
 function readState()    { try { return JSON.parse(fs.readFileSync(STATE_FILE,  'utf8')); } catch { return {}; } }
-function writeState(s)  { try { fs.writeFileSync(STATE_FILE,  JSON.stringify(s, null, 2)); } catch {} }
+function writeState(s) {
+  const tmp = STATE_FILE + '.tmp';
+  try { fs.writeFileSync(tmp, JSON.stringify(s, null, 2)); fs.renameSync(tmp, STATE_FILE); }
+  catch (e) { console.error(`[writeState] write failed: ${e.message}`); }
+}
 function readTrades()   { try { return JSON.parse(fs.readFileSync(TRADES_FILE, 'utf8')); } catch { return []; } }
-function writeTrades(t) { try { fs.writeFileSync(TRADES_FILE, JSON.stringify(t, null, 2)); } catch {} }
+function writeTrades(t) {
+  const tmp = TRADES_FILE + '.tmp';
+  try { fs.writeFileSync(tmp, JSON.stringify(t, null, 2)); fs.renameSync(tmp, TRADES_FILE); }
+  catch (e) { console.error(`[writeTrades] write failed: ${e.message}`); }
+}
 
 // ─── Bar timestamps ───────────────────────────────────────────────────────────
 

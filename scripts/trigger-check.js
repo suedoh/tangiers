@@ -1035,7 +1035,11 @@ function readState() {
 }
 
 function writeState(state) {
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); } catch {}
+  const tmp = STATE_FILE + '.tmp';
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
+    fs.renameSync(tmp, STATE_FILE);
+  } catch (e) { console.error(`[writeState] write failed: ${e.message}`); }
 }
 
 function isCoolingDown(zoneKey, incomingDir, cvd) {
@@ -1530,7 +1534,11 @@ function readTrades() {
 }
 
 function writeTrades(trades) {
-  fs.writeFileSync(TRADES_FILE, JSON.stringify(trades, null, 2));
+  const tmp = TRADES_FILE + '.tmp';
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(trades, null, 2));
+    fs.renameSync(tmp, TRADES_FILE);
+  } catch (e) { console.error(`[writeTrades] write failed: ${e.message}`); }
 }
 
 function logTrade(price, trigger, setup) {
