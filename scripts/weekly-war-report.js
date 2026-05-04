@@ -613,6 +613,25 @@ async function fetchMonthlyBarsFromBinance(count = 12) {
   } catch (e) { log(`Binance monthly klines error: ${e.message}`); return []; }
 }
 
+async function fetchCVD() {
+  try {
+    // Weekly CVD: sum of (takerBuy - takerSell) delta over last 168 hourly bars
+    const klines = await httpGet('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1h&limit=168');
+    if (!Array.isArray(klines)) { log('Binance CVD: unexpected response'); return null; }
+    // kline[5] = total volume, kline[9] = taker buy base volume
+    const cvd = klines.reduce((sum, k) => sum + (2 * parseFloat(k[9]) - parseFloat(k[5])), 0);
+    return Math.round(cvd);
+  } catch (e) { log(`CVD fetch error: ${e.message}`); return null; }
+}
+
+async function fetchOI(price) {
+  try {
+    const d = await httpGet('https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT');
+    const oiCoins = parseFloat(d.openInterest);
+    return isNaN(oiCoins) || !price ? null : oiCoins * price / 1e9;
+  } catch (e) { log(`OI fetch error: ${e.message}`); return null; }
+}
+
 async function fetchFundingRate() {
   try {
     const d = await httpGet('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT');
@@ -1046,13 +1065,17 @@ async function main() {
 
   // ── 2. External APIs (parallel) ────────────────────────────────────────────
   log('Fetching external data...');
-  const [fundingRate, fearGreed, options, calendar, monthlyBars] = await Promise.all([
+  const [fundingRate, fearGreed, options, calendar, monthlyBars, cvdFromBinance, oiFromBinance] = await Promise.all([
     fetchFundingRate(),
     fetchFearAndGreed(),
     fetchOptionsData(),
     fetchEconomicCalendar(),
     fetchMonthlyBarsFromBinance(12),
+    fetchCVD(),
+    fetchOI(price),
   ]);
+  if (cvd == null && cvdFromBinance != null) cvd = cvdFromBinance;
+  if (oi  == null && oiFromBinance  != null) oi  = oiFromBinance;
   log(`Monthly bars (Binance): ${monthlyBars.length}`);
   if (monthlyBars.length >= 2) {
     const cm     = monthlyBars[monthlyBars.length - 1]; // current (incomplete) month
