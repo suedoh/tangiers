@@ -566,8 +566,8 @@ function buildScenarios(price, lwHigh, lwLow, lwOpen, monthlyHigh, quarterOpen, 
     label:        'BULL CASE',
     prob:         isBull ? '60%' : '40%',
     trigger:      `Price holds above $${Math.round(lwOpen).toLocaleString()} (LW open) on daily close`,
-    play:         `Long entries from ${suppLevel} VRVP level on Setup A/C confirmation`,
-    targets:      `LWH sweep $${Math.round(lwHigh).toLocaleString()} → ${resLevel}`,
+    play:         `Long entries from ${suppLevel}${vrvp ? ' VRVP level' : ''} on Setup A/C confirmation`,
+    targets:      `LWH sweep $${Math.round(lwHigh).toLocaleString()} → ${vrvp && resLevel !== `$${Math.round(lwHigh).toLocaleString()}` ? resLevel : `MH $${Math.round(monthlyHigh).toLocaleString()}`}`,
     invalidation: `Daily close below $${Math.round(lwLow).toLocaleString()} (LWL) negates`,
   };
 
@@ -768,7 +768,7 @@ function buildSummaryParagraph(d) {
     ? [vrvp4h.poc, vrvp4h.vah, vrvp4h.val].filter(Boolean).length + (vrvp4h.hvns?.length || 0)
     : 0;
   const zoneNote = vrvpLevelCount
-    ? ` The 4H VRVP shows ${vrvpLevelCount} key levels (POC $${Math.round(vrvp4h.poc).toLocaleString()}, VAH $${Math.round(vrvp4h.vah).toLocaleString()}, VAL $${Math.round(vrvp4h.val).toLocaleString()}${vrvp4h.hvns?.length ? `, plus ${vrvp4h.hvns.length} HVN cluster${vrvp4h.hvns.length > 1 ? 's' : ''}` : ''}) — the closest levels above and below current price are the primary areas to watch for reactions and entry triggers.`
+    ? ` VRVP shows ${vrvpLevelCount} key levels${vrvp4h.poc ? ` (POC $${Math.round(vrvp4h.poc).toLocaleString()}` : ''}${vrvp4h.vah ? `, VAH $${Math.round(vrvp4h.vah).toLocaleString()}` : ''}${vrvp4h.val ? `, VAL $${Math.round(vrvp4h.val).toLocaleString()}` : ''}${vrvp4h.hvns?.length ? `, plus ${vrvp4h.hvns.length} HVN cluster${vrvp4h.hvns.length > 1 ? 's' : ''}` : ''}${vrvp4h.poc ? ')' : ''} — the closest levels above and below current price are the primary areas to watch for reactions and entry triggers.`
     : '';
 
   return `BTC enters the week in a ${structureWord} on the weekly timeframe, with the overall bias reading ${biasWord} at ${bias.total >= 0 ? '+' : ''}${bias.total}/${bias.maxPossible}.${vwapWord ? ` Price is currently ${vwapWord} the VWAP at ${$n(vwap)}, which ${vwapWord === 'above' ? 'supports the bullish read and suggests institutional positioning is net positive' : 'argues caution — institutions are underwater and selling into strength is the likely behaviour'}.` : ''}${fundingNote}${fgNote} Last week's range was ${$n(lwLow)}–${$n(lwHigh)} and both the LWH and LWL are live liquidity pools — price will seek to sweep at least one of them before the week closes.${optNote}${macroNote}${zoneNote} ${scenNote}`;
@@ -962,7 +962,8 @@ async function main() {
 
     const originalTF = await cdpEval(client, GET_TF_EXPR) || '30';
 
-    // 30m indicator readings
+    // Indicator readings + VRVP — read from current chart state before any TF switch.
+    // VRVP is visible-range based (not TF-specific), so no switch needed.
     const studies = await cdpEval(client, STUDY_VALUES_EXPR);
     const parsed  = parseStudies(studies || []);
     cvd  = parsed.cvd;
@@ -970,14 +971,9 @@ async function main() {
     vwap = parsed.vwap;
     log(`CVD: ${cvd}, OI: ${oi}, VWAP: ${vwap}`);
 
-    // 4H VRVP levels (BTC uses VRVP, not LuxAlgo)
-    await cdpEval(client, buildSetTFExpr('240'));
-    await new Promise(r => setTimeout(r, 1500));
-    const vrvpRaw4h = await cdpEval(client, VRVP_EXPR);
-    vrvp4h = computeVRVPLevels(vrvpRaw4h);
-    log(`4H VRVP: poc=${vrvp4h?.poc}, vah=${vrvp4h?.vah}, val=${vrvp4h?.val}, hvns=${vrvp4h?.hvns?.length ?? 0}`);
-    await cdpEval(client, buildSetTFExpr(originalTF));
-    await new Promise(r => setTimeout(r, 800));
+    const vrvpRaw = await cdpEval(client, VRVP_EXPR);
+    vrvp4h = computeVRVPLevels(vrvpRaw);
+    log(`VRVP: poc=${vrvp4h?.poc}, vah=${vrvp4h?.vah}, val=${vrvp4h?.val}, hvns=${vrvp4h?.hvns?.length ?? 0}`);
 
     // Weekly bars (20 bars = ~5 months of weekly history)
     const weeklyBars = await fetchHTFBars(client, 'W', 20, originalTF);
