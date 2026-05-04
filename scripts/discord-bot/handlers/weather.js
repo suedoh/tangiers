@@ -672,6 +672,19 @@ async function handleAddLive(user, args, api) {
     return;
   }
 
+  // ── R:R safety gate ─────────────────────────────────────────────────────────
+  // At 80¢+ you risk $4+ per $1 won — hard reject unless --override-rr is passed.
+  const hasOverrideRr = args.includes('--override-rr');
+  if (priceCents >= 80 && !hasOverrideRr) {
+    const riskPerDollarWon = (priceCents / (100 - priceCents)).toFixed(2);
+    await api.sendMessage(
+      `⛔ **R:R REJECTED — ${priceCents}¢/share**\n` +
+      `At this price you risk **$${riskPerDollarWon} per $1 won**. The system ceiling is 80¢.\n\n` +
+      `If you're certain: \`!addlive ${tradeId} ${dollarsStr} ${priceStr} --override-rr\``
+    );
+    return;
+  }
+
   const trades = readTrades();
   const idx    = trades.findIndex(t => t.id === tradeId);
 
@@ -703,7 +716,7 @@ async function handleAddLive(user, args, api) {
   const now           = new Date().toISOString();
 
   trades[idx].liveOrder = {
-    orderId:        orderId && orderId !== '--force' ? orderId : null,
+    orderId:        orderId && orderId !== '--force' && orderId !== '--override-rr' ? orderId : null,
     noTokenId:      null,  // not available for manually placed orders
     sizeDollars:    filledDollars,
     limitPrice,
@@ -721,9 +734,15 @@ async function handleAddLive(user, args, api) {
 
   writeTrades(trades);
 
-  const city    = (trade.parsed?.city || '').replace(/\b\w/g, c => c.toUpperCase());
-  const estWin  = Math.round(filledShares * (1 - limitPrice) * 100) / 100;
-  const estLoss = filledDollars;
+  const city         = (trade.parsed?.city || '').replace(/\b\w/g, c => c.toUpperCase());
+  const estWin       = Math.round(filledShares * (1 - limitPrice) * 100) / 100;
+  const estLoss      = filledDollars;
+  const payoutRatio  = (1 - limitPrice) / limitPrice;
+  const rrLine       = priceCents >= 65
+    ? `⚠️ HIGH RISK — win **${Math.round((1 - limitPrice) * 100)}¢ per $1 risked** (${payoutRatio.toFixed(2)}x)`
+    : `✅ R:R — win **${Math.round((1 - limitPrice) * 100)}¢ per $1 risked** (${payoutRatio.toFixed(2)}x)`;
+
+  const cleanOrderId = orderId && orderId !== '--force' && orderId !== '--override-rr' ? orderId : null;
 
   const msg = [
     `🔴 **LIVE ORDER ATTACHED — ${tradeId}**`,
@@ -732,7 +751,8 @@ async function handleAddLive(user, args, api) {
     `City: **${city}** | Resolves: **${trade.parsed?.date || '?'}**`,
     `Filled: **${filledShares.toFixed(2)} NO shares** @ **${priceCents}¢** ($${filledDollars.toFixed(2)})`,
     `Est. win: **+$${estWin.toFixed(2)}** | Est. loss: **-$${estLoss.toFixed(2)}**`,
-    orderId && orderId !== '--force' ? `Polymarket order ID: \`${orderId}\`` : '',
+    rrLine,
+    cleanOrderId ? `Polymarket order ID: \`${cleanOrderId}\`` : '',
     '',
     `✅ This trade will now settle with live P&L via \`!settle\` when the market resolves.`,
     `*Added by: ${user}*`,

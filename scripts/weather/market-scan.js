@@ -79,6 +79,7 @@ const LIVE_MIN_PROFIT        = parseFloat(process.env.POLYMARKET_MIN_WIN_PROFIT 
 const LIVE_MIN_EDGE          = parseFloat(process.env.POLYMARKET_LIVE_MIN_EDGE       || '0.12'); // 12% — stricter than paper's 8%
 const LIVE_MAX_POSITIONS     = parseInt(  process.env.POLYMARKET_LIVE_MAX_POSITIONS  || '10', 10); // max concurrent live slots
 const LIVE_MIN_AI_CONFIDENCE = parseFloat(process.env.POLYMARKET_LIVE_MIN_CONFIDENCE || '0.70'); // min AI confidence for live order
+const LIVE_MIN_PAYOUT_RATIO  = parseFloat(process.env.LIVE_MIN_PAYOUT_RATIO         || '0.33'); // win ≥33¢/$1 risked → NO price ≤75¢
 const COOLDOWN_MS   = 4 * 60 * 60 * 1000; // 4 hours between signals on same market
 
 // Cities excluded from signal generation.
@@ -239,7 +240,11 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiA
 
   const sidePrice   = side === 'yes' ? market.yesPrice : market.noPrice;
   const payoutRatio = ((1 - sidePrice) / sidePrice).toFixed(2);
-  const payoutLine  = `Payout odds:   win ${pct(1 - sidePrice)} / risk ${pct(sidePrice)} → **${payoutRatio}x**`;
+  const rrIcon      = parseFloat(payoutRatio) >= 1.0 ? '✅' : parseFloat(payoutRatio) >= 0.50 ? '⚠️' : '🔴';
+  const rrLabel     = parseFloat(payoutRatio) >= 1.0 ? ''
+    : parseFloat(payoutRatio) >= 0.50 ? ' — risk exceeds reward'
+    : ' — HIGH RISK';
+  const payoutLine  = `${rrIcon} Payout odds:  win ${pct(1 - sidePrice)} per $1 risked → **${payoutRatio}x**${rrLabel}`;
 
   const lines = [
     `## 🌡️ WEATHER SIGNAL — ${cityLabel} ${typeLabel} TEMP`,
@@ -1220,6 +1225,19 @@ async function main() {
             `📉 **LIVE ORDER SKIPPED — EDGE TOO LOW** | \`${id}\`\n` +
             `Edge: **${(bestEdge * 100).toFixed(1)}%** | Live minimum: **${(LIVE_MIN_EDGE * 100).toFixed(0)}%**\n` +
             `Paper signal posted. Tune \`POLYMARKET_LIVE_MIN_EDGE\` to adjust.`,
+            `Weather • Live • ${mp.date}`
+          );
+        } else if (((1 - noPrice) / noPrice) < LIVE_MIN_PAYOUT_RATIO) {
+          // ── Guardrail 1b: R:R too poor — price may have drifted since signal ──
+          const livePayout      = (1 - noPrice) / noPrice;
+          const riskPerDollarWon = (noPrice / (1 - noPrice)).toFixed(2);
+          log(`${id}: live order skipped — NO price ${pct(noPrice)} → ${livePayout.toFixed(2)}x payout < min ${LIVE_MIN_PAYOUT_RATIO} (risk $${riskPerDollarWon} per $1 won)`);
+          await postWebhook(
+            SIGNALS_HOOK, 'error',
+            `📉 **LIVE SKIPPED — POOR R:R** | \`${id}\`\n` +
+            `${bestMarket.question}\n` +
+            `NO at **${pct(noPrice)}** → risk **$${riskPerDollarWon} per $1 won** (min: ${LIVE_MIN_PAYOUT_RATIO}x)\n` +
+            `Market may have moved since signal fired. Check price before entering manually.`,
             `Weather • Live • ${mp.date}`
           );
         } else if (livePositionCount >= LIVE_MAX_POSITIONS) {
