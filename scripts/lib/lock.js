@@ -27,12 +27,6 @@ function isLockStale(lockData) {
   }
 }
 
-function writeLock(holder) {
-  const data = JSON.stringify({ holder, at: Date.now(), pid: process.pid });
-  fs.writeFileSync(LOCK_FILE, data);
-  return data;
-}
-
 /**
  * Attempt to acquire the lock.
  * @param {number} timeoutMs  Max milliseconds to wait (default 30s)
@@ -43,20 +37,31 @@ async function acquireLock(timeoutMs = 30_000, holder = 'unknown') {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    if (!fs.existsSync(LOCK_FILE)) {
-      writeLock(holder);
+    try {
+      // O_EXCL: atomic — fails with EEXIST if another process beat us to it
+      const data = JSON.stringify({ holder, at: Date.now(), pid: process.pid });
+      const fd = fs.openSync(LOCK_FILE, 'wx');
+      fs.writeSync(fd, data);
+      fs.closeSync(fd);
       return holder;
-    }
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
 
-    const existing = fs.readFileSync(LOCK_FILE, 'utf8').trim();
-    if (isLockStale(existing)) {
-      // Stale lock — break it and acquire
-      writeLock(holder);
-      return holder;
-    }
+      // File exists — check for stale lock
+      try {
+        const existing = fs.readFileSync(LOCK_FILE, 'utf8').trim();
+        if (isLockStale(existing)) {
+          fs.unlinkSync(LOCK_FILE);
+          continue; // retry acquisition immediately
+        }
+      } catch {
+        // File vanished between EEXIST and read — another process released it; retry
+        continue;
+      }
 
-    // Lock held by another process — wait 1 second and retry
-    await new Promise(r => setTimeout(r, 1_000));
+      // Lock is live — wait and retry
+      await new Promise(r => setTimeout(r, 1_000));
+    }
   }
 
   return null; // timed out
