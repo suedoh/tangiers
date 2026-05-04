@@ -52,7 +52,7 @@ const CITY_BLOCKED = new Set([
   'wellington', 'lucknow', 'london', 'cape town', 'jeddah', 'paris',
 ]);
 const CITY_PAPER = new Set([
-  'madrid', 'chengdu', 'milan',
+  'madrid', 'chengdu', 'milan', 'warsaw', 'munich', 'sao paulo',
 ]);
 
 function log(msg) { console.log(`[${new Date().toISOString()}] [analyze-perf] ${msg}`); }

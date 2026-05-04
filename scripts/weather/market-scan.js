@@ -101,6 +101,9 @@ const PAPER_ONLY_CITIES = new Set([
   'madrid',       // 57.7% WR (26 trades) — recovering but still below live threshold; continue collecting data
   'chengdu',      // 52.0% WR (25 trades) — Sichuan Basin cloud/inversion dynamics degrade GFS skill; collecting more data
   'milan',        // 53.8% WR (26 trades) — Po Valley cold-air pooling poorly modeled; below live threshold
+  'warsaw',       // 56.7% WR (30 trades) — below live threshold; collecting more data
+  'munich',       // 59.3% WR (27 trades) — below live threshold; Alpine foehn effects may degrade GFS skill
+  'sao paulo',    // 58.6% WR (29 trades) — below live threshold; Southern Hemisphere season inversion may confuse GFS
 ]);
 
 const STATE_FILE         = path.join(ROOT, '.weather-state.json');
