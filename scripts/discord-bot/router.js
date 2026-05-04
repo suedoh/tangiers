@@ -16,7 +16,6 @@ const btcHandler       = require('./handlers/btc');
 const btcEwHandler     = require('./handlers/btc-ew');
 const bzHandler        = require('./handlers/bz');
 const polyBtc5Handler  = require('./handlers/poly-btc-5');
-const polyBtc15Handler = require('./handlers/poly-btc-15');
 const sharedHandler    = require('./handlers/shared');
 
 loadEnv();
@@ -28,7 +27,6 @@ const ROUTES = [
   { prefix: 'btc-ew',       handler: btcEwHandler     },  // must come before 'btc'
   { prefix: 'btc',          handler: btcHandler       },
   { prefix: 'poly-btc-5',   handler: polyBtc5Handler  },
-  { prefix: 'poly-btc-15',  handler: polyBtc15Handler },
   { prefix: 'poly-btc',     handler: polyBtc5Handler  },  // fallback → btc-5
 ];
 
@@ -63,9 +61,7 @@ function allChannelIds() {
     if (process.env.BZ_DISCORD_BACKTEST_CHANNEL_ID)    ids.push({ id: process.env.BZ_DISCORD_BACKTEST_CHANNEL_ID,    prefix: 'bz'          });
     if (process.env.POLY_BTC_5_SIGNALS_CHANNEL_ID)     ids.push({ id: process.env.POLY_BTC_5_SIGNALS_CHANNEL_ID,     prefix: 'poly-btc-5'  });
     if (process.env.POLY_BTC_5_REPORT_CHANNEL_ID)      ids.push({ id: process.env.POLY_BTC_5_REPORT_CHANNEL_ID,      prefix: 'poly-btc-5'  });
-    if (process.env.POLY_BTC_15_SIGNALS_CHANNEL_ID)    ids.push({ id: process.env.POLY_BTC_15_SIGNALS_CHANNEL_ID,    prefix: 'poly-btc-15' });
-    if (process.env.POLY_BTC_15_REPORT_CHANNEL_ID)     ids.push({ id: process.env.POLY_BTC_15_REPORT_CHANNEL_ID,     prefix: 'poly-btc-15' });
-    if (process.env.BTC_EW_SIGNALS_CHANNEL_ID && !process.env.BTC_EW_SIGNALS_CHANNEL_ID.startsWith('PENDING')) {
+if (process.env.BTC_EW_SIGNALS_CHANNEL_ID && !process.env.BTC_EW_SIGNALS_CHANNEL_ID.startsWith('PENDING')) {
       ids.push({ id: process.env.BTC_EW_SIGNALS_CHANNEL_ID, prefix: 'btc-ew' });
     }
   }
