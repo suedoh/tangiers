@@ -149,21 +149,4 @@ ew-clean: ## Reset EW flat-file state (forecasts + state + locks). Idempotent.
 	@echo "✓  Cleared EW state, forecasts, and logs"
 
 ew-cron: ## Install all six EW cron entries (idempotent). Runs alongside `make cron`.
-	@NODEDIR=$$(dirname $(NODE)); \
-	for line in \
-	  "5 0,4,8,12,16,20 * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/ew/run.js >> $(TRADING)/logs/ew-run.log 2>&1|EW run (6x/day at 4H bar close +5min)" \
-	  "10 0,4,8,12,16,20 * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/ew/backtest.js >> $(TRADING)/logs/ew-backtest.log 2>&1|EW backtest (6x/day +5min after run)" \
-	  "55 23 * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/ew/daily-summary.js >> $(TRADING)/logs/ew-summary.log 2>&1|EW daily summary (23:55 UTC)" \
-	  "15 12 * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/ew/daily-brief.js >> $(TRADING)/logs/ew-brief.log 2>&1|EW daily brief (12:15 UTC, after NY-open run+backtest)" \
-	  "0 22 * * 0 PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/ew/weekly-outlook.js >> $(TRADING)/logs/ew-outlook.log 2>&1|EW weekly outlook (Sunday 22:00 UTC)" \
-	  "0 14 1 * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/ew/monthly-review.js >> $(TRADING)/logs/ew-review.log 2>&1|EW monthly review (1st of month 14:00 UTC)"; do \
-	  CRON=$$(echo $$line | cut -d'|' -f1); \
-	  DESC=$$(echo $$line | cut -d'|' -f2); \
-	  SCRIPT=$$(echo $$CRON | grep -oE 'scripts/ew/[a-z-]+\.js'); \
-	  if crontab -l 2>/dev/null | grep -q "$$SCRIPT"; then \
-	    echo "✓  $$DESC already installed — skipping"; \
-	  else \
-	    (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — $$DESC"; echo "$$CRON") | crontab -; \
-	    echo "✓  $$DESC installed"; \
-	  fi; \
-	done
+	@NODE=$(NODE) TRADING=$(TRADING) bash $(TRADING)/scripts/ew/install-cron.sh
