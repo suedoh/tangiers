@@ -108,6 +108,36 @@ const PAPER_ONLY_CITIES = new Set([
   'sao paulo',    // 58.6% WR (29 trades) — below live threshold; Southern Hemisphere season inversion may confuse GFS
 ]);
 
+// Cities confirmed to settle via Weather Underground history page.
+// WU shadow resolution only runs for cities in this list — avoids wasted
+// API calls and noise in !performance for cities that use other oracles.
+// To add a city: check a resolved trade from that city — if `wuStation` is
+// non-null, WU is confirmed. Add the lowercase `parsed.city` value here.
+const WU_VERIFIED_CITIES = new Set([
+  // ── North America (WU confirmed from Gamma API event descriptions) ──
+  'new york',       // KLGA confirmed via live event description fetch
+  'los angeles',    // KLAX — US pattern confirmed
+  'chicago',        // KORD — US pattern confirmed
+  'miami',          // KMIA — US pattern confirmed
+  'phoenix',        // KPHX — US pattern confirmed
+  'seattle',        // KSEA — US pattern confirmed
+  'boston',         // KBOS — US pattern confirmed
+  'atlanta',        // KATL — US pattern confirmed
+  'houston',        // KHOU — US pattern confirmed
+  'dallas',         // KDFW — US pattern confirmed
+  'denver',         // KDEN — US pattern confirmed
+  'san francisco',  // KSFO — US pattern confirmed
+  'austin',         // KAUS — US pattern confirmed
+  'nashville',      // KBNA — US pattern confirmed
+  'charlotte',      // KCLT — US pattern confirmed
+  'tampa',          // KTPA — US pattern confirmed
+  'washington dc',  // KDCA confirmed via live event description fetch
+  // 'toronto'      — not yet added; confirm via first trade with non-null wuStation
+  // ── Europe (conservative — add after trade record confirms wuStation) ──
+  'london',         // EGLC confirmed via live event description fetch
+  // paris, madrid, etc. — NOT added yet; confirm from trade data first
+]);
+
 const STATE_FILE         = path.join(ROOT, '.weather-state.json');
 const TRADES_FILE        = path.join(ROOT, 'weather-trades.json');
 const STATION_CACHE_FILE = path.join(__dirname, '.station-cache.json');
@@ -659,7 +689,7 @@ async function resolveOutcomes(trades) {
       // Fetch the same WU station Polymarket uses for settlement and record what
       // outcome *would* have been under WU data. Used only for comparison in
       // !performance — zero impact on win/loss records or P&L.
-      if (trade.wuStation && ghcnEligible) {
+      if (trade.wuStation && ghcnEligible && WU_VERIFIED_CITIES.has(trade.parsed?.city?.toLowerCase())) {
         try {
           const wuHistory = await fetchWUDailyHistory(trade.wuStation, trade.parsed.date).catch(() => null);
           if (wuHistory) {
@@ -1421,7 +1451,6 @@ async function main() {
           }
         } // end if (available < LIVE_MIN_BALANCE) else
         } // end guardrails else (capital + order block)
-        } // end if (activeLiveOrder) else
       } else {
         log(`${id}: NO token not found on CLOB for conditionId=${conditionId} — skipping live order`);
       }
