@@ -72,7 +72,7 @@ const LIVE_EXECUTE   = false; // was: process.env.POLYMARKET_EXECUTE_ORDERS === 
 // DISABLED: AI analysis off to conserve credits until live trading resumes — re-enable by removing this override
 const AI_ENABLED     = false; // was: true
 const LIVE_BANKROLL  = parseFloat(process.env.POLYMARKET_LIVE_BANKROLL  || '100');
-const LIVE_MAX_BET   = parseFloat(process.env.POLYMARKET_MAX_LIVE_BET   || '10');
+const LIVE_MAX_BET   = parseFloat(process.env.POLYMARKET_MAX_LIVE_BET   || '20');
 const LIVE_TTL_MS    = (+process.env.POLYMARKET_ORDER_TTL_S || 1800) * 1000;
 const LIVE_MIN_BALANCE  = parseFloat(process.env.POLYMARKET_MIN_BALANCE   || '20');
 const LIVE_MIN_PROFIT        = parseFloat(process.env.POLYMARKET_MIN_WIN_PROFIT    || '2.00');
@@ -222,7 +222,7 @@ function thresholdLabel(parsed, marketUnit = 'F') {
  * Build the Discord embed body for a weather signal.
  * @param {object} [aiAnalysis]  Optional AI assessment from analyzeSignal()
  */
-function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiAnalysis = null) {
+function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiAnalysis = null, isLive = false) {
   const { parsed }   = market;
   const marketUnit   = parsed.coords?.unit || 'F'; // 'F' for US, 'C' for international
   const cityLabel    = parsed.city.replace(/\b\w/g, c => c.toUpperCase());
@@ -246,7 +246,6 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiA
     : ' — HIGH RISK';
   const payoutLine  = `${rrIcon} Payout odds:  win ${pct(1 - sidePrice)} per $1 risked → **${payoutRatio}x**${rrLabel}`;
 
-  const sharesForBet  = Math.floor(kelly.dollars / sidePrice);
   const liquidityWarn = market.liquidity < 100
     ? `🚨 **THIN MARKET — AVOID MANUAL EXECUTION** — only ${usd(market.liquidity)} depth, any order will move the price`
     : market.liquidity < 400
@@ -302,8 +301,10 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiA
     '',
     '**📐 KELLY SIZING**',
     `Kelly: ${kelly.kelly}% → Fractional (${Math.round(KELLY_FRAC * 100)}%): **${usd(kelly.dollars)}** (bankroll ${usd(BANKROLL)})`,
-    `Cap: ${usd(MAX_BET)} max per trade`,
-    `Shares to buy: **${sharesForBet} ${side.toUpperCase()} shares** at $${sidePrice.toFixed(2)}/share`,
+    ...(isLive ? [
+      `Cap: ${usd(LIVE_MAX_BET)} max per trade (live)`,
+      `Shares to buy: **${Math.floor(LIVE_MAX_BET / sidePrice)} ${side.toUpperCase()} shares** at $${sidePrice.toFixed(2)}/share`,
+    ] : []),
     '',
   );
 
@@ -1139,7 +1140,7 @@ async function main() {
     }
 
     const id    = signalId();
-    const card  = buildSignalCard(bestMarket, { ...forecast, meanF: correctedMeanF, rawMeanF: forecast.meanF, biasCorrF }, kelly, bestSide, bestEdge, bestModelProb, id, aiAnalysis);
+    const card  = buildSignalCard(bestMarket, { ...forecast, meanF: correctedMeanF, rawMeanF: forecast.meanF, biasCorrF }, kelly, bestSide, bestEdge, bestModelProb, id, aiAnalysis, LIVE_EXECUTE);
     const footer = `Weather • ${mp.city} • ${mp.date} • ${new Date().toISOString().slice(0, 16)} UTC`;
 
     let msgId = null;
