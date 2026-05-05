@@ -23,9 +23,10 @@
 
 'use strict';
 
-const CDP  = require(require('path').resolve(__dirname, '../tradingview-mcp/node_modules/chrome-remote-interface'));
-const path = require('path');
-const fs   = require('fs');
+const CDP   = require(require('path').resolve(__dirname, '../tradingview-mcp/node_modules/chrome-remote-interface'));
+const path  = require('path');
+const fs    = require('fs');
+const https = require('https');
 const { execFileSync } = require('child_process');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -457,6 +458,45 @@ const VRVP_EXPR = `
     return null;
   } catch(e) { return { error: e.message }; }
 })()`;
+
+// ─── Binance API fallbacks ────────────────────────────────────────────────────
+// CVD and OI are not in the BTC TradingView layout (🕵Ace). These fetch them
+// directly from Binance fapi as a reliable fallback.
+
+function httpGet(url) {
+  return new Promise((resolve, reject) => {
+    const u   = new URL(url);
+    const req = https.get(
+      { hostname: u.hostname, path: u.pathname + u.search,
+        headers: { 'User-Agent': 'AceTradingBot/1.0' } },
+      res => {
+        let data = '';
+        res.on('data', c => data += c);
+        res.on('end', () => { try { resolve(JSON.parse(data)); } catch { resolve(data); } });
+      }
+    );
+    req.on('error', reject);
+    req.setTimeout(10000, () => { req.destroy(); reject(new Error('Request timed out')); });
+  });
+}
+
+async function fetchCVDBinance() {
+  try {
+    // 5-minute CVD from last 12 bars (1 hour): sum of (takerBuy - takerSell) delta
+    const klines = await httpGet('https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=12');
+    if (!Array.isArray(klines)) return null;
+    const cvd = klines.reduce((sum, k) => sum + (2 * parseFloat(k[9]) - parseFloat(k[5])), 0);
+    return Math.round(cvd);
+  } catch (e) { log(`Binance CVD error: ${e.message}`); return null; }
+}
+
+async function fetchOIBinance(price) {
+  try {
+    const d = await httpGet('https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT');
+    const oiCoins = parseFloat(d.openInterest);
+    return isNaN(oiCoins) || !price ? null : oiCoins * price / 1e9;
+  } catch (e) { log(`Binance OI error: ${e.message}`); return null; }
+}
 
 // ─── Indicator Parsers ────────────────────────────────────────────────────────
 
@@ -1089,6 +1129,21 @@ function isCoolingDown(zoneKey, incomingDir, cvd) {
 
 function markAlerted(levelKey, direction, trigger) {
   const state = readState();
+
+  // Deduplicate: VRVP levels shift slightly each poll as the visible range changes.
+  // Remove any existing entry of the same levelType within 0.5% of this mid price
+  // before writing the new one — prevents accumulation of near-duplicate entries
+  // that would all fire as separate invalidation messages when price sweeps through.
+  const dedupeThreshold = trigger.mid * 0.005;
+  for (const [k, v] of Object.entries(state)) {
+    if (k.startsWith('_') || k === levelKey) continue;
+    if (typeof v !== 'object' || v.levelType !== trigger.type) continue;
+    if (Math.abs((v.levelMid ?? 0) - trigger.mid) <= dedupeThreshold) {
+      log(`Deduplicating state: removing ${k} (${v.levelType} @${v.levelMid}) → replaced by ${levelKey}`);
+      delete state[k];
+    }
+  }
+
   state[levelKey] = {
     ts:        Date.now(),
     direction,
@@ -1147,7 +1202,13 @@ function checkInvalidations(price, indicators) {
     : 0;
   const isHighVolBreak = avgVol > 0 && recentVol > avgVol * 2;
 
+  const MAX_INVALIDATION_ALERTS = 3;
+
   for (const [key, entry] of Object.entries(state)) {
+    if (messages.length >= MAX_INVALIDATION_ALERTS * 2) {
+      log(`Invalidation cap reached — suppressing further alerts this cycle`);
+      break;
+    }
     if (key.startsWith('_')) continue;
     if (typeof entry !== 'object' || !entry.direction || !entry.levelMid) continue;
 
@@ -1863,12 +1924,23 @@ async function main() {
 
   // 6. Parse indicators (pure JS — no CDP needed)
   const indicators = parseStudies(studies);
-  indicators.oiTrend     = getOITrend(indicators.oi);
   indicators.macd4h      = studies._macd4h     ?? null;
   indicators.rsi12h      = studies._rsi12h     ?? null;
   indicators.weeklyTrend = studies._weeklyTrend ?? null;
   indicators.volumes     = studies._volumes    ?? [];
   indicators.vrvpLevels  = computeVRVPLevels(studies._vrvpRaw);
+
+  // CVD and OI are not in the BTC TradingView layout — fetch from Binance as fallback
+  if (indicators.cvd == null || indicators.oi == null) {
+    const [binanceCVD, binanceOI] = await Promise.all([
+      indicators.cvd == null ? fetchCVDBinance()      : Promise.resolve(null),
+      indicators.oi  == null ? fetchOIBinance(price)  : Promise.resolve(null),
+    ]);
+    if (indicators.cvd == null && binanceCVD != null) { indicators.cvd = binanceCVD; log(`CVD from Binance: ${binanceCVD}`); }
+    if (indicators.oi  == null && binanceOI  != null) { indicators.oi  = binanceOI;  log(`OI from Binance: ${binanceOI?.toFixed(2)}B`); }
+  }
+
+  indicators.oiTrend = getOITrend(indicators.oi);
   log(`CVD: ${indicators.cvd} | OI: ${indicators.oi} (${indicators.oiTrend ?? 'no trend yet'}) | VWAP: ${indicators.vwap} | Weekly: ${indicators.weeklyTrend ?? 'n/a'}`);
 
   // Append CVD snapshot to history for use by checkPendingConfirmation
