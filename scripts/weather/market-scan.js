@@ -246,6 +246,13 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiA
     : ' — HIGH RISK';
   const payoutLine  = `${rrIcon} Payout odds:  win ${pct(1 - sidePrice)} per $1 risked → **${payoutRatio}x**${rrLabel}`;
 
+  const sharesForBet  = Math.floor(kelly.dollars / sidePrice);
+  const liquidityWarn = market.liquidity < 100
+    ? `🚨 **THIN MARKET — AVOID MANUAL EXECUTION** — only ${usd(market.liquidity)} depth, any order will move the price`
+    : market.liquidity < 400
+    ? `⚠️ **LOW LIQUIDITY** — ${usd(market.liquidity)} depth, expect wide spread on manual trades`
+    : null;
+
   const lines = [
     `## 🌡️ WEATHER SIGNAL — ${cityLabel} ${typeLabel} TEMP`,
     `**${market.question}**`,
@@ -288,6 +295,7 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiA
     '',
     '**💰 MARKET vs MODEL**',
     `Market price:  **${pct(market.yesPrice)} YES** / ${pct(market.noPrice)} NO`,
+    `Per share:     **$${market.noPrice.toFixed(2)}/NO** · $${market.yesPrice.toFixed(2)}/YES`,
     `Model P(YES):  **${pct(modelProb)}** that temp is ${bucketLabel}`,
     `**Edge: ${edge > 0 ? '+' : ''}${(edge * 100).toFixed(1)}% → ${icon} ${sideLabel}**`,
     payoutLine,
@@ -295,6 +303,7 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiA
     '**📐 KELLY SIZING**',
     `Kelly: ${kelly.kelly}% → Fractional (${Math.round(KELLY_FRAC * 100)}%): **${usd(kelly.dollars)}** (bankroll ${usd(BANKROLL)})`,
     `Cap: ${usd(MAX_BET)} max per trade`,
+    `Shares to buy: **${sharesForBet} ${side.toUpperCase()} shares** at $${sidePrice.toFixed(2)}/share`,
     '',
   );
 
@@ -341,6 +350,7 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiA
     '',
     `⏱️ Resolves: **${parsed.date}**`,
     `📊 Volume: ${usd(market.volume)} | Liquidity: ${usd(market.liquidity)}`,
+    ...(liquidityWarn ? [liquidityWarn] : []),
     `🔗 [View market](${marketUrl(market)})`,
     `📌 *Paper trade only — execute manually at polymarket.com*`,
     `Sources: ${forecast.sources.join(' · ')}`,
