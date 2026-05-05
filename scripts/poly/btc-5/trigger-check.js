@@ -29,7 +29,7 @@ const {
   cdpConnect, setSymbol, setTimeframe, waitForPrice,
   getStudyValues, getOHLCV, cdpEval, sleep,
 } = require('../../lib/cdp');
-const { postWebhook } = require('../../lib/discord');
+const { postWebhook, addReaction } = require('../../lib/discord');
 
 loadEnv();
 
@@ -363,6 +363,25 @@ async function main() {
         prevEval.closedAt = new Date().toISOString();
         writeTrades(trades);
         log(`Outcome for ${prevBar}: ${prevEval.outcome} (${prevEval.correct ? 'CORRECT ✓' : 'WRONG ✗'}) predicted=${prevEval.prediction}`);
+
+        // Post ✅/❌ reaction to the Discord signal message for this bar
+        const botToken  = process.env.DISCORD_BOT_TOKEN;
+        const channelId = process.env.POLY_BTC_5_SIGNALS_CHANNEL_ID;
+        if (prevEval.signaled && botToken && channelId) {
+          const msgs   = state._signal_messages || [];
+          const sigMsg = msgs.find(m => m.barOpen === prevBar);
+          if (sigMsg?.id && !sigMsg.reacted) {
+            const emoji = prevEval.correct ? '✅' : '❌';
+            const ok    = await addReaction(botToken, channelId, sigMsg.id, emoji);
+            if (ok) {
+              sigMsg.reacted = true;
+              writeState(state);
+              log(`Reaction ${emoji} posted to signal ${sigMsg.id}`);
+            } else {
+              log(`Reaction ${emoji} failed for signal ${sigMsg.id}`);
+            }
+          }
+        }
       }
     }
 
@@ -418,12 +437,12 @@ async function main() {
 
     // ── Log evaluation ────────────────────────────────────────────────────────
     const evalEntry = {
-      id:         `PM-BTC5-${currentBar}`,
-      barOpen:    currentBar,
-      prediction: score >= 5 ? direction : null,
+      id:              `PM-BTC5-${currentBar}`,
+      barOpen:         currentBar,
+      prediction:      score >= 5 ? direction : null,
       score,
-      tier:       score >= 5 ? 'high' : null,
-      signaled:   score >= 5,
+      tier:            score >= 5 ? 'high' : null,
+      signaled:        score >= 5,
       price,
       factors: {
         cvdDir:      result.factors.cvdDir,
@@ -434,11 +453,12 @@ async function main() {
         cleanAir:    result.factors.cleanAir,
         goodSession: result.factors.goodSession,
       },
-      upScore:   result.upScore,
-      downScore: result.downScore,
-      outcome:   null,
-      correct:   null,
-      closedAt:  null,
+      upScore:         result.upScore,
+      downScore:       result.downScore,
+      discordMessageId: null,
+      outcome:         null,
+      correct:         null,
+      closedAt:        null,
     };
     trades.push(evalEntry);
     writeTrades(trades);
@@ -453,8 +473,11 @@ async function main() {
       log(`Signal posted (score=${score} dir=${direction})${msgId ? ' id=' + msgId : ''}`);
 
       if (msgId) {
+        evalEntry.discordMessageId = msgId;
+        writeTrades(trades);
+
         if (!Array.isArray(state._signal_messages)) state._signal_messages = [];
-        state._signal_messages.push({ id: msgId, firedAt: Date.now(), barOpen: currentBar, analyzed: false });
+        state._signal_messages.push({ id: msgId, firedAt: Date.now(), barOpen: currentBar, analyzed: false, reacted: false });
         if (state._signal_messages.length > 20) state._signal_messages = state._signal_messages.slice(-20);
         writeState(state);
       }

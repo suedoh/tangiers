@@ -65,10 +65,10 @@ cron: ## Install all cron jobs: trigger-check (10m), discord-bot (1m), weekly-re
 	  echo "✓  Trigger cron installed (runs every 10 minutes)"; \
 	  ADDED=1; \
 	fi; \
-	if crontab -l 2>/dev/null | grep -q "discord-bot.js"; then \
+	if crontab -l 2>/dev/null | grep -q "discord-bot/index.js"; then \
 	  echo "✓  Discord bot cron already installed — skipping"; \
 	else \
-	  BOTLINE="*/1 * * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/discord-bot.js >> $(TRADING)/logs/discord-bot.log 2>&1"; \
+	  BOTLINE="*/1 * * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/discord-bot/index.js >> $(TRADING)/logs/discord-bot.log 2>&1"; \
 	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — Discord !analyze listener every minute"; echo "$$BOTLINE") | crontab -; \
 	  echo "✓  Discord bot cron installed (runs every minute)"; \
 	fi; \
@@ -95,9 +95,9 @@ analyze: ## Run a full MTF analysis now and post to Discord (same as !analyze in
 	@echo "→ Running MTF analysis..."
 	@$(NODE) $(TRADING)/scripts/mtf-analyze.js
 
-bot: ## Run discord-bot.js once (polls for !analyze commands and processes any pending)
+bot: ## Run discord-bot/index.js once (polls for !analyze commands and processes any pending)
 	@echo "→ Running Discord bot poll..."
-	@$(NODE) $(TRADING)/scripts/discord-bot.js
+	@$(NODE) $(TRADING)/scripts/discord-bot/index.js
 
 bot-logs: ## Tail the Discord bot log (Ctrl+C to stop)
 	@tail -f logs/discord-bot.log
@@ -147,6 +147,12 @@ ew-clean: ## Reset EW flat-file state (forecasts + state + locks). Idempotent.
 	@rm -f ew-forecasts.json.lock .ew-state.json.lock
 	@rm -f logs/ew-*.log
 	@echo "✓  Cleared EW state, forecasts, and logs"
+
+poly-backfill-reactions: ## Add ✅/❌ reactions to historical #poly-btc-5-signals messages (safe to re-run)
+	@$(NODE) $(TRADING)/scripts/poly/btc-5/backfill-reactions.js
+
+poly-backfill-reactions-dry: ## Dry-run: show which reactions would be posted without posting
+	@$(NODE) $(TRADING)/scripts/poly/btc-5/backfill-reactions.js --dry-run
 
 ew-cron: ## Install all six EW cron entries (idempotent). Runs alongside `make cron`.
 	@NODE=$(NODE) TRADING=$(TRADING) bash $(TRADING)/scripts/ew/install-cron.sh

@@ -105,4 +105,63 @@ function postRaw(webhookUrl, content) {
   });
 }
 
-module.exports = { postWebhook, postRaw };
+// ─── Discord Bot API (requires DISCORD_BOT_TOKEN) ────────────────────────────
+
+function _discordApi(botToken, method, apiPath, body) {
+  return new Promise((resolve, reject) => {
+    const payload = body ? Buffer.from(JSON.stringify(body)) : null;
+    const req = https.request({
+      hostname: 'discord.com',
+      path:     `/api/v10${apiPath}`,
+      method,
+      headers: {
+        'Authorization': `Bot ${botToken}`,
+        'User-Agent':    'AceTradingBot/1.1',
+        ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': payload.length } : {}),
+      },
+    }, res => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => resolve({ status: res.statusCode, body: data }));
+    });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+/**
+ * Add a unicode emoji reaction to a message.
+ * @param {string} botToken
+ * @param {string} channelId
+ * @param {string} messageId
+ * @param {string} emoji     e.g. '✅' or '❌'
+ * @returns {Promise<boolean>}
+ */
+async function addReaction(botToken, channelId, messageId, emoji) {
+  const { status } = await _discordApi(
+    botToken, 'PUT',
+    `/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}/@me`
+  );
+  return status === 204;
+}
+
+/**
+ * Fetch messages from a channel (newest first).
+ * @param {string} botToken
+ * @param {string} channelId
+ * @param {{ limit?: number, before?: string }} options
+ * @returns {Promise<object[]>}
+ */
+async function getChannelMessages(botToken, channelId, { limit = 100, before } = {}) {
+  const qs = new URLSearchParams({ limit: String(Math.min(limit, 100)) });
+  if (before) qs.set('before', before);
+  const { status, body } = await _discordApi(
+    botToken, 'GET',
+    `/channels/${channelId}/messages?${qs}`
+  );
+  if (status !== 200) return [];
+  try { return JSON.parse(body); } catch { return []; }
+}
+
+module.exports = { postWebhook, postRaw, addReaction, getChannelMessages };

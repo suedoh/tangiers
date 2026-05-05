@@ -1511,7 +1511,7 @@ function checkPendingConfirmation(price, indicators) {
       `Flat OI at initial alert has now confirmed. Institutional flow entered after the signal — this is the real entry.`,
       ``,
       `**CONFIRMATION ORDER FLOW**`,
-      `✅ OI: ${baselineOI?.toFixed(2)}K → ${oi?.toFixed(2)}K (+${oiPct}%) — new ${direction} positions opening`,
+      `✅ OI: ${baselineOI?.toFixed(2)}B → ${oi?.toFixed(2)}B (+${oiPct}%) — new ${direction} positions opening`,
       `✅ CVD: ${cvdBase} → ${cvdNow} (Δ ${cvdDeltaStr}) — conviction ${direction === 'long' ? 'surge' : 'drop'} confirmed`,
       ``,
       entryLine,
@@ -1561,8 +1561,15 @@ async function checkConfirmation(client, indicators) {
   const unconfirmed = trades.filter(t => !t.confirmed);
   if (unconfirmed.length === 0) return;
 
-  // Fetch recent 30M bars (already on 30M from outcome check above)
+  // Switch to 30M explicitly; checkConfirmation runs before updateOutcomes so we can't
+  // assume the chart TF — save and restore so updateOutcomes sees the real original TF.
+  const confirmTF = await cdpEval(client, GET_TF_EXPR).catch(() => '30');
+  await cdpEval(client, buildSetTFExpr('30')).catch(() => {});
+  await new Promise(r => setTimeout(r, 800));
   const bars = await cdpEval(client, buildOHLCVExpr(96)).catch(() => []); // 48h of 30M bars
+  if (confirmTF && confirmTF !== '30') {
+    await cdpEval(client, buildSetTFExpr(confirmTF)).catch(() => {});
+  }
   if (!bars || bars.length === 0) return;
 
   let changed = false;
