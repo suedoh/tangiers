@@ -439,6 +439,16 @@ async function fetchWeatherMarkets() {
     const cityMeta = CITY_SLUGS[citySlug];
 
     for (const event of events) {
+      // Extract the Polymarket settlement station from the event description.
+      // Polymarket resolves temperature markets using the WU history page for a
+      // specific ICAO airport station, e.g.:
+      //   https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA
+      // The station code is the last path segment of that URL.
+      const wuStationMatch = (event.description || '').match(
+        /wunderground\.com\/history\/daily\/[^"'\s]+\/([A-Z][A-Z0-9]{2,5})\b/i
+      );
+      const wuStation = wuStationMatch ? wuStationMatch[1].toUpperCase() : null;
+
       const eventMarkets = event.markets || [];
 
       for (const m of eventMarkets) {
@@ -495,6 +505,7 @@ async function fetchWeatherMarkets() {
           liquidity,
           endDate,
           eventSlug,
+          wuStation,
           slug:   m.slug || m.market_slug || null,
           tokens: m.tokens || null,
         });

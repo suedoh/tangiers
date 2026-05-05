@@ -26,7 +26,7 @@ const crypto = require('crypto');
 const { loadEnv, ROOT, resolveWebhook } = require('../lib/env');
 const { postWebhook }                   = require('../lib/discord');
 const { getObserved, fetchGHCNObserved, fetchNWSObserved, getTemperatureForecast, normalCDF, thresholdProbability, leadTimeSigma } = require('../lib/forecasts');
-const { analyzeSignal, deepAnalyzeSignal, fetchWUObservation } = require('../lib/weather-analysis');
+const { analyzeSignal, deepAnalyzeSignal, fetchWUObservation, fetchWUDailyHistory } = require('../lib/weather-analysis');
 const { getCityProfile } = require('../lib/city-profiles');
 const { autoExit }      = require('./exit-monitor');
 const {
@@ -655,6 +655,51 @@ async function resolveOutcomes(trades) {
       computeLivePnl(trade, signalWon);
       updateCityCalibration(trade.parsed?.city, (trade.modelProb || 50) / 100, signalWon);
 
+      // ── WU Shadow Resolution (parallel tracking, never changes signalResult) ──
+      // Fetch the same WU station Polymarket uses for settlement and record what
+      // outcome *would* have been under WU data. Used only for comparison in
+      // !performance — zero impact on win/loss records or P&L.
+      if (trade.wuStation && ghcnEligible) {
+        try {
+          const wuHistory = await fetchWUDailyHistory(trade.wuStation, trade.parsed.date).catch(() => null);
+          if (wuHistory) {
+            const wuTemp = wantHigh ? wuHistory.high : wuHistory.low;
+            if (wuTemp != null) {
+              let wuHit;
+              if (trade.parsed.direction === 'above')      wuHit = wuTemp >= trade.parsed.thresholdF;
+              else if (trade.parsed.direction === 'below') wuHit = wuTemp <= trade.parsed.thresholdF;
+              else if (trade.parsed.direction === 'range') wuHit = wuTemp >= trade.parsed.thresholdF && wuTemp <= trade.parsed.thresholdHighF;
+              else                                         wuHit = wuTemp > trade.parsed.thresholdF;
+              const wuSignalWon = (trade.side === 'yes' && wuHit) || (trade.side === 'no' && !wuHit);
+              trade.wuShadow = {
+                station:          trade.wuStation,
+                tempF:            Math.round(wuTemp * 10) / 10,
+                outcome:          wuHit ? 'yes-resolved' : 'no-resolved',
+                signalResult:     wuSignalWon ? 'win' : 'loss',
+                agreesWithPrimary: wuSignalWon === signalWon,
+              };
+              if (!trade.wuShadow.agreesWithPrimary) {
+                log(`[wu-shadow] ${trade.id}: DIVERGES — primary ${signalWon ? 'WIN' : 'LOSS'} (${value.toFixed(1)}°F via ${observedSource}) vs WU ${wuSignalWon ? 'WIN' : 'LOSS'} (${wuTemp.toFixed(1)}°F via ${trade.wuStation})`);
+                if (BACKTEST_HOOK) {
+                  await postWebhook(BACKTEST_HOOK, 'error',
+                    `⚠️ **WU SHADOW DIVERGENCE** | \`${trade.id}\`\n` +
+                    `${trade.question}\n` +
+                    `Primary: **${value.toFixed(1)}°F** (${observedSource}) → ${signalWon ? '✅ WIN' : '❌ LOSS'}\n` +
+                    `WU (${trade.wuStation}): **${wuTemp.toFixed(1)}°F** → ${wuSignalWon ? '✅ WIN' : '❌ LOSS'}\n` +
+                    `Gap: ${Math.abs(value - wuTemp).toFixed(1)}°F — settlement may differ from our resolution.`,
+                    'Weather • WU Shadow'
+                  ).catch(() => null);
+                }
+              } else {
+                log(`[wu-shadow] ${trade.id}: agrees — WU ${wuTemp.toFixed(1)}°F (${trade.wuStation}) = ${wuSignalWon ? 'WIN' : 'LOSS'}`);
+              }
+            }
+          }
+        } catch (wuErr) {
+          log(`[wu-shadow] ${trade.id}: WU fetch error — ${wuErr.message}`);
+        }
+      }
+
       changed = true;
       const bucketLbl = thresholdLabel(trade.parsed);
       log(`[resolve] ${trade.id}: ${trade.parsed.city} ${trade.parsed.date} ${bucketLbl} — observed ${value.toFixed(1)}°F → ${signalWon ? 'WIN' : 'LOSS'}`);
@@ -1168,6 +1213,7 @@ async function main() {
       question:        bestMarket.question,
       parsed:          mp,
       eventSlug:       bestMarket.eventSlug || null,
+      wuStation:       bestMarket.wuStation || null,
       side:            bestSide,
       edge:            Math.round(bestEdge * 1000) / 10,
       yesPrice:        bestMarket.yesPrice,

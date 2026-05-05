@@ -673,4 +673,62 @@ async function _deepAnalyzeSignal(signal, ctx, stage1Result) {
   });
 }
 
-module.exports = { analyzeSignal, deepAnalyzeSignal, fetchWUObservation };
+/**
+ * Fetch the official daily high/low from Weather Underground for an ICAO airport station.
+ * This is the same data source Polymarket uses to settle temperature markets.
+ *
+ * Requires WU_API_KEY. Returns null gracefully on any error or missing key.
+ *
+ * @param {string} stationId  ICAO station code (e.g. 'KLGA', 'KDCA', 'EGLC')
+ * @param {string} date       'YYYY-MM-DD'
+ * @returns {Promise<{ high: number|null, low: number|null, stationId: string }|null>}
+ */
+function fetchWUDailyHistory(stationId, date) {
+  const apiKey = process.env.WU_API_KEY;
+  if (!apiKey || !stationId || !date) return Promise.resolve(null);
+
+  // Determine country suffix from station prefix (ICAO convention)
+  // K* = US, C* = Canada, E* = Europe, L* = S.Europe/N.Africa, etc.
+  const firstChar = stationId[0]?.toUpperCase();
+  let countryCode = 'US';
+  if (firstChar === 'C') countryCode = 'CA';
+  else if (firstChar === 'E' || firstChar === 'L' || firstChar === 'B' || firstChar === 'U') countryCode = 'GB';
+
+  const yyyymmdd = date.replace(/-/g, '');
+  const path = `/v1/location/${stationId}:9:${countryCode}/observations/historical.json` +
+    `?apiKey=${apiKey}&units=e&startDate=${yyyymmdd}&endDate=${yyyymmdd}`;
+
+  return new Promise(resolve => {
+    const req = https.request({
+      hostname: 'api.weather.com',
+      path,
+      method:  'GET',
+      headers: { 'User-Agent': 'Weathermen/1.0 (Tangiers)' },
+    }, res => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        try {
+          const body = JSON.parse(data);
+          const obs  = body?.observations;
+          if (!Array.isArray(obs) || obs.length === 0) { resolve(null); return; }
+
+          // Walk all observations for the day to find the true daily high/low
+          let high = null, low = null;
+          for (const o of obs) {
+            const t = o.imperial?.tempMax ?? o.imperial?.temp ?? null;
+            const l = o.imperial?.tempMin ?? o.imperial?.temp ?? null;
+            if (t != null) high = high == null ? t : Math.max(high, t);
+            if (l != null) low  = low  == null ? l : Math.min(low,  l);
+          }
+          resolve({ high, low, stationId });
+        } catch { resolve(null); }
+      });
+    });
+    req.setTimeout(8_000, () => { req.destroy(); resolve(null); });
+    req.on('error', () => resolve(null));
+    req.end();
+  });
+}
+
+module.exports = { analyzeSignal, deepAnalyzeSignal, fetchWUObservation, fetchWUDailyHistory };

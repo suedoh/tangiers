@@ -197,6 +197,83 @@ async function handlePerformance(user, args, api) {
         await api.sendMessage(`**📐 City Calibration (30-day rolling)**\n${rows.join('\n')}`);
       }
     } catch {}
+
+    // WU Shadow vs Primary resolution comparison
+    try {
+      const trades   = readTrades();
+      const resolved = trades.filter(t => t.signalResult != null && t.wuShadow != null && !t.shadow);
+
+      if (resolved.length > 0) {
+        const total    = resolved.length;
+        const agreed   = resolved.filter(t => t.wuShadow.agreesWithPrimary).length;
+        const diverged = total - agreed;
+        const pctAgree = (agreed / total * 100).toFixed(0);
+
+        // Per-city breakdown
+        const byCityMap = new Map();
+        for (const t of resolved) {
+          const city = t.parsed?.city || 'unknown';
+          if (!byCityMap.has(city)) byCityMap.set(city, { total: 0, agreed: 0, primaryWins: 0, wuWins: 0 });
+          const c = byCityMap.get(city);
+          c.total++;
+          if (t.wuShadow.agreesWithPrimary) c.agreed++;
+          if (t.signalResult === 'win') c.primaryWins++;
+          if (t.wuShadow.signalResult === 'win') c.wuWins++;
+        }
+
+        // Overall primary vs WU win rates
+        const primaryWins = resolved.filter(t => t.signalResult === 'win').length;
+        const wuWins      = resolved.filter(t => t.wuShadow.signalResult === 'win').length;
+        const primaryWR   = (primaryWins / total * 100).toFixed(0);
+        const wuWR        = (wuWins / total * 100).toFixed(0);
+
+        const header = [
+          `**🌤️ WU Shadow vs Primary Resolution** (n=${total})`,
+          `Agreement: **${pctAgree}%** (${agreed}/${total} trades match) · Diverged: **${diverged}**`,
+          `Primary W/R: **${primaryWR}%** (${primaryWins}W/${total - primaryWins}L) | WU W/R: **${wuWR}%** (${wuWins}W/${total - wuWins}L)`,
+          '',
+          `\`${'City'.padEnd(12)} Agr  PriWR WU_WR  n\``,
+        ];
+
+        const cityRows = [...byCityMap.entries()].sort((a, b) => b[1].total - a[1].total).map(([city, c]) => {
+          const agrPct  = (c.agreed / c.total * 100).toFixed(0).padStart(3) + '%';
+          const priWR   = (c.primaryWins / c.total * 100).toFixed(0).padStart(3) + '%';
+          const wuWR2   = (c.wuWins / c.total * 100).toFixed(0).padStart(3) + '%';
+          const flag    = c.agreed < c.total ? ' ⚠️' : '';
+          return `\`${city.padEnd(12)} ${agrPct}  ${priWR}  ${wuWR2}  ${String(c.total).padStart(2)}\`${flag}`;
+        });
+
+        const lines = [...header, ...cityRows];
+
+        // List divergences (last 5)
+        const divTrades = resolved.filter(t => !t.wuShadow.agreesWithPrimary).slice(-5);
+        if (divTrades.length > 0) {
+          lines.push('', '**Recent divergences:**');
+          for (const t of divTrades) {
+            const city = t.parsed?.city || '?';
+            const date = t.parsed?.date || '?';
+            lines.push(
+              `• \`${t.id}\` ${city} ${date} — Primary: ${t.observedTemp?.toFixed(1) ?? '?'}°F→${t.signalResult?.toUpperCase()} | WU (${t.wuShadow.station}): ${t.wuShadow.tempF?.toFixed(1) ?? '?'}°F→${t.wuShadow.signalResult?.toUpperCase()}`
+            );
+          }
+        }
+
+        // Chunk output to stay under Discord 2000-char limit
+        const MAX = 1900;
+        let chunk = '';
+        for (const line of lines) {
+          if (chunk.length + line.length + 1 > MAX) {
+            await api.sendMessage(chunk);
+            chunk = '';
+          }
+          chunk += (chunk ? '\n' : '') + line;
+        }
+        if (chunk) await api.sendMessage(chunk);
+
+      } else {
+        await api.sendMessage('**🌤️ WU Shadow tracking active** — no resolved trades with WU data yet.\nNew trades will accumulate WU shadow results as they resolve.');
+      }
+    } catch {}
   }
 }
 
