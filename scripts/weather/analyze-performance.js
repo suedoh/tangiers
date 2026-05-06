@@ -20,6 +20,7 @@ const path = require('path');
 const fs   = require('fs');
 const { loadEnv, ROOT, resolveWebhook } = require('../lib/env');
 const { postWebhook }                   = require('../lib/discord');
+const { getSettlementEra }              = require('../lib/settlement-era');
 
 loadEnv();
 
@@ -52,7 +53,7 @@ const CITY_BLOCKED = new Set([
   'wellington', 'lucknow', 'london', 'cape town', 'jeddah', 'paris',
 ]);
 const CITY_PAPER = new Set([
-  'madrid', 'chengdu', 'milan', 'warsaw', 'munich', 'sao paulo',
+  'madrid', 'chengdu', 'milan', 'warsaw', 'munich', 'sao paulo', 'dallas',
 ]);
 
 function log(msg) { console.log(`[${new Date().toISOString()}] [analyze-perf] ${msg}`); }
@@ -428,45 +429,71 @@ async function main() {
   for (const t of resolved) {
     const city = t.parsed?.city;
     if (!city) continue;
-    if (!allCityMap[city]) allCityMap[city] = { wins: 0, losses: 0, pnl: 0 };
-    t.signalResult === 'win' ? allCityMap[city].wins++ : allCityMap[city].losses++;
-    allCityMap[city].pnl += t.pnlDollars ?? 0;
+    const era = getSettlementEra(t);
+    if (!allCityMap[city]) allCityMap[city] = {
+      wu:     { wins: 0, losses: 0, pnl: 0 },
+      legacy: { wins: 0, losses: 0, pnl: 0 },
+      native: { wins: 0, losses: 0, pnl: 0 },
+    };
+    const b = allCityMap[city][era];
+    t.signalResult === 'win' ? b.wins++ : b.losses++;
+    b.pnl += t.pnlDollars ?? 0;
   }
 
-  const cityRows = Object.entries(allCityMap)
-    .map(([city, s]) => {
-      const n      = s.wins + s.losses;
-      const wr     = n ? s.wins / n : 0;
-      const status = CITY_BLOCKED.has(city) ? 'BLOCKED' : CITY_PAPER.has(city) ? 'PAPER' : 'ACTIVE';
-      return { city, wins: s.wins, losses: s.losses, n, wr, pnl: s.pnl, status };
-    })
-    .sort((a, b) => a.wr - b.wr || b.n - a.n); // WR ascending; break ties by sample size desc
+  const cityRows = Object.entries(allCityMap).map(([city, eras]) => {
+    const totalWins   = eras.wu.wins   + eras.legacy.wins   + eras.native.wins;
+    const totalLosses = eras.wu.losses + eras.legacy.losses + eras.native.losses;
+    const totalPnl    = eras.wu.pnl    + eras.legacy.pnl    + eras.native.pnl;
+    const n           = totalWins + totalLosses;
+    const wr          = n ? totalWins / n : 0;
+    const wuN         = eras.wu.wins   + eras.wu.losses;
+    const legN        = eras.legacy.wins + eras.legacy.losses;
+    const status      = CITY_BLOCKED.has(city) ? 'BLOCKED' : CITY_PAPER.has(city) ? 'PAPER' : 'ACTIVE';
+    return { city, wins: totalWins, losses: totalLosses, n, wr, pnl: totalPnl, status, eras, wuN, legN };
+  }).sort((a, b) => a.wr - b.wr || b.n - a.n);
 
   const noRange   = resolved.filter(t => t.side === 'no' && t.parsed?.direction === 'range');
   const sysAvgWR  = noRange.length ? noRange.filter(t => t.signalResult === 'win').length / noRange.length : null;
 
   function cityIcon(row) {
-    if (row.n < 5)       return '🔬'; // too small to call
+    if (row.n < 5)       return '🔬';
     if (row.wr < 0.40)   return '❌';
     if (row.wr < 0.60)   return '⚠️';
     if (row.wr < 0.75)   return '👀';
     return '✅';
   }
 
+  function eraTag(eras, wuN, legN) {
+    const parts = [];
+    if (wuN > 0) {
+      const wuWR = eras.wu.wins / wuN;
+      parts.push(wuN < 5
+        ? `WU:n=${wuN}(accum)`
+        : `WU:${eras.wu.wins}W/${eras.wu.losses}L(${(wuWR * 100).toFixed(0)}%)`);
+    }
+    if (legN > 0) {
+      const legWR = eras.legacy.wins / legN;
+      parts.push(`Legacy:${eras.legacy.wins}W/${eras.legacy.losses}L(${(legWR * 100).toFixed(0)}%)`);
+    }
+    return parts.length ? `  | ${parts.join(' | ')}` : '';
+  }
+
   const dLines = [
     `## 🏙️ CITY LEADERBOARD — ALL-TIME`,
-    `*(${resolved.length} resolved non-shadow trades · sys avg ${sysAvgWR != null ? pct(sysAvgWR) : '?'} WR on NO+range)*`,
+    `*(${resolved.length} resolved trades · sys avg ${sysAvgWR != null ? pct(sysAvgWR) : '?'} WR on NO+range)*`,
+    `⚠️ *Legacy W/Rs settled on GHCN — WU-era accumulating. All blocked/paper cities flagged.*`,
     '',
   ];
 
   for (const row of cityRows) {
-    const icon   = cityIcon(row);
-    const label  = shortCity(row.city).padEnd(15);
-    const wl     = `${row.wins}W/${row.losses}L`.padEnd(9);
-    const wrStr  = (row.wr * 100).toFixed(1).padStart(5) + '%';
-    const pnlStr = (row.pnl >= 0 ? '+$' : '-$') + Math.abs(row.pnl).toFixed(0);
-    const tag    = row.status === 'BLOCKED' ? '  [BLOCKED]' : row.status === 'PAPER' ? '  [PAPER]' : '';
-    dLines.push(`${icon} ${label} ${wl} ${wrStr}  ${pnlStr}${tag}`);
+    const icon    = cityIcon(row);
+    const label   = shortCity(row.city).padEnd(15);
+    const wl      = `${row.wins}W/${row.losses}L`.padEnd(9);
+    const wrStr   = (row.wr * 100).toFixed(1).padStart(5) + '%';
+    const pnlStr  = (row.pnl >= 0 ? '+$' : '-$') + Math.abs(row.pnl).toFixed(0);
+    const tag     = row.status === 'BLOCKED' ? '  [BLOCKED]' : row.status === 'PAPER' ? '  [PAPER]' : '';
+    const era     = eraTag(row.eras, row.wuN, row.legN);
+    dLines.push(`${icon} ${label} ${wl} ${wrStr}  ${pnlStr}${tag}${era}`);
   }
 
   // Auto-flag ACTIVE cities only
@@ -494,6 +521,24 @@ async function main() {
   }
   if (blockCandidates.length === 0 && paperCandidates.length === 0 && watchCandidates.length === 0) {
     dLines.push('✅ *No new candidates to flag — city roster looks clean.*');
+  }
+
+  // Blocked/Paper WU Status — shows how much WU-era data has accumulated per city
+  dLines.push('', '**─── Blocked/Paper WU Status ───**');
+  const statusRows = cityRows.filter(r => r.status !== 'ACTIVE');
+  if (statusRows.length === 0) {
+    dLines.push('*(none)*');
+  } else {
+    for (const r of statusRows) {
+      const icon    = r.status === 'BLOCKED' ? '🚫' : '⚠️';
+      const wuNote  = r.wuN === 0
+        ? '(no WU data yet)'
+        : r.wuN < 5
+        ? `(WU:n=${r.wuN} accumulating)`
+        : `(WU:${r.eras.wu.wins}W/${r.eras.wu.losses}L ${(r.eras.wu.wins / r.wuN * 100).toFixed(0)}%)`;
+      const legNote = r.legN > 0 ? ` — blocked on legacy n=${r.legN}` : '';
+      dLines.push(`  ${icon} ${r.city.padEnd(16)} [${r.status}]  ${wuNote}${legNote}`);
+    }
   }
 
   const bodyD  = dLines.join('\n');

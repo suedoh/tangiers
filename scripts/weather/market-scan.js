@@ -82,27 +82,46 @@ const LIVE_MIN_AI_CONFIDENCE = parseFloat(process.env.POLYMARKET_LIVE_MIN_CONFID
 const LIVE_MIN_PAYOUT_RATIO  = parseFloat(process.env.LIVE_MIN_PAYOUT_RATIO         || '0.33'); // win ≥33¢/$1 risked → NO price ≤75¢
 const COOLDOWN_MS   = 4 * 60 * 60 * 1000; // 4 hours between signals on same market
 
+// ─── Settlement-era caveat ────────────────────────────────────────────────────
+// All W/Rs below were computed before 2026-05-06 when settle.js used GHCN-Daily
+// as primary. Polymarket uses Weather Underground (WU) for cities with a wuStation.
+// Entries tagged [LEGACY DATA] have potentially incorrect win/loss history.
+//
+// DO NOT unblock any city based solely on this note. Wait for WU-era data
+// to accumulate (≥10 trades) then review via !performance.
+//
+// TO REVIEW once ≥10 WU-era trades per city:
+//   london      — 14% WR (7 trades, all legacy)
+//   lucknow     — 13% WR (8 trades, all legacy)
+//   cape town   — 31% WR (16 trades, all legacy)
+//   jeddah      — 33% WR (12 trades, all legacy)
+//   paris       — 50% WR (26 trades, all legacy) — no wuStation; structural block may stand
+//   madrid      — 57.7% WR (26 trades, all legacy) [PAPER]
+//   chengdu     — 52.0% WR (25 trades, all legacy) [PAPER]
+//   milan       — 53.8% WR (26 trades, all legacy) [PAPER]
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Cities excluded from signal generation.
 // Reasons are documented — do not remove entries without verifying the underlying issue is resolved.
 const BLOCKED_CITIES = new Set([
   'istanbul',     // Settlement station ambiguity: LTBA (163 ft) vs LTFM (2,057 ft) — ~1,900 ft elevation difference; unknown which Polymarket uses
-  'singapore',    // Equatorial ~7°F mean daily range — threshold trades are structurally near-coinflips
-  'kuala lumpur', // Same equatorial tight-spread issue as Singapore + largest city-to-airport offset in the set (45 miles)
-  'nairobi',      // 5,327 ft altitude compresses range; extreme thresholds structurally high-risk; lowest model skill in tropical East Africa
-  'lagos',        // Lowest model skill in the entire city set; wet-season cloud suppression makes temperature outcomes structurally unpredictable
-  'wellington',   // Cook Strait persistent wind structurally suppresses temperature extremes — threshold trades near-coinflips, similar to Singapore
-  'lucknow',      // 13% WR (8 trades) — poor GHCN-Daily coverage; mean-shift correction insufficient for structural data quality issues
-  'london',       // 14% WR (7 trades) — settlement station ambiguity (Heathrow vs city); bias correction alone cannot fix station mismatch
-  'cape town',    // 31.3% WR (16 trades) — persistent model underperformance; no clear structural fix identified
-  'jeddah',       // 33.3% WR (12 trades) — desert heat extremes structurally mis-modeled; positive P&L is noise at this sample size
+  'singapore',    // Equatorial ~7°F mean daily range — threshold trades are structurally near-coinflips [LEGACY DATA — GHCN, not WU:WSSS]
+  'kuala lumpur', // Same equatorial tight-spread issue as Singapore + largest city-to-airport offset in the set (45 miles) [LEGACY DATA — GHCN, not WU:WMKK]
+  'nairobi',      // 5,327 ft altitude compresses range; extreme thresholds structurally high-risk; lowest model skill in tropical East Africa [LEGACY DATA — GHCN, not WU:HKJK]
+  'lagos',        // Lowest model skill in the entire city set; wet-season cloud suppression makes temperature outcomes structurally unpredictable [LEGACY DATA — GHCN, not WU:DNMM]
+  'wellington',   // Cook Strait persistent wind structurally suppresses temperature extremes — threshold trades near-coinflips, similar to Singapore [LEGACY DATA — GHCN, not WU:NZWN]
+  'lucknow',      // 13% WR (8 trades) — poor GHCN-Daily coverage; mean-shift correction insufficient for structural data quality issues [LEGACY DATA — GHCN, not WU:VILK]
+  'london',       // 14% WR (7 trades) — settlement station ambiguity (Heathrow vs city); bias correction alone cannot fix station mismatch [LEGACY DATA — GHCN, not WU:EGLC]
+  'cape town',    // 31.3% WR (16 trades) — persistent model underperformance; no clear structural fix identified [LEGACY DATA — GHCN, not WU:FACT]
+  'jeddah',       // 33.3% WR (12 trades) — desert heat extremes structurally mis-modeled; positive P&L is noise at this sample size [LEGACY DATA — GHCN, not WU:OEJN]
   'paris',        // 50.0% WR (26 trades) — zero predictive edge; settlement station (Orly/CDG) micro-climate diverges from GFS grid
 ]);
 
 // Cities allowed to paper-trade but never execute live orders against the Polymarket account.
 const PAPER_ONLY_CITIES = new Set([
-  'madrid',       // 57.7% WR (26 trades) — recovering but still below live threshold; continue collecting data
-  'chengdu',      // 52.0% WR (25 trades) — Sichuan Basin cloud/inversion dynamics degrade GFS skill; collecting more data
-  'milan',        // 53.8% WR (26 trades) — Po Valley cold-air pooling poorly modeled; below live threshold
+  'madrid',       // 57.7% WR (26 trades) — recovering but still below live threshold; continue collecting data [LEGACY DATA — GHCN, not WU:LEMD]
+  'chengdu',      // 52.0% WR (25 trades) — Sichuan Basin cloud/inversion dynamics degrade GFS skill; collecting more data [LEGACY DATA — GHCN, not WU:ZUUU]
+  'milan',        // 53.8% WR (26 trades) — Po Valley cold-air pooling poorly modeled; below live threshold [LEGACY DATA — GHCN, not WU:LIMC]
   'warsaw',       // 56.7% WR (30 trades) — below live threshold; collecting more data
   'munich',       // 59.3% WR (27 trades) — below live threshold; Alpine foehn effects may degrade GFS skill
   'sao paulo',    // 58.6% WR (29 trades) — below live threshold; Southern Hemisphere season inversion may confuse GFS
