@@ -387,6 +387,9 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiA
     `🔗 [View market](${marketUrl(market)})`,
     `📌 *Paper trade only — execute manually at polymarket.com*`,
     `Sources: ${forecast.sources.join(' · ')}`,
+    WU_VERIFIED_CITIES.has(parsed.city.toLowerCase())
+      ? `🔵 WU-verified settlement city`
+      : `⚪ Settlement oracle unverified — confirm before trading`,
     `\`\`\`ID: ${id}\`\`\``,
   );
 
