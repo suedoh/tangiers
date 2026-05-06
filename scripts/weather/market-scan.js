@@ -110,33 +110,70 @@ const PAPER_ONLY_CITIES = new Set([
 ]);
 
 // Cities confirmed to settle via Weather Underground history page.
-// WU shadow resolution only runs for cities in this list — avoids wasted
-// API calls and noise in !performance for cities that use other oracles.
-// To add a city: check a resolved trade from that city — if `wuStation` is
-// non-null, WU is confirmed. Add the lowercase `parsed.city` value here.
+// Station codes confirmed by fetching live Polymarket event descriptions.
+// Non-WU oracles: istanbul/moscow → NOAA NWS timeseries; hong kong → HK Observatory.
+// US cities with no active events sampled (dubai, sydney, minneapolis, las-vegas,
+// new-orleans, detroit, portland, orlando) will auto-resolve via wuStation stamp
+// from their event descriptions when markets are active.
 const WU_VERIFIED_CITIES = new Set([
-  // ── North America (WU confirmed from Gamma API event descriptions) ──
-  'new york',       // KLGA confirmed via live event description fetch
-  'los angeles',    // KLAX — US pattern confirmed
-  'chicago',        // KORD — US pattern confirmed
-  'miami',          // KMIA — US pattern confirmed
-  'phoenix',        // KPHX — US pattern confirmed
-  'seattle',        // KSEA — US pattern confirmed
-  'boston',         // KBOS — US pattern confirmed
-  'atlanta',        // KATL — US pattern confirmed
-  'houston',        // KHOU — US pattern confirmed
-  'dallas',         // KDFW — US pattern confirmed
-  'denver',         // KDEN — US pattern confirmed
-  'san francisco',  // KSFO — US pattern confirmed
-  'austin',         // KAUS — US pattern confirmed
-  'nashville',      // KBNA — US pattern confirmed
-  'charlotte',      // KCLT — US pattern confirmed
-  'tampa',          // KTPA — US pattern confirmed
-  'washington dc',  // KDCA confirmed via live event description fetch
-  // 'toronto'      — not yet added; confirm via first trade with non-null wuStation
-  // ── Europe (conservative — add after trade record confirms wuStation) ──
-  'london',         // EGLC confirmed via live event description fetch
-  // paris, madrid, etc. — NOT added yet; confirm from trade data first
+  // ── North America ──────────────────────────────────────────────────────────
+  'new york',       // KLGA
+  'los angeles',    // KLAX
+  'chicago',        // KORD
+  'miami',          // KMIA
+  'phoenix',        // KPHX
+  'seattle',        // KSEA
+  'boston',         // KBOS
+  'atlanta',        // KATL
+  'houston',        // KHOU
+  'dallas',         // KDFW
+  'denver',         // KDEN
+  'san francisco',  // KSFO
+  'austin',         // KAUS
+  'nashville',      // KBNA
+  'charlotte',      // KCLT
+  'tampa',          // KTPA
+  'washington dc',  // KDCA
+  'toronto',        // CYYZ
+  'mexico city',    // MMMX
+  // ── South America ──────────────────────────────────────────────────────────
+  'buenos aires',   // SAEZ
+  'sao paulo',      // SBGR
+  // ── Europe ─────────────────────────────────────────────────────────────────
+  'london',         // EGLC
+  'madrid',         // LEMD
+  'munich',         // EDDM
+  'milan',          // LIMC
+  'amsterdam',      // EHAM
+  'warsaw',         // EPWA
+  'helsinki',       // EFHK
+  'ankara',         // LTAC
+  // istanbul → NOAA NWS timeseries (weather.gov/wrh/timeseries?site=LTFM), not WU
+  // moscow   → NOAA NWS timeseries (weather.gov/wrh/timeseries?site=UUWW), not WU
+  // ── Africa ─────────────────────────────────────────────────────────────────
+  'cape town',      // FACT
+  'lagos',          // DNMM
+  // ── Middle East / South Asia ───────────────────────────────────────────────
+  'jeddah',         // OEJN
+  'karachi',        // OPKC
+  'lucknow',        // VILK
+  // ── East / Southeast Asia ──────────────────────────────────────────────────
+  'seoul',          // RKSI
+  'busan',          // RKPK
+  'tokyo',          // RJTT
+  'shanghai',       // ZSPD
+  'beijing',        // ZBAA
+  'guangzhou',      // ZGGG
+  'chengdu',        // ZUUU
+  'wuhan',          // ZHHH
+  'taipei',         // RCSS
+  'singapore',      // WSSS
+  'jakarta',        // WIHH
+  'manila',         // RPLL
+  'kuala lumpur',   // WMKK
+  // hong kong → HK Observatory (weather.gov.hk/en/cis/climat.htm), not WU
+  // ── Oceania ────────────────────────────────────────────────────────────────
+  'wellington',     // NZWN
 ]);
 
 const STATE_FILE         = path.join(ROOT, '.weather-state.json');

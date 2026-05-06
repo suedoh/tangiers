@@ -131,60 +131,69 @@ const CITY_COORDS = {
  * Slug names match the city portion of event slugs like:
  *   highest-temperature-in-{slug}-on-{month}-{day}-{year}
  */
+// wuStation: ICAO code Polymarket uses for WU settlement (confirmed from live event descriptions).
+// oracle: 'wu' | 'noaa-nws' | 'hk-observatory' — settlement source when wuStation is null.
 const CITY_SLUGS = {
-  'nyc':            { lat: 40.7128,  lon: -74.0060,  tz: 'America/New_York',    unit: 'F', nwsStation: 'KNYC', ghcnStation: 'USW00094728' },
-  'los-angeles':    { lat: 34.0522,  lon: -118.2437, tz: 'America/Los_Angeles', unit: 'F', nwsStation: 'KLAX', ghcnStation: 'USW00023174' },
-  'chicago':        { lat: 41.8781,  lon: -87.6298,  tz: 'America/Chicago',     unit: 'F', nwsStation: 'KORD', ghcnStation: 'USW00094846' },
-  'miami':          { lat: 25.7617,  lon: -80.1918,  tz: 'America/New_York',    unit: 'F', nwsStation: 'KMIA', ghcnStation: 'USW00012839' },
-  'phoenix':        { lat: 33.4484,  lon: -112.0740, tz: 'America/Phoenix',     unit: 'F', nwsStation: 'KPHX', ghcnStation: 'USW00023183' },
-  'seattle':        { lat: 47.6062,  lon: -122.3321, tz: 'America/Los_Angeles', unit: 'F', nwsStation: 'KSEA', ghcnStation: 'USW00024233' },
-  'boston':         { lat: 42.3601,  lon: -71.0589,  tz: 'America/New_York',    unit: 'F', nwsStation: 'KBOS', ghcnStation: 'USW00014739' },
-  'atlanta':        { lat: 33.7490,  lon: -84.3880,  tz: 'America/New_York',    unit: 'F', nwsStation: 'KATL', ghcnStation: 'USW00013874' },
-  'houston':        { lat: 29.7604,  lon: -95.3698,  tz: 'America/Chicago',     unit: 'F', nwsStation: 'KHOU', ghcnStation: 'USW00012918' },
-  'dallas':         { lat: 32.7767,  lon: -96.7970,  tz: 'America/Chicago',     unit: 'F', nwsStation: 'KDFW', ghcnStation: 'USW00003927' },
-  'denver':         { lat: 39.7392,  lon: -104.9903, tz: 'America/Denver',      unit: 'F', nwsStation: 'KDEN', ghcnStation: 'USW00003017' },
-  'san-francisco':  { lat: 37.7749,  lon: -122.4194, tz: 'America/Los_Angeles', unit: 'F', nwsStation: 'KSFO', ghcnStation: 'USW00023234' },
-  'austin':         { lat: 30.2672,  lon: -97.7431,  tz: 'America/Chicago',     unit: 'F', nwsStation: 'KAUS', ghcnStation: 'USW00013904' },
-  'nashville':      { lat: 36.1627,  lon: -86.7816,  tz: 'America/Chicago',     unit: 'F', nwsStation: 'KBNA', ghcnStation: 'USW00013897' },
-  'charlotte':      { lat: 35.2271,  lon: -80.8431,  tz: 'America/New_York',    unit: 'F', nwsStation: 'KCLT', ghcnStation: 'USW00013881' },
-  'tampa':          { lat: 27.9506,  lon: -82.4572,  tz: 'America/New_York',    unit: 'F', nwsStation: 'KTPA', ghcnStation: 'USW00012842' },
-  'toronto':        { lat: 43.6532,  lon: -79.3832,  tz: 'America/Toronto',     unit: 'C', nwsStation: null, ghcnStation: null },
-  'london':         { lat: 51.5074,  lon: -0.1278,   tz: 'Europe/London',       unit: 'C', nwsStation: null, ghcnStation: null },
-  'paris':          { lat: 48.8566,  lon: 2.3522,    tz: 'Europe/Paris',        unit: 'C', nwsStation: null, ghcnStation: null },
-  'madrid':         { lat: 40.4168,  lon: -3.7038,   tz: 'Europe/Madrid',       unit: 'C', nwsStation: null, ghcnStation: null },
-  'munich':         { lat: 48.1351,  lon: 11.5820,   tz: 'Europe/Berlin',       unit: 'C', nwsStation: null, ghcnStation: null },
-  'milan':          { lat: 45.4654,  lon: 9.1859,    tz: 'Europe/Rome',         unit: 'C', nwsStation: null, ghcnStation: null },
-  'amsterdam':      { lat: 52.3676,  lon: 4.9041,    tz: 'Europe/Amsterdam',    unit: 'C', nwsStation: null, ghcnStation: null },
-  'warsaw':         { lat: 52.2297,  lon: 21.0122,   tz: 'Europe/Warsaw',       unit: 'C', nwsStation: null, ghcnStation: null },
-  'helsinki':       { lat: 60.1699,  lon: 24.9384,   tz: 'Europe/Helsinki',     unit: 'C', nwsStation: null, ghcnStation: null },
-  'istanbul':       { lat: 41.0082,  lon: 28.9784,   tz: 'Europe/Istanbul',     unit: 'C', nwsStation: null, ghcnStation: null },
-  'moscow':         { lat: 55.7558,  lon: 37.6173,   tz: 'Europe/Moscow',       unit: 'C', nwsStation: null, ghcnStation: null },
-  'ankara':         { lat: 39.9334,  lon: 32.8597,   tz: 'Europe/Istanbul',     unit: 'C', nwsStation: null, ghcnStation: null },
-  'seoul':          { lat: 37.5665,  lon: 126.9780,  tz: 'Asia/Seoul',          unit: 'C', nwsStation: null, ghcnStation: null },
-  'tokyo':          { lat: 35.6762,  lon: 139.6503,  tz: 'Asia/Tokyo',          unit: 'C', nwsStation: null, ghcnStation: null },
-  'hong-kong':      { lat: 22.3193,  lon: 114.1694,  tz: 'Asia/Hong_Kong',      unit: 'C', nwsStation: null, ghcnStation: null },
-  'shanghai':       { lat: 31.2304,  lon: 121.4737,  tz: 'Asia/Shanghai',       unit: 'C', nwsStation: null, ghcnStation: null },
-  'beijing':        { lat: 39.9042,  lon: 116.4074,  tz: 'Asia/Shanghai',       unit: 'C', nwsStation: null, ghcnStation: null },
-  'singapore':      { lat: 1.3521,   lon: 103.8198,  tz: 'Asia/Singapore',      unit: 'C', nwsStation: null, ghcnStation: null },
-  'taipei':         { lat: 25.0330,  lon: 121.5654,  tz: 'Asia/Taipei',         unit: 'C', nwsStation: null, ghcnStation: null },
-  'jakarta':        { lat: -6.2088,  lon: 106.8456,  tz: 'Asia/Jakarta',        unit: 'C', nwsStation: null, ghcnStation: null },
-  'manila':         { lat: 14.5995,  lon: 120.9842,  tz: 'Asia/Manila',         unit: 'C', nwsStation: null, ghcnStation: null },
-  'busan':          { lat: 35.1796,  lon: 129.0756,  tz: 'Asia/Seoul',          unit: 'C', nwsStation: null, ghcnStation: null },
-  'kuala-lumpur':   { lat: 3.1390,   lon: 101.6869,  tz: 'Asia/Kuala_Lumpur',   unit: 'C', nwsStation: null, ghcnStation: null },
-  'guangzhou':      { lat: 23.1291,  lon: 113.2644,  tz: 'Asia/Shanghai',       unit: 'C', nwsStation: null, ghcnStation: null },
-  'chengdu':        { lat: 30.5728,  lon: 104.0668,  tz: 'Asia/Shanghai',       unit: 'C', nwsStation: null, ghcnStation: null },
-  'wuhan':          { lat: 30.5928,  lon: 114.3055,  tz: 'Asia/Shanghai',       unit: 'C', nwsStation: null, ghcnStation: null },
-  'dubai':          { lat: 25.2048,  lon: 55.2708,   tz: 'Asia/Dubai',          unit: 'C', nwsStation: null, ghcnStation: null },
-  'jeddah':         { lat: 21.4858,  lon: 39.1925,   tz: 'Asia/Riyadh',         unit: 'C', nwsStation: null, ghcnStation: null },
-  'karachi':        { lat: 24.8607,  lon: 67.0011,   tz: 'Asia/Karachi',        unit: 'C', nwsStation: null, ghcnStation: null },
-  'lucknow':        { lat: 26.8467,  lon: 80.9462,   tz: 'Asia/Kolkata',        unit: 'C', nwsStation: null, ghcnStation: null },
-  'sydney':         { lat: -33.8688, lon: 151.2093,  tz: 'Australia/Sydney',    unit: 'C', nwsStation: null, ghcnStation: null },
-  'wellington':     { lat: -41.2866, lon: 174.7756,  tz: 'Pacific/Auckland',    unit: 'C', nwsStation: null, ghcnStation: null },
-  'mexico-city':    { lat: 19.4326,  lon: -99.1332,  tz: 'America/Mexico_City', unit: 'C', nwsStation: null, ghcnStation: null },
-  'buenos-aires':   { lat: -34.6037, lon: -58.3816,  tz: 'America/Argentina/Buenos_Aires', unit: 'C', nwsStation: null, ghcnStation: null },
-  'sao-paulo':      { lat: -23.5505, lon: -46.6333,  tz: 'America/Sao_Paulo',   unit: 'C', nwsStation: null, ghcnStation: null },
-  'cape-town':      { lat: -33.9249, lon: 18.4241,   tz: 'Africa/Johannesburg', unit: 'C', nwsStation: null, ghcnStation: null },
-  'lagos':          { lat: 6.5244,   lon: 3.3792,    tz: 'Africa/Lagos',        unit: 'C', nwsStation: null, ghcnStation: null },
+  // ── North America ──────────────────────────────────────────────────────────
+  'nyc':            { lat: 40.7128,  lon: -74.0060,  tz: 'America/New_York',    unit: 'F', nwsStation: 'KNYC', ghcnStation: 'USW00094728', wuStation: 'KLGA'  },
+  'los-angeles':    { lat: 34.0522,  lon: -118.2437, tz: 'America/Los_Angeles', unit: 'F', nwsStation: 'KLAX', ghcnStation: 'USW00023174', wuStation: 'KLAX'  },
+  'chicago':        { lat: 41.8781,  lon: -87.6298,  tz: 'America/Chicago',     unit: 'F', nwsStation: 'KORD', ghcnStation: 'USW00094846', wuStation: 'KORD'  },
+  'miami':          { lat: 25.7617,  lon: -80.1918,  tz: 'America/New_York',    unit: 'F', nwsStation: 'KMIA', ghcnStation: 'USW00012839', wuStation: 'KMIA'  },
+  'phoenix':        { lat: 33.4484,  lon: -112.0740, tz: 'America/Phoenix',     unit: 'F', nwsStation: 'KPHX', ghcnStation: 'USW00023183', wuStation: 'KPHX'  },
+  'seattle':        { lat: 47.6062,  lon: -122.3321, tz: 'America/Los_Angeles', unit: 'F', nwsStation: 'KSEA', ghcnStation: 'USW00024233', wuStation: 'KSEA'  },
+  'boston':         { lat: 42.3601,  lon: -71.0589,  tz: 'America/New_York',    unit: 'F', nwsStation: 'KBOS', ghcnStation: 'USW00014739', wuStation: 'KBOS'  },
+  'atlanta':        { lat: 33.7490,  lon: -84.3880,  tz: 'America/New_York',    unit: 'F', nwsStation: 'KATL', ghcnStation: 'USW00013874', wuStation: 'KATL'  },
+  'houston':        { lat: 29.7604,  lon: -95.3698,  tz: 'America/Chicago',     unit: 'F', nwsStation: 'KHOU', ghcnStation: 'USW00012918', wuStation: 'KHOU'  },
+  'dallas':         { lat: 32.7767,  lon: -96.7970,  tz: 'America/Chicago',     unit: 'F', nwsStation: 'KDFW', ghcnStation: 'USW00003927', wuStation: 'KDFW'  },
+  'denver':         { lat: 39.7392,  lon: -104.9903, tz: 'America/Denver',      unit: 'F', nwsStation: 'KDEN', ghcnStation: 'USW00003017', wuStation: 'KDEN'  },
+  'san-francisco':  { lat: 37.7749,  lon: -122.4194, tz: 'America/Los_Angeles', unit: 'F', nwsStation: 'KSFO', ghcnStation: 'USW00023234', wuStation: 'KSFO'  },
+  'austin':         { lat: 30.2672,  lon: -97.7431,  tz: 'America/Chicago',     unit: 'F', nwsStation: 'KAUS', ghcnStation: 'USW00013904', wuStation: 'KAUS'  },
+  'nashville':      { lat: 36.1627,  lon: -86.7816,  tz: 'America/Chicago',     unit: 'F', nwsStation: 'KBNA', ghcnStation: 'USW00013897', wuStation: 'KBNA'  },
+  'charlotte':      { lat: 35.2271,  lon: -80.8431,  tz: 'America/New_York',    unit: 'F', nwsStation: 'KCLT', ghcnStation: 'USW00013881', wuStation: 'KCLT'  },
+  'tampa':          { lat: 27.9506,  lon: -82.4572,  tz: 'America/New_York',    unit: 'F', nwsStation: 'KTPA', ghcnStation: 'USW00012842', wuStation: 'KTPA'  },
+  'toronto':        { lat: 43.6532,  lon: -79.3832,  tz: 'America/Toronto',     unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'CYYZ'  },
+  // ── South America ──────────────────────────────────────────────────────────
+  'mexico-city':    { lat: 19.4326,  lon: -99.1332,  tz: 'America/Mexico_City', unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'MMMX'  },
+  'buenos-aires':   { lat: -34.6037, lon: -58.3816,  tz: 'America/Argentina/Buenos_Aires', unit: 'C', nwsStation: null, ghcnStation: null,   wuStation: 'SAEZ'  },
+  'sao-paulo':      { lat: -23.5505, lon: -46.6333,  tz: 'America/Sao_Paulo',   unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'SBGR'  },
+  // ── Europe ─────────────────────────────────────────────────────────────────
+  'london':         { lat: 51.5074,  lon: -0.1278,   tz: 'Europe/London',       unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'EGLC'  },
+  'paris':          { lat: 48.8566,  lon: 2.3522,    tz: 'Europe/Paris',        unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: null    }, // blocked
+  'madrid':         { lat: 40.4168,  lon: -3.7038,   tz: 'Europe/Madrid',       unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'LEMD'  },
+  'munich':         { lat: 48.1351,  lon: 11.5820,   tz: 'Europe/Berlin',       unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'EDDM'  },
+  'milan':          { lat: 45.4654,  lon: 9.1859,    tz: 'Europe/Rome',         unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'LIMC'  },
+  'amsterdam':      { lat: 52.3676,  lon: 4.9041,    tz: 'Europe/Amsterdam',    unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'EHAM'  },
+  'warsaw':         { lat: 52.2297,  lon: 21.0122,   tz: 'Europe/Warsaw',       unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'EPWA'  },
+  'helsinki':       { lat: 60.1699,  lon: 24.9384,   tz: 'Europe/Helsinki',     unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'EFHK'  },
+  'istanbul':       { lat: 41.0082,  lon: 28.9784,   tz: 'Europe/Istanbul',     unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: null,   oracle: 'noaa-nws', oracleSite: 'LTFM' }, // blocked
+  'moscow':         { lat: 55.7558,  lon: 37.6173,   tz: 'Europe/Moscow',       unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: null,   oracle: 'noaa-nws', oracleSite: 'UUWW' },
+  'ankara':         { lat: 39.9334,  lon: 32.8597,   tz: 'Europe/Istanbul',     unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'LTAC'  },
+  // ── Africa ─────────────────────────────────────────────────────────────────
+  'cape-town':      { lat: -33.9249, lon: 18.4241,   tz: 'Africa/Johannesburg', unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'FACT'  },
+  'lagos':          { lat: 6.5244,   lon: 3.3792,    tz: 'Africa/Lagos',        unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'DNMM'  },
+  // ── Middle East / South Asia ───────────────────────────────────────────────
+  'dubai':          { lat: 25.2048,  lon: 55.2708,   tz: 'Asia/Dubai',          unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: null    }, // unconfirmed — no active markets sampled
+  'jeddah':         { lat: 21.4858,  lon: 39.1925,   tz: 'Asia/Riyadh',         unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'OEJN'  }, // blocked
+  'karachi':        { lat: 24.8607,  lon: 67.0011,   tz: 'Asia/Karachi',        unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'OPKC'  },
+  'lucknow':        { lat: 26.8467,  lon: 80.9462,   tz: 'Asia/Kolkata',        unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'VILK'  }, // blocked
+  // ── East / Southeast Asia ──────────────────────────────────────────────────
+  'seoul':          { lat: 37.5665,  lon: 126.9780,  tz: 'Asia/Seoul',          unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'RKSI'  },
+  'busan':          { lat: 35.1796,  lon: 129.0756,  tz: 'Asia/Seoul',          unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'RKPK'  },
+  'tokyo':          { lat: 35.6762,  lon: 139.6503,  tz: 'Asia/Tokyo',          unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'RJTT'  },
+  'hong-kong':      { lat: 22.3193,  lon: 114.1694,  tz: 'Asia/Hong_Kong',      unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: null,   oracle: 'hk-observatory' },
+  'shanghai':       { lat: 31.2304,  lon: 121.4737,  tz: 'Asia/Shanghai',       unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'ZSPD'  },
+  'beijing':        { lat: 39.9042,  lon: 116.4074,  tz: 'Asia/Shanghai',       unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'ZBAA'  },
+  'guangzhou':      { lat: 23.1291,  lon: 113.2644,  tz: 'Asia/Shanghai',       unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'ZGGG'  },
+  'chengdu':        { lat: 30.5728,  lon: 104.0668,  tz: 'Asia/Shanghai',       unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'ZUUU'  },
+  'wuhan':          { lat: 30.5928,  lon: 114.3055,  tz: 'Asia/Shanghai',       unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'ZHHH'  },
+  'taipei':         { lat: 25.0330,  lon: 121.5654,  tz: 'Asia/Taipei',         unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'RCSS'  },
+  'singapore':      { lat: 1.3521,   lon: 103.8198,  tz: 'Asia/Singapore',      unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'WSSS'  }, // blocked
+  'jakarta':        { lat: -6.2088,  lon: 106.8456,  tz: 'Asia/Jakarta',        unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'WIHH'  },
+  'manila':         { lat: 14.5995,  lon: 120.9842,  tz: 'Asia/Manila',         unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'RPLL'  },
+  'kuala-lumpur':   { lat: 3.1390,   lon: 101.6869,  tz: 'Asia/Kuala_Lumpur',   unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'WMKK'  }, // blocked
+  // ── Oceania ────────────────────────────────────────────────────────────────
+  'sydney':         { lat: -33.8688, lon: 151.2093,  tz: 'Australia/Sydney',    unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: null    }, // unconfirmed — no active markets sampled
+  'wellington':     { lat: -41.2866, lon: 174.7756,  tz: 'Pacific/Auckland',    unit: 'C', nwsStation: null,   ghcnStation: null,           wuStation: 'NZWN'  }, // blocked
 };
 
 // Slug → question-text city name mapping (for question parser augmentation)
@@ -444,10 +453,12 @@ async function fetchWeatherMarkets() {
       // specific ICAO airport station, e.g.:
       //   https://www.wunderground.com/history/daily/us/ny/new-york-city/KLGA
       // The station code is the last path segment of that URL.
+      // Prefer hardcoded wuStation from CITY_SLUGS (confirmed from event descriptions);
+      // fall back to regex extraction from description for cities not yet catalogued.
       const wuStationMatch = (event.description || '').match(
         /wunderground\.com\/history\/daily\/[^"'\s]+\/([A-Z][A-Z0-9]{2,5})\b/i
       );
-      const wuStation = wuStationMatch ? wuStationMatch[1].toUpperCase() : null;
+      const wuStation = cityMeta?.wuStation ?? (wuStationMatch ? wuStationMatch[1].toUpperCase() : null);
 
       const eventMarkets = event.markets || [];
 
