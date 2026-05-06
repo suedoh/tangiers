@@ -263,6 +263,29 @@ async function main() {
     const logLine = `  ↳ ${observed.source}: ${observed.value.toFixed(1)}°F | bucket ${bucketLabel(trade.parsed)} → ${hit ? 'HIT' : 'MISS'} → ${signalWon ? 'WIN' : 'LOSS'}`;
     log(logLine);
 
+    // GHCN shadow — when WU is primary, record what GHCN would have said for calibration.
+    let ghcnShadow = null;
+    if (observed.source.startsWith('WU:') && coords.ghcnStation) {
+      const ghcn = await fetchGHCNObserved(coords.ghcnStation, parsed.date).catch(() => null);
+      if (ghcn) {
+        const wantHigh   = parsed.direction !== 'below';
+        const ghcnValue  = wantHigh ? ghcn.tmax : ghcn.tmin;
+        if (ghcnValue != null) {
+          const ghcnHit       = isHit(ghcnValue, parsed);
+          const ghcnSignalWon = (trade.side === 'yes' && ghcnHit) || (trade.side === 'no' && !ghcnHit);
+          ghcnShadow = {
+            value:            Math.round(ghcnValue * 10) / 10,
+            source:           ghcn.source,
+            signalResult:     ghcnSignalWon ? 'win' : 'loss',
+            agreesWithPrimary: ghcnSignalWon === signalWon,
+          };
+          if (!ghcnShadow.agreesWithPrimary) {
+            log(`  ↳ [ghcn-shadow] DIVERGES — WU ${observed.value.toFixed(1)}°F (${signalWon ? 'WIN' : 'LOSS'}) vs GHCN ${ghcnValue.toFixed(1)}°F (${ghcnSignalWon ? 'WIN' : 'LOSS'})`);
+          }
+        }
+      }
+    }
+
     if (!DRY) {
       trade.outcome        = hit ? 'yes-resolved' : 'no-resolved';
       trade.observedTemp   = observed.value;
@@ -273,6 +296,7 @@ async function main() {
       if (trade.meanF != null) {
         trade.modelBiasF = Math.round((observed.value - trade.meanF) * 10) / 10;
       }
+      if (ghcnShadow) trade.ghcnShadow = ghcnShadow;
       if (!trade.shadow) await postResolutionCard(trade, observed, hit, signalWon);
     } else {
       log(`  ↳ [DRY] would write: outcome=${hit ? 'yes-resolved' : 'no-resolved'} signalResult=${signalWon ? 'win' : 'loss'}`);

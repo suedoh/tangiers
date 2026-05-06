@@ -727,10 +727,11 @@ async function resolveOutcomes(trades) {
       computeLivePnl(trade, signalWon);
       updateCityCalibration(trade.parsed?.city, (trade.modelProb || 50) / 100, signalWon);
 
-      // ── WU Shadow Resolution (parallel tracking, never changes signalResult) ──
-      // Fetch the same WU station Polymarket uses for settlement and record what
-      // outcome *would* have been under WU data. Used only for comparison in
-      // !performance — zero impact on win/loss records or P&L.
+      // ── GHCN Shadow Resolution (parallel tracking, never changes signalResult) ──
+      // When this inline resolver used GHCN/NWS/ERA5 as primary (i.e. settle.js
+      // hasn't run yet or WU was unavailable), record what WU would have said so
+      // !performance can show WU vs GHCN divergence. Mirrors the ghcnShadow logic
+      // in settle.js (which runs the opposite direction: WU primary, GHCN shadow).
       if (trade.wuStation && ghcnEligible && WU_VERIFIED_CITIES.has(trade.parsed?.city?.toLowerCase())) {
         try {
           const wuHistory = await fetchWUDailyHistory(trade.wuStation, trade.parsed.date).catch(() => null);
@@ -743,32 +744,31 @@ async function resolveOutcomes(trades) {
               else if (trade.parsed.direction === 'range') wuHit = wuTemp >= trade.parsed.thresholdF && wuTemp <= trade.parsed.thresholdHighF;
               else                                         wuHit = wuTemp > trade.parsed.thresholdF;
               const wuSignalWon = (trade.side === 'yes' && wuHit) || (trade.side === 'no' && !wuHit);
-              trade.wuShadow = {
-                station:          trade.wuStation,
-                tempF:            Math.round(wuTemp * 10) / 10,
-                outcome:          wuHit ? 'yes-resolved' : 'no-resolved',
-                signalResult:     wuSignalWon ? 'win' : 'loss',
+              trade.ghcnShadow = {
+                value:             Math.round(value * 10) / 10,
+                source:            observedSource,
+                signalResult:      signalWon ? 'win' : 'loss',
                 agreesWithPrimary: wuSignalWon === signalWon,
               };
-              if (!trade.wuShadow.agreesWithPrimary) {
-                log(`[wu-shadow] ${trade.id}: DIVERGES — primary ${signalWon ? 'WIN' : 'LOSS'} (${value.toFixed(1)}°F via ${observedSource}) vs WU ${wuSignalWon ? 'WIN' : 'LOSS'} (${wuTemp.toFixed(1)}°F via ${trade.wuStation})`);
+              if (!trade.ghcnShadow.agreesWithPrimary) {
+                log(`[ghcn-shadow] ${trade.id}: DIVERGES — WU ${wuTemp.toFixed(1)}°F (${wuSignalWon ? 'WIN' : 'LOSS'}) vs GHCN ${value.toFixed(1)}°F (${signalWon ? 'WIN' : 'LOSS'})`);
                 if (BACKTEST_HOOK) {
                   await postWebhook(BACKTEST_HOOK, 'error',
-                    `⚠️ **WU SHADOW DIVERGENCE** | \`${trade.id}\`\n` +
+                    `⚠️ **GHCN SHADOW DIVERGENCE** | \`${trade.id}\`\n` +
                     `${trade.question}\n` +
-                    `Primary: **${value.toFixed(1)}°F** (${observedSource}) → ${signalWon ? '✅ WIN' : '❌ LOSS'}\n` +
                     `WU (${trade.wuStation}): **${wuTemp.toFixed(1)}°F** → ${wuSignalWon ? '✅ WIN' : '❌ LOSS'}\n` +
-                    `Gap: ${Math.abs(value - wuTemp).toFixed(1)}°F — settlement may differ from our resolution.`,
-                    'Weather • WU Shadow'
+                    `GHCN (${observedSource}): **${value.toFixed(1)}°F** → ${signalWon ? '✅ WIN' : '❌ LOSS'}\n` +
+                    `Gap: ${Math.abs(value - wuTemp).toFixed(1)}°F`,
+                    'Weather • GHCN Shadow'
                   ).catch(() => null);
                 }
               } else {
-                log(`[wu-shadow] ${trade.id}: agrees — WU ${wuTemp.toFixed(1)}°F (${trade.wuStation}) = ${wuSignalWon ? 'WIN' : 'LOSS'}`);
+                log(`[ghcn-shadow] ${trade.id}: agrees — GHCN ${value.toFixed(1)}°F matches WU ${wuTemp.toFixed(1)}°F`);
               }
             }
           }
         } catch (wuErr) {
-          log(`[wu-shadow] ${trade.id}: WU fetch error — ${wuErr.message}`);
+          log(`[ghcn-shadow] ${trade.id}: WU fetch error — ${wuErr.message}`);
         }
       }
 
