@@ -270,8 +270,9 @@ function buildSignalCard(market, forecast, kelly, side, edge, modelProb, id, aiA
 
   const sidePrice   = side === 'yes' ? market.yesPrice : market.noPrice;
   const payoutRatio = ((1 - sidePrice) / sidePrice).toFixed(2);
-  const rrIcon      = parseFloat(payoutRatio) >= 1.0 ? '✅' : parseFloat(payoutRatio) >= 0.50 ? '⚠️' : '🔴';
-  const rrLabel     = parseFloat(payoutRatio) >= 1.0 ? ''
+  const rrIcon      = parseFloat(payoutRatio) >= 1.5 ? '✅' : parseFloat(payoutRatio) >= 1.0 ? '⚠️' : parseFloat(payoutRatio) >= 0.50 ? '🟠' : '🔴';
+  const rrLabel     = parseFloat(payoutRatio) >= 1.5 ? ''
+    : parseFloat(payoutRatio) >= 1.0 ? ' — marginal payout'
     : parseFloat(payoutRatio) >= 0.50 ? ' — risk exceeds reward'
     : ' — HIGH RISK';
   const payoutLine  = `${rrIcon} Payout odds:  win ${pct(1 - sidePrice)} per $1 risked → **${payoutRatio}x**${rrLabel}`;
