@@ -4,11 +4,12 @@
 /**
  * weather/settle.js — NOAA METAR settlement resolver
  *
- * Scans weather-trades.json for expired, unresolved signals and closes them
- * using official NOAA observations in priority order:
- *   1. GHCN-Daily CDO (primary — same station network Polymarket uses for US markets)
- *   2. NWS hourly METAR observations (secondary — near real-time airport obs)
- *   3. Open-Meteo ERA5 archive (gridded fallback)
+ * Scans weather-trades.json for expired, unresolved signals and closes them.
+ * Resolution priority:
+ *   1. Weather Underground (primary for WU-verified cities — Polymarket's actual oracle)
+ *   2. GHCN-Daily CDO (fallback — authoritative NOAA daily obs)
+ *   3. NWS hourly METAR observations (secondary fallback — near real-time airport obs)
+ *   4. Open-Meteo ERA5 archive (gridded fallback of last resort)
  *
  * Tracks observedSource and modelBiasF per trade for calibration analysis.
  *
@@ -30,6 +31,7 @@ const fs   = require('fs');
 const { loadEnv, ROOT, resolveWebhook } = require('../lib/env');
 const { postWebhook }                   = require('../lib/discord');
 const { fetchGHCNObserved, fetchNWSObserved, getObserved } = require('../lib/forecasts');
+const { fetchWUDailyHistory } = require('../lib/weather-analysis');
 const { computeLivePnl }               = require('../lib/polymarket-orders');
 const { getMarketPrice }               = require('../lib/polymarket');
 
@@ -62,7 +64,17 @@ async function fetchObserved(trade) {
   const coords       = parsed.coords || {};
   const wantHigh     = parsed.direction !== 'below';
 
-  // 1. GHCN-Daily — authoritative, matches Polymarket settlement source
+  // 1. Weather Underground — Polymarket's actual settlement oracle for WU-verified cities
+  if (trade.wuStation) {
+    const wu = await fetchWUDailyHistory(trade.wuStation, parsed.date).catch(() => null);
+    if (wu) {
+      const value = wantHigh ? wu.high : wu.low;
+      if (value != null) return { value, source: `WU:${trade.wuStation}` };
+    }
+    log(`  ↳ WU fetch failed for ${trade.wuStation} — falling back to GHCN/NWS/ERA5`);
+  }
+
+  // 2. GHCN-Daily — authoritative NOAA data, used as fallback when WU unavailable
   if (coords.ghcnStation) {
     const ghcn = await fetchGHCNObserved(coords.ghcnStation, parsed.date).catch(() => null);
     if (ghcn) {
@@ -71,7 +83,7 @@ async function fetchObserved(trade) {
     }
   }
 
-  // 2. NWS hourly METAR — near real-time (available within hours)
+  // 3. NWS hourly METAR — near real-time (available within hours)
   if (coords.nwsStation) {
     const nws = await fetchNWSObserved(coords.nwsStation, parsed.date, coords.tz).catch(() => null);
     if (nws) {
@@ -80,7 +92,7 @@ async function fetchObserved(trade) {
     }
   }
 
-  // 3. Open-Meteo ERA5 archive — gridded fallback (always available)
+  // 4. Open-Meteo ERA5 archive — gridded fallback (always available)
   if (coords.lat != null && coords.lon != null) {
     const direction = parsed.direction === 'below' ? 'below' : 'above';
     const era5 = await getObserved(coords.lat, coords.lon, parsed.date, direction).catch(() => null);
