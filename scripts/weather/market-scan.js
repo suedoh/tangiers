@@ -734,7 +734,7 @@ async function resolveOutcomes(trades) {
       // in settle.js (which runs the opposite direction: WU primary, GHCN shadow).
       if (trade.wuStation && ghcnEligible && WU_VERIFIED_CITIES.has(trade.parsed?.city?.toLowerCase())) {
         try {
-          const wuHistory = await fetchWUDailyHistory(trade.wuStation, trade.parsed.date).catch(() => null);
+          const wuHistory = await fetchWUDailyHistory(trade.wuStation, trade.parsed.date, trade.parsed?.coords?.tz).catch(() => null);
           if (wuHistory) {
             const wuTemp = wantHigh ? wuHistory.high : wuHistory.low;
             if (wuTemp != null) {

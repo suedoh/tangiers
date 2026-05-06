@@ -674,33 +674,41 @@ async function _deepAnalyzeSignal(signal, ctx, stage1Result) {
 }
 
 /**
- * Fetch the official daily high/low from Weather Underground for an ICAO airport station.
- * This is the same data source Polymarket uses to settle temperature markets.
+ * Fetch the daily high/low for an ICAO airport station via Iowa Environmental Mesonet (IEM).
+ * IEM archives the global ASOS network — the same underlying data WU displays on its
+ * history pages, at no cost and with no API key required.
  *
- * Requires WU_API_KEY. Returns null gracefully on any error or missing key.
+ * Returns null gracefully on any network/parse error or missing station data.
  *
  * @param {string} stationId  ICAO station code (e.g. 'KLGA', 'KDCA', 'EGLC')
- * @param {string} date       'YYYY-MM-DD'
+ * @param {string} date       'YYYY-MM-DD' in local time
+ * @param {string} [tz]       IANA timezone for the station (e.g. 'America/New_York').
+ *                            Used so IEM returns timestamps in local time, ensuring
+ *                            the correct local calendar day is captured.
  * @returns {Promise<{ high: number|null, low: number|null, stationId: string }|null>}
  */
-function fetchWUDailyHistory(stationId, date) {
-  const apiKey = process.env.WU_API_KEY;
-  if (!apiKey || !stationId || !date) return Promise.resolve(null);
+function fetchWUDailyHistory(stationId, date, tz = 'UTC') {
+  if (!stationId || !date) return Promise.resolve(null);
 
-  // Determine country suffix from station prefix (ICAO convention)
-  // K* = US, C* = Canada, E* = Europe, L* = S.Europe/N.Africa, etc.
-  const firstChar = stationId[0]?.toUpperCase();
-  let countryCode = 'US';
-  if (firstChar === 'C') countryCode = 'CA';
-  else if (firstChar === 'E' || firstChar === 'L' || firstChar === 'B' || firstChar === 'U') countryCode = 'GB';
+  const [yyyy, mm, dd] = date.split('-').map(Number);
 
-  const yyyymmdd = date.replace(/-/g, '');
-  const path = `/v1/location/${stationId}:9:${countryCode}/observations/historical.json` +
-    `?apiKey=${apiKey}&units=e&startDate=${yyyymmdd}&endDate=${yyyymmdd}`;
+  // Request a 3-day UTC window (day-1 → day+1) so the full local day is always
+  // captured regardless of UTC offset (covers UTC-12 through UTC+14).
+  const prev = new Date(Date.UTC(yyyy, mm - 1, dd - 1));
+  const next = new Date(Date.UTC(yyyy, mm - 1, dd + 1));
+
+  const path = '/cgi-bin/request/asos.py?' + [
+    `station=${encodeURIComponent(stationId)}`,
+    'data=tmpf',
+    `year1=${prev.getUTCFullYear()}&month1=${prev.getUTCMonth() + 1}&day1=${prev.getUTCDate()}`,
+    `year2=${next.getUTCFullYear()}&month2=${next.getUTCMonth() + 1}&day2=${next.getUTCDate()}`,
+    `tz=${encodeURIComponent(tz)}`,
+    'format=json&latlon=no&missing=M&trace=T&direct=no&report_type=3',
+  ].join('&');
 
   return new Promise(resolve => {
     const req = https.request({
-      hostname: 'api.weather.com',
+      hostname: 'mesonet.agron.iastate.edu',
       path,
       method:  'GET',
       headers: { 'User-Agent': 'Weathermen/1.0 (Tangiers)' },
@@ -710,22 +718,26 @@ function fetchWUDailyHistory(stationId, date) {
       res.on('end', () => {
         try {
           const body = JSON.parse(data);
-          const obs  = body?.observations;
+          const obs  = body?.data;
           if (!Array.isArray(obs) || obs.length === 0) { resolve(null); return; }
 
-          // Walk all observations for the day to find the true daily high/low
+          // IEM returns timestamps in the requested tz — filter to the target local date.
+          const dayObs = obs.filter(o => typeof o.valid === 'string' && o.valid.startsWith(date));
+          if (dayObs.length === 0) { resolve(null); return; }
+
           let high = null, low = null;
-          for (const o of obs) {
-            const t = o.imperial?.tempMax ?? o.imperial?.temp ?? null;
-            const l = o.imperial?.tempMin ?? o.imperial?.temp ?? null;
-            if (t != null) high = high == null ? t : Math.max(high, t);
-            if (l != null) low  = low  == null ? l : Math.min(low,  l);
+          for (const o of dayObs) {
+            const t = parseFloat(o.tmpf);
+            if (isNaN(t)) continue;
+            if (high === null || t > high) high = t;
+            if (low  === null || t < low)  low  = t;
           }
+
           resolve({ high, low, stationId });
         } catch { resolve(null); }
       });
     });
-    req.setTimeout(8_000, () => { req.destroy(); resolve(null); });
+    req.setTimeout(12_000, () => { req.destroy(); resolve(null); });
     req.on('error', () => resolve(null));
     req.end();
   });

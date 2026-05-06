@@ -66,7 +66,7 @@ async function fetchObserved(trade) {
 
   // 1. Weather Underground — Polymarket's actual settlement oracle for WU-verified cities
   if (trade.wuStation) {
-    const wu = await fetchWUDailyHistory(trade.wuStation, parsed.date).catch(() => null);
+    const wu = await fetchWUDailyHistory(trade.wuStation, parsed.date, parsed.coords?.tz).catch(() => null);
     if (wu) {
       const value = wantHigh ? wu.high : wu.low;
       if (value != null) return { value, source: `WU:${trade.wuStation}` };
