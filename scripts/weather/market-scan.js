@@ -106,6 +106,7 @@ const PAPER_ONLY_CITIES = new Set([
   'warsaw',       // 56.7% WR (30 trades) — below live threshold; collecting more data
   'munich',       // 59.3% WR (27 trades) — below live threshold; Alpine foehn effects may degrade GFS skill
   'sao paulo',    // 58.6% WR (29 trades) — below live threshold; Southern Hemisphere season inversion may confuse GFS
+  'dallas',       // 58.3% WR (7W/5L) — below live threshold; collecting more data
 ]);
 
 // Cities confirmed to settle via Weather Underground history page.
