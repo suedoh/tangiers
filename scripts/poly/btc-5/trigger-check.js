@@ -14,7 +14,7 @@
  *        5M:  price, VWAP, VRVP (POC/VAH/VAL), OI, CVD
  *        1M:  OHLCV last 4 bars (micro momentum)
  *        1H:  OHLCV last 4 bars (macro structure filter)
- *   5. Scores 6 factors (CVD worth 0–2 pts, all others 0–1 pt)
+ *   5. Scores 5 factors (CVD worth 0–2 pts, all others 0–1 pt; max score=6)
  *   6. Determines direction (UP/DOWN) from majority of directional factors
  *   7. If score ≥ 5: posts Discord embed to #poly-btc-5
  *   8. Logs full evaluation to poly-btc-5-trades.json regardless of score
@@ -159,7 +159,7 @@ function parseStudies(studies) {
 
 // ─── Scoring ──────────────────────────────────────────────────────────────────
 
-function evaluate({ price, vwap, vrvp, oiCurrent, oiPrev, cvd5m, cvdPrev, ohlcv1m, ohlcv1h, utcHour }) {
+function evaluate({ price, vwap, vrvp, oiCurrent, cvd5m, cvdPrev, ohlcv1m, ohlcv1h, utcHour }) {
   const factors = {};
 
   // Factor 1: CVD momentum (0–2 pts, directional)
@@ -214,11 +214,7 @@ function evaluate({ price, vwap, vrvp, oiCurrent, oiPrev, cvd5m, cvdPrev, ohlcv1
   }
   factors.structDir = structDir;
 
-  // Factor 4: OI rising (1 pt, non-directional)
-  const oiRising = oiCurrent != null && oiPrev != null && oiCurrent > oiPrev * 1.001;
-  factors.oiRising = oiRising;
-
-  // Factor 5: Clean air (1 pt, non-directional)
+  // Factor 4: Clean air (1 pt, non-directional)
   let cleanAir = true;
   if (vrvp && price) {
     const threshold = price * 0.003;
@@ -228,7 +224,7 @@ function evaluate({ price, vwap, vrvp, oiCurrent, oiPrev, cvd5m, cvdPrev, ohlcv1
   }
   factors.cleanAir = cleanAir;
 
-  // Factor 6: Active session (1 pt, non-directional)
+  // Factor 5: Active session (1 pt, non-directional)
   const goodSession = utcHour >= 8 && utcHour < 21;
   factors.goodSession = goodSession;
 
@@ -237,7 +233,6 @@ function evaluate({ price, vwap, vrvp, oiCurrent, oiPrev, cvd5m, cvdPrev, ohlcv1
     if (factors.cvdDir === dir)    s += factors.cvdScore;
     if (factors.vwapDir === dir)   s += 1;
     if (factors.structDir === dir) s += 1;
-    if (factors.oiRising)          s += 1;
     if (factors.cleanAir)          s += 1;
     if (factors.goodSession)       s += 1;
     return s;
@@ -280,7 +275,6 @@ function buildEmbed(result, price, barOpenTs, marketUrl) {
     cvdLine,
     `${factors.vwapDir === direction ? '✅' : '❌'} VWAP: price ${isUp ? 'above' : 'below'} VWAP${factors.vwapDir ? '' : ' (near — no edge)'}`,
     `${factors.structDir === direction ? '✅' : '❌'} 1H structure: ${factors.structDir ? (factors.structDir === 'UP' ? 'higher highs/lows' : 'lower lows/highs') : 'choppy (no clear structure)'}`,
-    `${factors.oiRising ? '✅' : '❌'} OI: ${factors.oiRising ? 'rising (new positioning)' : 'flat or falling'}`,
     `${factors.cleanAir ? '✅' : '❌'} Clean air: ${factors.cleanAir ? 'no major level within 0.3%' : 'VRVP level nearby (caution)'}`,
     `${factors.goodSession ? '✅' : '❌'} Session: ${factors.goodSession ? 'active window (08–21 UTC)' : 'low-volume window'}`,
     ``,
@@ -400,11 +394,9 @@ async function main() {
     if (!price) throw new Error('Could not read price from OHLCV');
 
     const { vwap, oi: oiCurrent, cvd: cvd5m } = parseStudies(studies5m);
-    const oiPrev  = state._previousOI || null;
-    const cvdPrev = state._lastCvd    || null;
+    const cvdPrev = state._lastCvd || null;
 
-    state._previousOI = oiCurrent;
-    state._lastCvd    = cvd5m;
+    state._lastCvd = cvd5m;
 
     // ── 1M sweep: micro momentum ──────────────────────────────────────────────
     await setTimeframe(client, '1');
@@ -426,7 +418,7 @@ async function main() {
     log(`price=$${price?.toFixed(2)} vwap=${vwap?.toFixed(2)} oi=${oiCurrent?.toFixed(0)} cvd=${cvd5m?.toFixed(0)} cvdPrev=${cvdPrev?.toFixed(0)}`);
 
     // ── Score ─────────────────────────────────────────────────────────────────
-    const result = evaluate({ price, vwap, vrvp, oiCurrent, oiPrev, cvd5m, cvdPrev, ohlcv1m, ohlcv1h, utcHour });
+    const result = evaluate({ price, vwap, vrvp, oiCurrent, cvd5m, cvdPrev, ohlcv1m, ohlcv1h, utcHour });
     const { score, direction } = result;
 
     log(`score=${score} direction=${direction} up=${result.upScore} down=${result.downScore}`);
@@ -449,7 +441,6 @@ async function main() {
         cvdScore:    result.factors.cvdScore,
         vwapDir:     result.factors.vwapDir,
         structDir:   result.factors.structDir,
-        oiRising:    result.factors.oiRising,
         cleanAir:    result.factors.cleanAir,
         goodSession: result.factors.goodSession,
       },

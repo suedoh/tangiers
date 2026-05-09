@@ -107,7 +107,6 @@ function evaluate({ price, vwap, vrvp, oiCurrent, cvd5m, ohlcv1m, ohlcv1h, utcHo
   }
   f.structDir = structDir;
 
-  f.oiRising = false; // OI trend not available on-demand without prior state
   f.cleanAir = true;
   if (vrvp && price) {
     const th = price * 0.003;
@@ -122,7 +121,6 @@ function evaluate({ price, vwap, vrvp, oiCurrent, cvd5m, ohlcv1m, ohlcv1h, utcHo
     if (f.cvdDir === dir)    s += f.cvdScore;
     if (f.vwapDir === dir)   s += 1;
     if (f.structDir === dir) s += 1;
-    if (f.oiRising)          s += 1;
     if (f.cleanAir)          s += 1;
     if (f.goodSession)       s += 1;
     return s;
@@ -165,7 +163,6 @@ function buildEmbed(result, price, vwap, vrvp, source) {
     cvdLine,
     `${factors.vwapDir === direction ? '✅' : '❌'} VWAP: ${vwap ? `$${vwap.toFixed(2)} (price ${isUp ? '+' : ''}${(((price - vwap)/vwap)*100).toFixed(3)}%)` : 'unavailable'}`,
     `${factors.structDir === direction ? '✅' : '❌'} 1H structure: ${factors.structDir ? (factors.structDir === 'UP' ? 'higher highs/lows' : 'lower lows/highs') : 'no clear structure'}`,
-    `${factors.oiRising ? '✅' : '⚠️'} OI: (on-demand read — no trend comparison available)`,
     `${factors.cleanAir ? '✅' : '❌'} Clean air: ${factors.cleanAir ? 'no major level within 0.3%' : `VRVP level nearby (POC=$${vrvp?.poc?.toFixed(2)})`}`,
     `${factors.goodSession ? '✅' : '❌'} Session: ${factors.goodSession ? 'active window (08–21 UTC)' : 'low-volume window'}`,
     ``,
