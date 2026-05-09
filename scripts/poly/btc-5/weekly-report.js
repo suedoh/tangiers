@@ -63,7 +63,7 @@ function computeStats(trades) {
     .sort((a, b) => b.rate - a.rate)
     .slice(0, 3);
 
-  const factorKeys = ['cvdDir', 'vwapDir', 'structDir', 'oiRising', 'cleanAir', 'goodSession'];
+  const factorKeys = ['cvdDir', 'vwapDir', 'structDir', 'cleanAir', 'goodSession'];
   const factorStats = {};
   for (const k of factorKeys) {
     const fired   = allTime.filter(t => t.signaled && t.factors?.[k] != null && t.factors[k] !== false);
@@ -113,7 +113,6 @@ function buildReport(stats) {
     `  CVD direction:   ${stats.factorStats.cvdDir?.total    || 0} signals → ${formatPct(stats.factorStats.cvdDir?.total    > 0 ? stats.factorStats.cvdDir.correct    / stats.factorStats.cvdDir.total    : null)} win`,
     `  VWAP direction:  ${stats.factorStats.vwapDir?.total   || 0} signals → ${formatPct(stats.factorStats.vwapDir?.total   > 0 ? stats.factorStats.vwapDir.correct   / stats.factorStats.vwapDir.total   : null)} win`,
     `  1H structure:    ${stats.factorStats.structDir?.total || 0} signals → ${formatPct(stats.factorStats.structDir?.total > 0 ? stats.factorStats.structDir.correct / stats.factorStats.structDir.total : null)} win`,
-    `  OI rising:       ${stats.factorStats.oiRising?.total  || 0} signals → ${formatPct(stats.factorStats.oiRising?.total  > 0 ? stats.factorStats.oiRising.correct  / stats.factorStats.oiRising.total  : null)} win`,
     `  Clean air:       ${stats.factorStats.cleanAir?.total  || 0} signals → ${formatPct(stats.factorStats.cleanAir?.total  > 0 ? stats.factorStats.cleanAir.correct  / stats.factorStats.cleanAir.total  : null)} win`,
   ];
 
