@@ -85,6 +85,13 @@ cron: ## Install all cron jobs: trigger-check (10m), discord-bot (1m), weekly-re
 	  WARLINE="0 14 * * 0 PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/weekly-war-report.js >> $(TRADING)/logs/weekly-war-report.log 2>&1"; \
 	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — weekly war report every Sunday 14:00 UTC (09:00 EST / 10:00 EDT)"; echo "$$WARLINE") | crontab -; \
 	  echo "✓  War report cron installed (runs Sundays at 14:00 UTC)"; \
+	fi; \
+	if crontab -l 2>/dev/null | grep -q "import-trades.js"; then \
+	  echo "✓  Mongo sync cron already installed — skipping"; \
+	else \
+	  SYNCLINE="55 * * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/migrate/import-trades.js >> $(TRADING)/logs/migrate.log 2>&1"; \
+	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — sync JSON files into Mongo every hour at :55 (Phase 2 read replica)"; echo "$$SYNCLINE") | crontab -; \
+	  echo "✓  Mongo sync cron installed (runs hourly at :55 — keeps Mongo current with JSON canonical writes)"; \
 	fi
 
 test: ## Run trigger-check.js once and show output

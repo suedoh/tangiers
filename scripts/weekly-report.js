@@ -15,10 +15,10 @@ const fs   = require('fs');
 const path = require('path');
 const https = require('https');
 const { execFileSync } = require('child_process');
+const { connect, disconnect, trades: tradesCol } = require('./lib/db');
 
 const ROOT        = path.resolve(__dirname, '..');
 const ENV_FILE    = path.join(ROOT, '.env');
-const TRADES_FILE = path.join(ROOT, 'trades.json');
 
 // ─── Env ─────────────────────────────────────────────────────────────────────
 
@@ -439,7 +439,7 @@ function formatSummary(s) {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  const trades = readTrades();
+  const trades = await readTrades();
   const stats  = analyse(trades, LOOKBACK_DAYS);
   const report = formatReport(stats);
   const summary = formatSummary(stats);
@@ -478,8 +478,28 @@ async function main() {
   console.log(`Report posted to #backtest-btc (${stats.allTrack.count} closed trades analysed)`);
 }
 
-function readTrades() {
-  try { return JSON.parse(fs.readFileSync(TRADES_FILE, 'utf8')); } catch { return []; }
+// Rehydrate Date fields back to ISO strings so the existing in-memory logic
+// (which calls .slice(0,10) on date fields) works unchanged.
+function rehydrate(t) {
+  return {
+    ...t,
+    firedAt:     t.firedAt     instanceof Date ? t.firedAt.toISOString()     : t.firedAt,
+    closedAt:    t.closedAt    instanceof Date ? t.closedAt.toISOString()    : t.closedAt,
+    confirmedAt: t.confirmedAt instanceof Date ? t.confirmedAt.toISOString() : t.confirmedAt,
+  };
+}
+
+async function readTrades() {
+  await connect();
+  const cutoff = new Date(Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  // Sort by firedAt asc to match the JSON file's chronological insertion order —
+  // ensures deterministic tiebreaking in pnlR sorts (best/worst trade picks).
+  const docs = await tradesCol().find({
+    instrument: 'BTC',
+    firedAt:    { $gte: cutoff },
+  }).sort({ firedAt: 1 }).toArray();
+  await disconnect();
+  return docs.map(rehydrate);
 }
 
 main().catch(err => {

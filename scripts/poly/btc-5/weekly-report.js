@@ -17,12 +17,12 @@ const fs   = require('fs');
 
 const { loadEnv, ROOT } = require('../../lib/env');
 const { postWebhook }   = require('../../lib/discord');
+const { connect, disconnect, trades: tradesCol } = require('../../lib/db');
 
 loadEnv();
 
 const REPORT_HOOK  = process.env.POLY_BTC_5_REPORT_WEBHOOK;
 const SIGNALS_HOOK = process.env.POLY_BTC_5_SIGNALS_WEBHOOK;
-const TRADES_FILE  = path.join(ROOT, 'poly-btc-5-trades.json');
 const FORCE        = process.argv.includes('--force');
 
 function log(msg) { console.log(`[${new Date().toISOString()}] [poly-btc-5-report] ${msg}`); }
@@ -36,7 +36,21 @@ function shouldRun() {
   return day === 1 && hour === 9 && minute < 5;
 }
 
-function readTrades() { try { return JSON.parse(fs.readFileSync(TRADES_FILE, 'utf8')); } catch { return []; } }
+async function readTrades() {
+  await connect();
+  const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  // OR query: last 7 days for `recent` stats + all-time signaled for `allTime` aggregations.
+  // Sort by barOpen asc to match JSON file's chronological insertion order (deterministic streak).
+  const docs = await tradesCol().find({
+    instrument: 'POLY-BTC-5',
+    $or: [
+      { barOpen:  { $gte: cutoff } },
+      { signaled: true },
+    ],
+  }).sort({ barOpen: 1 }).toArray();
+  await disconnect();
+  return docs;
+}
 
 // ─── Stats ────────────────────────────────────────────────────────────────────
 
@@ -182,7 +196,7 @@ async function main() {
 
   log('Generating weekly report...');
 
-  const trades = readTrades();
+  const trades = await readTrades();
   const stats  = computeStats(trades);
   const report = buildReport(stats);
 
