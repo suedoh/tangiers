@@ -358,7 +358,7 @@ async function main() {
       const ohlcvCheck       = await getOHLCV(client, 3);
       const prevCompletedBar = ohlcvCheck[ohlcvCheck.length - 2];
       if (prevCompletedBar && prevCompletedBar.close != null) {
-        prevEval.outcome  = prevCompletedBar.close > prevCompletedBar.open ? 'UP' : 'DOWN';
+        prevEval.outcome  = prevCompletedBar.close >= prevCompletedBar.open ? 'UP' : 'DOWN';
         prevEval.correct  = prevEval.prediction === prevEval.outcome;
         prevEval.closedAt = new Date().toISOString();
         writeTrades(trades);
