@@ -129,6 +129,18 @@ node scripts/trigger-check.js
 
 ---
 
+## Refactor Log
+
+The `refactors/` directory contains a plain-English audit trail of every significant bug fix, dead-code removal, or architectural change made to this codebase. Each file covers:
+
+- **What changed** and where
+- **Why it was wrong** (or why the old code couldn't work)
+- **Risk assessment** — what, if anything, could behave differently
+
+These are decision records, not summaries of diffs. They exist so future sessions (human or AI) can understand the *reasoning* behind a change without reconstructing it from commit history. When in doubt about why something looks the way it does, check here first.
+
+---
+
 ## Cron Schedule
 
 ```

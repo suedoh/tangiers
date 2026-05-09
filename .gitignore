@@ -18,6 +18,5 @@ node_modules/
 tradingview-mcp/node_modules/
 tradingview-mcp/screenshots/
 analysis/
-refactors/
 *.log
 .DS_Store
