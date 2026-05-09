@@ -363,53 +363,6 @@ function buildBoxesExpr(filter) {
 })()`;
 }
 
-// ─── Change 3: BOS/CHoCH Label Reader ────────────────────────────────────────
-// Reads LuxAlgo (or other) Pine label.new() primitives from CDP.
-// Returns array of { text, price, time } — the same graphics path as boxes
-// but targeting dwglabels instead of dwgboxes.
-function buildLabelsExpr(filter) {
-  const f = JSON.stringify(filter || '');
-  return `
-(function() {
-  try {
-    var chart   = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
-    var sources = chart.model().model().dataSources();
-    var filter  = ${f};
-    var allLabels = [];
-    for (var si = 0; si < sources.length; si++) {
-      var s = sources[si];
-      if (!s.metaInfo) continue;
-      try {
-        var meta = s.metaInfo();
-        var name = meta.description || meta.shortDescription || '';
-        if (!name || (filter && name.indexOf(filter) === -1)) continue;
-        var g = s._graphics;
-        if (!g || !g._primitivesCollection) continue;
-        var pc = g._primitivesCollection;
-        var items = [];
-        try {
-          var outer = pc.dwglabels;
-          if (outer) {
-            var inner = outer.get('labels');
-            if (inner) {
-              var coll = inner.get(false);
-              if (coll && coll._primitivesDataById && coll._primitivesDataById.size > 0)
-                coll._primitivesDataById.forEach(function(v, id) { items.push(v); });
-            }
-          }
-        } catch(e) {}
-        for (var i = 0; i < items.length; i++) {
-          var v = items[i];
-          var text = (v.text || v.labelText || '').trim();
-          if (text) allLabels.push({ text: text, price: v.y, time: v.x });
-        }
-      } catch(e) {}
-    }
-    return allLabels;
-  } catch(e) { return []; }
-})()`;
-}
-
 // ─── VRVP Extractor ──────────────────────────────────────────────────────────
 // Reads the Visible Range Volume Profile histogram from TradingView's native
 // (non-Pine) study data layer. Returns raw histogram rows + POC/VAH/VAL.
@@ -624,28 +577,6 @@ function parseStudies(studies) {
     : null;
 
   return { cvd, oi, sessionVP, vwap };
-}
-
-// ─── Change 3 cont.: Parse BOS/CHoCH from LuxAlgo labels ─────────────────────
-// Scans all labels for BOS / CHoCH text. Returns the most recent event with
-// its price and bullish/bearish characterisation so evaluateSetup can use it
-// as a structure-confirmation criterion.
-function parseBosChoch(labels, price) {
-  if (!labels || !labels.length) return null;
-  const events = labels.filter(l => {
-    const t = (l.text || '').toUpperCase().replace(/\s/g, '');
-    return t.includes('BOS') || t.includes('CHOCH');
-  });
-  if (!events.length) return null;
-  const last  = events[events.length - 1];
-  const text  = last.text || '';
-  // If label has a y-coordinate, compare to price. Otherwise infer from text.
-  const isBullish = last.price != null
-    ? last.price < price        // label drawn below price = bullish structure
-    : text.includes('+') || text.toUpperCase().includes('BULL');
-  const isBOS   = text.toUpperCase().replace(/\s/g, '').includes('BOS');
-  const isCHoCH = text.toUpperCase().replace(/\s/g, '').includes('CHOCH');
-  return { text, price: last.price, isBullish, isBOS, isCHoCH };
 }
 
 // ─── Trigger Formula ─────────────────────────────────────────────────────────
