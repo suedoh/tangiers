@@ -433,26 +433,34 @@ See `TODO.md` for full list. Key items:
 
 ## MongoDB Migration — In Progress
 
-**Branch:** `feat/mongodb-docker` | **Plan file:** `~/.claude/plans/i-have-a-project-cozy-book.md`
+**Plan file:** `refactors/mongodb-migration-plan.md`
 
-### What's done (Phase 0–1)
-- MongoDB 7.0 running in Docker (`docker-compose.yml`, `127.0.0.1:27017`, volume `mongo_data`)
-- `scripts/lib/db.js` — shared ES-module connection + collection accessors (loads `.env` automatically)
-- Migration scripts in `scripts/migrate/` — indexes created, 161 trades + all state imported
-- **Cron scripts still read/write JSON files** — no behavioral change yet
+### What's done (Phases 0–2, merged to main 2026-05-09)
+- **Phase 0–1**: MongoDB 7.0 in Docker (`127.0.0.1:27017`), `scripts/lib/db.js` shared connection + collection accessors, `scripts/migrate/` import + index scripts. BTC structured `factors` field, sparse TTL on poly non-signaled bars, `wave_forecasts` separate collection.
+- **Phase 2**: BTC and Poly BTC-5 weekly reports read from MongoDB (JSON files remain the canonical write path). BZ weekly-report untouched — it's a market-intel war report, not trade-based. Hourly sync cron at `:55` keeps Mongo at most 5 minutes stale before `:00` reports fire.
 
-### What's next (Phases 2–5, after weathermen merges to main)
+### Active sync cron
+`55 * * * *  node scripts/migrate/import-trades.js >> logs/migrate.log`
+
+Installed via `make cron`. Verify it's running: `crontab -l | grep migrate`
+
+### Phase 3 — entry criteria (verify before starting)
+- `tail -50 ~/trading/logs/migrate.log` — hourly upserts should show consistent pattern, no errors
+- `tail ~/trading/logs/weekly-report.log` after Monday 09:00 UTC — should match historic cadence
+- Verify factor correlation query against actual Discord report numbers
+- If all clean: Phase 3 = trigger scripts write to MongoDB (poly → BZ → BTC last). Use Opus 4.7 + high effort for BTC (`trigger-check.js` is 1500+ lines with inline CDP).
+
+### Remaining phases
 | Phase | Work |
 |---|---|
-| 2 | Switch native cron scripts to MongoDB: `trigger-check.js`, `bz/trigger-check.js`, `bz/analyze.js`, weekly reports |
-| 3 | Containerize Discord bot (`docker/discord-bot.Dockerfile`), remove from crontab |
-| 4 | Refactor `bz/news-watch.js` to write `triggers` collection instead of spawning `analyze.js`; containerize as Docker service, remove from pm2 |
-| 5 | Cleanup — remove JSON dual-writes, archive `.json` files, update Makefile |
+| 3 | Trigger scripts write to MongoDB — dual-write window. Poly first, BZ next, BTC last. |
+| 4 | Containerize Discord bot, news-watch; remove from crontab/pm2 |
+| 5 | Remove JSON dual-writes, archive `.json` files, update Makefile |
 
 ### Key constraints (don't forget these)
-- CDP scripts (`trigger-check.js`, `bz/trigger-check.js`, `bz/analyze.js`) **must stay native** — Docker for Mac can't reach TradingView Desktop on `localhost:9222`
-- Native cron scripts connect to MongoDB via `127.0.0.1:27017` (port-forwarded from Docker); Docker services connect via `mongodb:27017` (internal network)
-- **Weathermen** will be a new instrument + standalone feature — add its instrument to `scripts/migrate/import-trades.js` before merging so it's in MongoDB from day one
+- CDP scripts (`trigger-check.js`, `bz/trigger-check.js`, `bz/analyze.js`) **must stay native** — Docker for Mac can't reach TradingView Desktop on `localhost:9222`. This is permanent.
+- Native cron scripts connect to MongoDB via `127.0.0.1:27017`; Docker services would connect via `mongodb:27017` (internal network)
+- **Weathermen** merge: `normalizeWeathermen()` hook already in `import-trades.js` (dormant). Expect conflicts in `db.js` exports and `import-trades.js` at merge time. PR `fix/pre-merge-weathermen` (#1) must land in weathermen branch first.
 - Partner machine (`PRIMARY=false`): no MongoDB, no Docker needed — `PRIMARY` guard exits before any DB calls
 
 ### Docker quick-reference

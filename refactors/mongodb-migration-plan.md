@@ -5,6 +5,21 @@
 
 ---
 
+## ✅ Completion Status
+
+| Phase | Status | Commit |
+|---|---|---|
+| 0 — Docker + db.js skeleton | ✅ Complete | pre-existing |
+| 1 — Migration scripts, indexes, BTC factors, poly TTL, EW collection | ✅ Complete | `65e3be9` |
+| 2 — Weekly reports read from Mongo, hourly sync cron | ✅ Complete | `f24ceb9` |
+| 3 — Trigger scripts write to Mongo | ⏳ Pending entry criteria check |
+| 4 — Containerize Discord bot + news-watch | ⏳ Pending Phase 3 |
+| 5 — Remove JSON dual-writes, archive flat files | ⏳ Pending Phase 4 |
+
+**Merged to main:** 2026-05-09. Branch `feat/mongodb-docker` deleted.
+
+---
+
 ## Step 1: Confirm the Claim
 
 **Claim:** "The flat files are getting too big and analyzing them is becoming costly."
