@@ -1,5 +1,6 @@
 # MongoDB Migration — Architecture & Refactor Plan
-
+**Status:** ACTIVE — Phases 0–2 merged 2026-05-09; Phase 3 entry conditions in [../CLAUDE.md](../CLAUDE.md)
+**Owner:** suedoh
 **Date:** 2026-05-09
 **Scope:** feat/mongodb-docker branch update + Phases 2–5 + weathermen guard + data analysis enhancements
 

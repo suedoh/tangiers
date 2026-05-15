@@ -906,13 +906,19 @@ function evaluateSetup(price, trigger, indicators, levels) {
   const autoFailed = criteria.filter(c => c.auto && c.pass === false).length;
   const autoTotal  = criteria.filter(c => c.auto).length;
 
+  // Probability constants reflect observed win rate on the clean post-fix cohort
+  // (n=387 trades, 2026-04-13 → 2026-05-15, baseline snapshot in refactors/).
+  // Original constants (70/60/48) were 14-22pp under-calibrated vs reality.
+  // These values are IN-SAMPLE and SINGLE-REGIME — re-evaluate after 60+ days
+  // of post-fix data and across at least one non-uptrend regime. See
+  // refactors/2026-05-15-btc-optimization-roadmap.md (Phase 2-3).
   let setupType, probability;
   if (autoPassed === autoTotal && autoTotal >= 3) {
-    setupType = 'A — Full Confluence'; probability = 70;
+    setupType = 'A — Full Confluence'; probability = 85;
   } else if (autoPassed >= autoTotal * 0.6) {
-    setupType = 'B — Partial Confluence'; probability = 60;
+    setupType = 'B — Partial Confluence'; probability = 74;
   } else {
-    setupType = 'C — Low Confluence'; probability = 48;
+    setupType = 'C — Low Confluence'; probability = 63;
   }
 
   return {
@@ -959,7 +965,14 @@ function formatSetupMessage(price, trigger, setup) {
   ].join(' | ');
 
   const probNum = typeof probability === 'number' ? probability : parseInt(probability, 10);
-  const probLabel = probNum >= 70 ? 'High' : probNum >= 60 ? 'Moderate' : probNum >= 50 ? 'Low' : 'Poor';
+  // Labels re-anchored to recalibrated constants (A=85, B=74, C=63).
+  const probLabel = probNum >= 80 ? 'High' : probNum >= 70 ? 'Moderate' : probNum >= 55 ? 'Low' : 'Poor';
+
+  // Tier-aware position sizing. A wins ~85%, B ~74%, C ~63% — same size on
+  // each is wrong. These multipliers apply to YOUR base unit (not specified
+  // here — that's the trader's risk-per-trade unit). Multiply your normal
+  // position size by this factor.
+  const sizeMult = isSetupA ? '1.0×' : isSetupB ? '0.7×' : '0.3×';
 
   const criteriaLines = criteria.map(c => {
     const icon = c.pass === true ? '✅' : c.pass === false ? '❌' : '⚠️';
@@ -972,7 +985,7 @@ function formatSetupMessage(price, trigger, setup) {
     `${headerPrefix}${dirLabel} SIGNAL | BINANCE:BTCUSDT.P | ${ts} UTC`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
     `**Price** $${Math.round(price).toLocaleString()} | **${levelType}** ${levelStr}`,
-    `**Setup** ${setupType} | **Win Rate** ~${probNum}% (${probLabel})`,
+    `**Setup** ${setupType} | **Win Rate** ~${probNum}% (${probLabel}) | **Size** ${sizeMult} base`,
     ``,
     verdictLine,
     verdictBody,
@@ -1043,6 +1056,18 @@ function isCoolingDown(zoneKey, incomingDir, cvd) {
     const entry = readState()[zoneKey];
     if (!entry) return false;
     const ts = typeof entry === 'number' ? entry : entry.ts; // handle legacy format
+
+    // Extended cooldown after a stop on this zone: 6h same-direction lock.
+    // Counter-direction trades fall through to the normal cooldown + bypass
+    // rules below (failed-breakout flips are still permitted).
+    if (typeof entry === 'object' && entry.stopUntil && Date.now() < entry.stopUntil) {
+      if (!incomingDir || !entry.stopDirection || incomingDir === entry.stopDirection) {
+        const remainH = ((entry.stopUntil - Date.now()) / 3600000).toFixed(1);
+        log(`Extended cooldown active: ${zoneKey} (${entry.stopDirection}) — ${remainH}h remaining`);
+        return true;
+      }
+    }
+
     if ((Date.now() - ts) >= COOLDOWN_MS) return false;
 
     // Direction-aware bypass: if the cooldown was set for a long and the new
@@ -1493,6 +1518,27 @@ function checkPendingConfirmation(price, indicators) {
 // i.e. the trade had already closed when "confirmation" landed.
 const CONFIRM_MAX_AGE_SEC = 60 * 60; // 1 hour
 
+// Daily-R kill switch threshold. If today's realized R (sum of pnlR over
+// trades closed since 00:00 UTC) drops below this floor, new signals are
+// suppressed for the rest of the UTC day. Baseline saw 11 consecutive stops;
+// without a circuit breaker, a bad streak can compound. Re-evaluate after
+// 60 days of post-fix data.
+const DAILY_R_KILL_FLOOR = -3.0;
+
+function todayUtcR() {
+  try {
+    const all = JSON.parse(fs.readFileSync(TRADES_FILE, 'utf8'));
+    const startOfUtcDay = new Date();
+    startOfUtcDay.setUTCHours(0, 0, 0, 0);
+    const cutoff = startOfUtcDay.getTime();
+    return all.reduce((sum, t) => {
+      if (!t.closedAt || t.pnlR == null) return sum;
+      const ms = new Date(t.closedAt).getTime();
+      return ms >= cutoff ? sum + t.pnlR : sum;
+    }, 0);
+  } catch { return 0; }
+}
+
 async function checkConfirmation(client, indicators) {
   const trades = readTrades();
   // Only watch trades that are still within the confirmation window.
@@ -1749,6 +1795,34 @@ async function updateOutcomes(client) {
         : new Date().toISOString();
       changed = true;
       log(`Trade ${t.id} closed: ${outcome} | R: ${pnlR} | bar: ${t.closedAt}`);
+
+      // Extended cooldown on stop: 3 same-zone shorts stopped within 2h on
+      // 2026-04-13 because the uniform 1h cooldown re-opened too soon. After
+      // a stop on a level, lock that level for 6h (or until natural cooldown
+      // would have lifted — whichever is longer). Same-direction only.
+      if (outcome === 'stop' && t.zone?.type && t.zone?.mid != null) {
+        const zoneKey = `${t.zone.type.toLowerCase()}-${Math.round(t.zone.mid)}`;
+        const state = readState();
+        const existing = state[zoneKey];
+        const stopUntil = Date.now() + 6 * 60 * 60 * 1000;
+        if (existing && typeof existing === 'object') {
+          existing.stopUntil = stopUntil;
+          existing.stopDirection = t.direction;
+        } else {
+          state[zoneKey] = {
+            ts: Date.now(),
+            direction: t.direction,
+            levelType: t.zone.type,
+            levelMid:  t.zone.mid,
+            levelLo:   t.zone.low,
+            levelHi:   t.zone.high,
+            stopUntil,
+            stopDirection: t.direction,
+          };
+        }
+        writeState(state);
+        log(`Extended cooldown: ${zoneKey} (${t.direction}) locked for 6h after stop`);
+      }
     }
   }
 
@@ -2019,7 +2093,27 @@ async function main() {
           && indicators.vwap != null
           && price >= indicators.vwap;
 
-        if (isCShortCoinFlip) {
+        // Daily-R kill switch: if today's realized R has dropped below the
+        // floor, suppress new signals until UTC midnight. Stop hunts and bad
+        // streaks compound otherwise.
+        const todayR = todayUtcR();
+        if (todayR <= DAILY_R_KILL_FLOOR) {
+          log(`Daily-R kill: today's R = ${todayR.toFixed(2)} ≤ ${DAILY_R_KILL_FLOOR} — suppressing ${levelKey}`);
+          const levelStr = `$${Math.round(trigger.lo).toLocaleString()}–$${Math.round(trigger.hi).toLocaleString()}`;
+          notify('info', [
+            `📊 ${trigger.type} APPROACHED — DAILY-R KILL ACTIVE | BTCUSDT.P`,
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+            `**Price** $${Math.round(price).toLocaleString()} | **${trigger.type}** ${levelStr}`,
+            ``,
+            `**SIGNAL SUPPRESSED — DAILY DRAWDOWN CAP HIT**`,
+            `Today's realized R = ${todayR.toFixed(2)}R (floor: ${DAILY_R_KILL_FLOOR}R). New signals paused until 00:00 UTC.`,
+            ``,
+            `**RESUMES**  Tomorrow's UTC day automatically`,
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+          ].join('\n'));
+          markAlerted(levelKey, setup.direction, trigger);
+          triggered = true;
+        } else if (isCShortCoinFlip) {
           log(`C-short gate: suppressing ${levelKey} — CVD ${Math.round(indicators.cvd ?? 0)} near-zero + price above VWAP $${Math.round(indicators.vwap)}`);
           const levelStr = `$${Math.round(trigger.lo).toLocaleString()}–$${Math.round(trigger.hi).toLocaleString()}`;
           notify('info', [
