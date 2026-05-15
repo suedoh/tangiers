@@ -928,6 +928,54 @@ function evaluateSetup(price, trigger, indicators, levels) {
   };
 }
 
+// ─── Position Sizing ─────────────────────────────────────────────────────────
+//
+// Computes dollar risk + BTC position size + notional + leverage from:
+//   - ACCOUNT_EQUITY_USD (env, total trading account size in dollars)
+//   - RISK_PER_TRADE_PCT (env, percent of equity to risk on a 1.0× setup, default 1.0)
+//   - the trade's entry/stop and tier multiplier (A=1.0, B=0.7, C=0.3)
+//
+// If ACCOUNT_EQUITY_USD is unset (e.g. partner machine, dev mode), returns null
+// and the alert falls back to the tier-multiplier-only display.
+
+function computeSizing(entry, stop, tierMult) {
+  const equity = parseFloat(process.env.ACCOUNT_EQUITY_USD);
+  const riskPct = parseFloat(process.env.RISK_PER_TRADE_PCT || '1.0');
+  if (!equity || isNaN(equity) || equity <= 0) return null;
+  const stopDist = Math.abs(entry - stop);
+  if (stopDist <= 0) return null;
+  const riskDollars = equity * (riskPct / 100) * tierMult;
+  const sizeBtc    = riskDollars / stopDist;
+  const notional   = sizeBtc * entry;
+  const leverage   = notional / equity;
+  return {
+    equity, riskPct: riskPct * tierMult,
+    riskDollars, stopDist, sizeBtc, notional, leverage,
+  };
+}
+
+// ─── Drawdown-Mode Multiplier (anti-martingale) ──────────────────────────────
+//
+// Walks the most recent CONFIRMED closed trades in trades.json; if the streak
+// is ≥3 stops in a row, returns 0.5 (halve next size). Reset to 1.0 on the
+// first winning close. Unconfirmed-stops are not counted (per BACKTESTING.md:
+// "entry condition was never met").
+
+function currentDrawdownMultiplier() {
+  try {
+    const trades = readTrades();
+    const closed = trades
+      .filter(t => t.confirmed && t.closedAt && (t.outcome === 'stop' || (t.outcome && t.outcome.startsWith('tp'))))
+      .sort((a, b) => new Date(b.closedAt) - new Date(a.closedAt));
+    let streak = 0;
+    for (const t of closed) {
+      if (t.outcome === 'stop') streak++;
+      else break;
+    }
+    return streak >= 3 ? { mult: 0.5, streak } : { mult: 1.0, streak };
+  } catch { return { mult: 1.0, streak: 0 }; }
+}
+
 // ─── Discord Message Formatter ────────────────────────────────────────────────
 
 function formatSetupMessage(price, trigger, setup) {
@@ -969,10 +1017,26 @@ function formatSetupMessage(price, trigger, setup) {
   const probLabel = probNum >= 80 ? 'High' : probNum >= 70 ? 'Moderate' : probNum >= 55 ? 'Low' : 'Poor';
 
   // Tier-aware position sizing. A wins ~85%, B ~74%, C ~63% — same size on
-  // each is wrong. These multipliers apply to YOUR base unit (not specified
-  // here — that's the trader's risk-per-trade unit). Multiply your normal
-  // position size by this factor.
-  const sizeMult = isSetupA ? '1.0×' : isSetupB ? '0.7×' : '0.3×';
+  // each is wrong. Tier multiplier scales risk-per-trade (not raw notional).
+  const tierMultNum = isSetupA ? 1.0 : isSetupB ? 0.7 : 0.3;
+  // Drawdown-mode anti-martingale: after 3 consecutive confirmed stops, halve
+  // the suggested size until a winner clears the streak. Display only — does
+  // not change which signals fire.
+  const dd = currentDrawdownMultiplier();
+  const effectiveMult = tierMultNum * dd.mult;
+  const sizeMult = `${effectiveMult.toFixed(2)}×`;
+  const ddNote = dd.mult < 1.0 ? ` (drawdown-mode: ${dd.streak} stops in a row → 0.5× normal)` : '';
+
+  // If ACCOUNT_EQUITY_USD is configured, compute exact dollar risk + BTC size.
+  const sizing = computeSizing(entry, stop, effectiveMult);
+  const sizingLines = sizing
+    ? [
+        ``,
+        `**POSITION SIZING**`,
+        `Risk: **$${sizing.riskDollars.toFixed(0)}** (${sizing.riskPct.toFixed(2)}% of $${sizing.equity.toLocaleString()})${ddNote}`,
+        `Stop distance: $${sizing.stopDist.toFixed(0)} | **Size: ${sizing.sizeBtc.toFixed(4)} BTC** (~$${sizing.notional.toLocaleString(undefined, {maximumFractionDigits: 0})} notional, ${sizing.leverage.toFixed(1)}× leverage)`,
+      ].join('\n')
+    : null;
 
   const criteriaLines = criteria.map(c => {
     const icon = c.pass === true ? '✅' : c.pass === false ? '❌' : '⚠️';
@@ -985,7 +1049,7 @@ function formatSetupMessage(price, trigger, setup) {
     `${headerPrefix}${dirLabel} SIGNAL | BINANCE:BTCUSDT.P | ${ts} UTC`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
     `**Price** $${Math.round(price).toLocaleString()} | **${levelType}** ${levelStr}`,
-    `**Setup** ${setupType} | **Win Rate** ~${probNum}% (${probLabel}) | **Size** ${sizeMult} base`,
+    `**Setup** ${setupType} | **Win Rate** ~${probNum}% (${probLabel}) | **Size** ${sizeMult} of risk${ddNote && !sizing ? ddNote : ''}`,
     ``,
     verdictLine,
     verdictBody,
@@ -995,6 +1059,7 @@ function formatSetupMessage(price, trigger, setup) {
     `**TP1**    $${tp1Price.toLocaleString()} — 1:${rr1}`,
     `**TP2**    $${tp2Price.toLocaleString()} — 1:${rr2}`,
     `**TP3**    $${tp3Price.toLocaleString()} — 1:${rr3}`,
+    ...(sizingLines ? [sizingLines] : []),
     ``,
     `**SIGNALS** (${autoPassed}/${autoTotal} confirmed)`,
     criteriaLines,

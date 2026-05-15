@@ -23,6 +23,8 @@ Risk-reduction + calibration fixes. No new evidence required. Shipped in commit 
 | **P1-2** | Daily-R kill switch: pause new signals if today's R ≤ −3 | [trigger-check.js:1494](../scripts/trigger-check.js:1494), gate at signal-fire | Caps tail drawdown; baseline had 11 consecutive stops |
 | **P1-3** | Tier-aware suggested size in Discord alert (A=1.0×, B=0.7×, C=0.3×) | [trigger-check.js:968](../scripts/trigger-check.js:968) | Capital allocation reflects observed wr |
 | **P1-4** | Extended cooldown 6h after same-zone stop (same-direction lock) | [trigger-check.js:1057](../scripts/trigger-check.js:1057), [trigger-check.js:1799](../scripts/trigger-check.js:1799) | Prevents same-zone re-fire patterns like 2026-04-13 |
+| **P1-5** | **Position sizing math in alert** (added 2026-05-15 PM) — when `ACCOUNT_EQUITY_USD` set, alert shows exact $ risk, BTC size, notional, leverage. Tier multiplier scales risk %, not raw notional | [trigger-check.js:computeSizing](../scripts/trigger-check.js) | Without dollar sizing, tier multipliers were nominal; with it, account P&L tracks measured strategy edge |
+| **P1-6** | **Drawdown-mode size suggestion** (added 2026-05-15 PM) — after 3 consecutive confirmed stops, suggested size halves until a winner clears the streak. Display only — doesn't suppress signals | [trigger-check.js:currentDrawdownMultiplier](../scripts/trigger-check.js) | Anti-martingale during losing streaks; finer-grained than the binary daily-R kill |
 
 **Expected net effect:** +0.2 to +0.4 R per trade, 30–50% reduction in tail drawdown. No change to which trades fire (selection rules unchanged).
 
@@ -56,9 +58,13 @@ node scripts/audit/win-rate-diff.js --diff refactors/btc-baseline-2026-05-15.jso
 
 ---
 
-## Phase 3 — Data-validated tuning (begins ~2026-07-15)
+## Phase 3 — Data-validated tuning + quant infra (begins ~2026-07-15)
 
-Gated on Phase 2 passing. Each change here is contingent on a specific statistical test against post-fix data using the v3 stat stack (Wilson + Fisher + BH-FDR + day-clustered bootstrap + Brier/ECE).
+**Two classes of work, both gated on Phase 2 passing:**
+- **Data-validated** (P3-1 → P3-4): each contingent on a specific statistical test using the v3 stat stack (Wilson + Fisher + BH-FDR + day-clustered bootstrap + Brier/ECE). Don't ship until the trigger condition is met.
+- **Quant infra** (P3-5 → P3-9): institutional-grade selection/exposure controls. Independent of statistical triggers — ship when the observation window ends. These are the items recommended on 2026-05-15 in the "must-haves for high-probability execution" review.
+
+### Data-validated
 
 | # | Change | Trigger condition | Effort |
 |---|---|---|---|
@@ -66,6 +72,16 @@ Gated on Phase 2 passing. Each change here is contingent on a specific statistic
 | **P3-2** | Drop, invert, or replace OI factor | OI factor still BH-FDR non-significant after 90 days; consider interaction term `OI rising × CVD aligned` | 1–2h |
 | **P3-3** | Switch fill model to `min(bar.close, TP_N)` | TP3 first-bar rate stays > 80% after 90 days (current: 88%) | 30m code; will retroactively change historic R |
 | **P3-4** | Re-derive probability constants from the post-fix walk-forward fit (or implement the weighted formula from spec) | Phase 2 ECE < 8pp validates current constants; otherwise recalibrate | 1–2h |
+
+### Quant infra (selection + exposure controls)
+
+| # | Change | Why | Effort |
+|---|---|---|---|
+| **P3-5** | **Funding rate filter** — read Binance `premiumIndex` per poll. If predicted funding > +0.05%/8h AND direction=long, downgrade tier by one (A→B, B→C, C→suppress). Symmetric for shorts at extreme negative funding | Extreme funding = crowded one-sided positioning = vulnerable to liquidation cascade. Documented BTC perp edge | 1h |
+| **P3-6** | **Concurrent-trade exposure cap** — refuse `!took` when ≥3 BTC trades open. Optionally cap total open R at 2.0× single-trade risk | Signal clustering = correlated risk concentration. Standard institutional book-level control | 1h |
+| **P3-7** | **Two-close confirmation for Setup C** — Setup C requires 2 consecutive 30M closes beyond entry; A and B unchanged | Setup C is the weakest cell (63% wr). Tightening entry on weakest setups is more surgical than dropping the tier | 30m |
+| **P3-8** | **Liquidity-aware stop placement** — pull recent liquidation cluster data (Coinglass / Binance liq stream). If proposed stop falls within a known cluster, push 0.3% further away | Stops at obvious liq levels get hunted. Pushing past makes the same setup survive the sweep | 2-3h |
+| **P3-9** | **Multi-exchange divergence check** — read BTC from Coinbase + Binance + Bybit at signal time. If venue spread > 0.05% on entry, downgrade or reject | Binance-only VRVP levels can be venue-specific artifacts; cross-venue agreement filters out single-exchange noise | 2h |
 
 ---
 
