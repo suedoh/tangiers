@@ -28,6 +28,7 @@ const path  = require('path');
 const fs    = require('fs');
 const https = require('https');
 const { execFileSync } = require('child_process');
+const { acquireLock, releaseLock } = require('./lib/lock');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -1136,7 +1137,7 @@ function checkInvalidations(price, indicators) {
   const MAX_INVALIDATION_ALERTS = 3;
 
   for (const [key, entry] of Object.entries(state)) {
-    if (messages.length >= MAX_INVALIDATION_ALERTS * 2) {
+    if (messages.length >= MAX_INVALIDATION_ALERTS) {
       log(`Invalidation cap reached — suppressing further alerts this cycle`);
       break;
     }
@@ -1483,13 +1484,27 @@ function checkPendingConfirmation(price, indicators) {
 // not per-bar — which is a simplification, but directional CVD is the most
 // persistent of the indicators and directionally correct at confirmation time.
 
+// Confirmation latency cap: a 30M bar close that lands >1h after the signal
+// fired is not the entry trigger — by then either the trade has already
+// resolved or the original setup is stale. Pre-cap (data through 2026-05-15)
+// FAST (<1h, n=385) confirms had 75.6% wr [71.3, 79.9]; SLOW (≥1h, n=53)
+// confirms had 32.1% wr [21.2, 45.5]. Fisher exact p = 7.7e-10. Of 65 trades
+// stamped "confirmed" in the slow band, 52 had confirmedAt > closedAt —
+// i.e. the trade had already closed when "confirmation" landed.
+const CONFIRM_MAX_AGE_SEC = 60 * 60; // 1 hour
+
 async function checkConfirmation(client, indicators) {
   const trades = readTrades();
-  // Include closed trades — confirmation is independent of outcome.
-  // Bug fix: previously filtered to outcome === null, which caused a race
-  // condition where updateOutcomes() closed the trade before confirmation ran,
-  // leaving TP trades permanently unconfirmed despite price crossing entry.
-  const unconfirmed = trades.filter(t => !t.confirmed);
+  // Only watch trades that are still within the confirmation window.
+  // Anything older than CONFIRM_MAX_AGE_SEC will never confirm, even if
+  // a future 30M bar happens to close beyond entry — that close is no
+  // longer the entry trigger.
+  const nowSec = Date.now() / 1000;
+  const unconfirmed = trades.filter(t => {
+    if (t.confirmed) return false;
+    const ageSec = nowSec - new Date(t.firedAt).getTime() / 1000;
+    return ageSec <= CONFIRM_MAX_AGE_SEC;
+  });
   if (unconfirmed.length === 0) return;
 
   // Switch to 30M explicitly; checkConfirmation runs before updateOutcomes so we can't
@@ -1507,7 +1522,9 @@ async function checkConfirmation(client, indicators) {
 
   for (const t of unconfirmed) {
     const signalTs = new Date(t.firedAt).getTime() / 1000;
-    const relevantBars = bars.filter(b => b.time > signalTs);
+    const deadline = signalTs + CONFIRM_MAX_AGE_SEC;
+    // Bars that closed AFTER the signal AND within the cap window
+    const relevantBars = bars.filter(b => b.time > signalTs && b.time <= deadline);
     if (relevantBars.length === 0) continue;
 
     // CVD was validated at signal fire time (criteria check). Re-checking it
@@ -1653,7 +1670,7 @@ async function updateOutcomes(client) {
   for (const t of trades) {
     if (t.outcome !== null) continue;
 
-    // Expire after 30 days
+    // Expire after 30 days (applies to confirmed and unconfirmed alike)
     const age = Date.now() - new Date(t.firedAt).getTime();
     if (age > 30 * 24 * 60 * 60 * 1000) {
       t.outcome  = 'expired';
@@ -1663,6 +1680,12 @@ async function updateOutcomes(client) {
       log(`Trade ${t.id} expired (30 days, no outcome)`);
       continue;
     }
+
+    // Unconfirmed trades had no entry — per BACKTESTING.md "the entry condition
+    // was never met." Don't bar-walk for TP/stop on them; they sit at outcome:null
+    // and will expire at 30 days with pnlR:0. Previously this produced phantom
+    // -1R "losses" on positions that were never opened.
+    if (!t.confirmed) continue;
 
     // Only look at bars that closed AFTER the signal fired
     const signalTs = new Date(t.firedAt).getTime() / 1000; // seconds
@@ -1688,8 +1711,10 @@ async function updateOutcomes(client) {
         const tp2Hit  = bar.high >= tp2;
         const tp1Hit  = bar.high >= tp1;
 
-        if (stopHit && !tp1Hit) {
-          // Stop hit, no TP reached on this bar
+        // Same-bar ambiguity: stop wins (conservative). Documented in code
+        // comment above, in commit message of 6a93d0d ("stop wins on ambiguous
+        // same-bar crossings"), in BACKTESTING.md and docs/performance-tracking.md.
+        if (stopHit) {
           outcome = 'stop'; pnlR = -1.0; closedBarTime = bar.time; break;
         } else if (tp3Hit) {
           outcome = 'tp3'; pnlR = rr3; closedBarTime = bar.time; break;
@@ -1697,9 +1722,6 @@ async function updateOutcomes(client) {
           outcome = 'tp2'; pnlR = rr2; closedBarTime = bar.time; break;
         } else if (tp1Hit) {
           outcome = 'tp1'; pnlR = rr1; closedBarTime = bar.time; break;
-        } else if (stopHit) {
-          // Both stop and tp1+ hit on same bar — stop wins (conservative)
-          outcome = 'stop'; pnlR = -1.0; closedBarTime = bar.time; break;
         }
       } else {
         const stopHit = bar.high >= stop;
@@ -1707,7 +1729,7 @@ async function updateOutcomes(client) {
         const tp2Hit  = bar.low  <= tp2;
         const tp1Hit  = bar.low  <= tp1;
 
-        if (stopHit && !tp1Hit) {
+        if (stopHit) {
           outcome = 'stop'; pnlR = -1.0; closedBarTime = bar.time; break;
         } else if (tp3Hit) {
           outcome = 'tp3'; pnlR = rr3; closedBarTime = bar.time; break;
@@ -1715,8 +1737,6 @@ async function updateOutcomes(client) {
           outcome = 'tp2'; pnlR = rr2; closedBarTime = bar.time; break;
         } else if (tp1Hit) {
           outcome = 'tp1'; pnlR = rr1; closedBarTime = bar.time; break;
-        } else if (stopHit) {
-          outcome = 'stop'; pnlR = -1.0; closedBarTime = bar.time; break;
         }
       }
     }
@@ -1739,6 +1759,15 @@ async function updateOutcomes(client) {
 
 async function main() {
   log('Stage 1 trigger check starting...');
+
+  // Serialize CDP access with BZ, EW, Poly. All multi-instrument scripts share
+  // one TradingView Desktop session; without the lock a BZ analyze can collide
+  // with a BTC poll and read stale data mid-timeframe-switch.
+  const lock = await acquireLock(15_000, 'btc-trigger');
+  if (!lock) {
+    log('Could not acquire TradingView lock within 15s — another script is holding it. Skipping this cycle.');
+    process.exit(0);
+  }
 
   let client;
 
@@ -1776,6 +1805,7 @@ async function main() {
     } else {
       errorAlert(`CDP error: ${err.message}`, 'CDP connection', 'Check TradingView Desktop is open and functioning.');
     }
+    releaseLock('btc-trigger');
     process.exit(1);
   }
 
@@ -1793,6 +1823,7 @@ async function main() {
         'Open TradingView Desktop and switch to the 🕵Ace layout (BINANCE:BTCUSDT.P).'
       );
       await client.close();
+      releaseLock('btc-trigger');
       process.exit(1);
     }
 
@@ -1857,6 +1888,7 @@ async function main() {
       );
     }
     try { await client.close(); } catch {}
+    releaseLock('btc-trigger');
     process.exit(1);
   }
 
@@ -2041,6 +2073,7 @@ async function main() {
   }
 
   log('Stage 1 complete.');
+  releaseLock('btc-trigger');
 }
 
 // ─── Entry Point ──────────────────────────────────────────────────────────────
@@ -2055,5 +2088,7 @@ main().catch(err => {
       '**Fix:** Check logs/trigger-check.log for the full stack trace.',
     ].join('\n'));
   } catch {}
+  // Best-effort release on crash (no-op if we never acquired)
+  try { releaseLock('btc-trigger'); } catch {}
   process.exit(1);
 });
