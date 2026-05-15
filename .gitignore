@@ -22,3 +22,6 @@ tradingview-mcp/screenshots/
 analysis/
 *.log
 .DS_Store
+# Mid-week audit cron outputs (generated; the README and weekly-plan .md files ARE committed)
+notes/audits/*.txt
+notes/audits/cron.log

@@ -18,6 +18,35 @@ services:
       retries: 3
       start_period: 20s
 
+  # Mid-week audit cron — runs win-rate-diff.js every Wednesday 13:00 UTC
+  # and writes output to notes/audits/. Output files persist on the host via
+  # the bind mount; the container itself is stateless.
+  #
+  # Verify it's running:    docker compose ps audit-cron
+  # See its logs:           docker logs ace_audit_cron
+  # Trigger manually:       docker compose exec audit-cron /app/scripts/audit/run-mid-week-diff.sh
+  audit-cron:
+    image: node:20-alpine
+    container_name: ace_audit_cron
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./:/app
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      MONGO_URL: "mongodb://ace:${MONGO_PASSWORD}@mongodb:27017/ace_trading?authSource=admin"
+      TZ: UTC
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p /app/notes/audits /etc/crontabs &&
+        cp /app/scripts/audit/audit-cron.crontab /etc/crontabs/root &&
+        echo 'audit-cron: crontab installed, starting crond (Wed 13:00 UTC)' &&
+        crond -f -l 8
+
 volumes:
   mongo_data:
     driver: local

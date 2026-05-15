@@ -465,10 +465,19 @@ Installed via `make cron`. Verify it's running: `crontab -l | grep migrate`
 
 ### Docker quick-reference
 ```bash
-docker compose up -d mongodb    # start (survives reboots via restart:unless-stopped)
-docker compose ps               # check health
-docker compose down             # stop (data persists in volume)
+docker compose up -d mongodb    # start mongodb (survives reboots via restart:unless-stopped)
+docker compose up -d audit-cron # start the Wed-13:00-UTC win-rate diff cron
+docker compose ps               # check health of both
+docker compose down             # stop everything (data persists in volumes)
 ```
+
+### audit-cron service
+`audit-cron` is a small `node:20-alpine` container that runs `scripts/audit/run-mid-week-diff.sh` every Wednesday 13:00 UTC via busybox `crond`. It reads from MongoDB on the internal Docker network (`mongodb:27017`) and writes output to `notes/audits/` (bind-mounted from the host).
+- Crontab is the static file `scripts/audit/audit-cron.crontab` (avoids YAML escape hell).
+- Output: `notes/audits/latest.txt` (overwritten each run) + `mid-week-diff-<utc-ts>.txt` (history).
+- Cron log: `notes/audits/cron.log` (gitignored).
+- Manual run: `docker compose exec audit-cron /app/scripts/audit/run-mid-week-diff.sh`.
+- See `notes/README.md` for the full layout.
 
 ---
 
