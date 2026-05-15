@@ -19,6 +19,7 @@ This folder is the durable decision record for Tangiers. Every significant bug f
 
 | File | What | Date |
 |---|---|---|
+| [2026-05-15-btc-canonical-tf-enforcement.md](2026-05-15-btc-canonical-tf-enforcement.md) | BTC trigger-check now switches to 30M before VRVP/study read; restores user TF on exit. Fixes ~44% of historical polls reading from wrong TF | 2026-05-15 |
 | [2026-05-15-btc-took-exit-activation.md](2026-05-15-btc-took-exit-activation.md) | Activated BTC `!took` / `!exit` Phase 2 execution tracking | 2026-05-15 |
 | [btc-tier1-defects-2026-05-15.md](btc-tier1-defects-2026-05-15.md) | 6 BTC Tier-1 defect fixes shipped (D1, D2, D3, D6, D7, D9) | 2026-05-15 |
 | [btc-audit-2026-05-14-v2.md](btc-audit-2026-05-14-v2.md) | Evidence-based BTC audit v2 — defects/open-questions/hypotheses tier system | 2026-05-14 |
@@ -33,6 +34,7 @@ This folder is the durable decision record for Tangiers. Every significant bug f
 | File | What |
 |---|---|
 | [btc-baseline-2026-05-15.json](btc-baseline-2026-05-15.json) | Wilson-CI baseline metrics + anomaly counters for Tier 1 + Phase 1 diffs |
+| [btc-baseline-2026-05-15-pre-tf-fix.json](btc-baseline-2026-05-15-pre-tf-fix.json) | Fresh baseline immediately before the canonical-TF fix shipped (n=576). Use this for the next diff to measure TF-fix effect |
 
 ---
 

@@ -1844,6 +1844,19 @@ async function main() {
   }
 
   let client;
+  // Track the user's TF so we can restore the chart to it on the way out.
+  // Captured immediately after the canonical-TF switch below.
+  let userTF = null;
+  const CANONICAL_TF = '30'; // VRVP + study reads must happen on 30M
+  // Best-effort restore. Safe to call multiple times; no-op if userTF==null
+  // or already on canonical.
+  const restoreUserTF = async () => {
+    if (!userTF || userTF === CANONICAL_TF || !client) return;
+    try {
+      await cdpEval(client, buildSetTFExpr(userTF));
+      log(`Chart TF: restored to ${userTF}`);
+    } catch {}
+  };
 
   // 1. Connect to CDP
   try {
@@ -1896,6 +1909,7 @@ async function main() {
         'Quote symbol check',
         'Open TradingView Desktop and switch to the 🕵Ace layout (BINANCE:BTCUSDT.P).'
       );
+      await restoreUserTF();
       await client.close();
       releaseLock('btc-trigger');
       process.exit(1);
@@ -1905,7 +1919,21 @@ async function main() {
     if (!price) throw { code: 'NO_PRICE', msg: 'last/close price is null' };
     log(`Price: $${Math.round(price).toLocaleString()}`);
 
-    // 3. Get VRVP data — PRIMARY TRIGGER SOURCE
+    // 2.5. Canonical TF enforcement.
+    // VRVP is a visible-range indicator; its POC/VAH/VAL/HVNs depend on the
+    // chart's current TF. CVD, VWAP, Session VP are likewise TF-sensitive on
+    // the displayed bars. Pre-fix data shows ~44% of polls fired against a
+    // 5M chart (intraday levels, not the institutional swing levels the
+    // strategy targets). Switch to 30M before any read; restore to the
+    // user's TF on the way out so manual chart use is preserved.
+    userTF = await cdpEval(client, GET_TF_EXPR).catch(() => null);
+    if (userTF && userTF !== CANONICAL_TF) {
+      log(`Chart TF: switching ${userTF} → ${CANONICAL_TF} for canonical VRVP/study read`);
+      await cdpEval(client, buildSetTFExpr(CANONICAL_TF));
+      await new Promise(r => setTimeout(r, 1500)); // allow indicators to recompute
+    }
+
+    // 3. Get VRVP data — PRIMARY TRIGGER SOURCE (now on 30M)
     const vrvpRaw = await cdpEval(client, VRVP_EXPR);
     studies = [];
     studies._vrvpRaw = vrvpRaw;
@@ -1961,6 +1989,7 @@ async function main() {
         'Check TradingView Desktop is open on the 🕵Ace layout with VRVP visible.'
       );
     }
+    try { await restoreUserTF(); } catch {}
     try { await client.close(); } catch {}
     releaseLock('btc-trigger');
     process.exit(1);
@@ -2166,6 +2195,9 @@ async function main() {
     log(`No trigger. Price $${Math.round(price).toLocaleString()}. ${nearestStr}`);
   }
 
+  // Restore the user's chart TF before releasing the lock so manual analysis
+  // continues on whatever TF they were using.
+  await restoreUserTF();
   log('Stage 1 complete.');
   releaseLock('btc-trigger');
 }
