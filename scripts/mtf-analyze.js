@@ -149,6 +149,23 @@ function buildSetTFExpr(tf) {
   return `(function(){try{window.TradingViewApi._activeChartWidgetWV.value().setResolution('${tf}',function(){});return true;}catch(e){return false;}})()`;
 }
 
+// Poll TradingView's resolution() until it matches `tf` (or timeout).
+// Replaces the previous fire-and-forget setResolution + fixed 2500ms sleep,
+// which could read indicators while the chart was mid-switch — see
+// `refactors/btc-cdp-tf-race-audit.md` for evidence.
+async function setTFConfirmed(client, tf, timeoutMs = 5000) {
+  await cdpEval(client, buildSetTFExpr(tf));
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 300));
+    const current = await cdpEval(client, GET_TF_EXPR).catch(() => null);
+    if (current != null && String(current) === String(tf)) return true;
+  }
+  console.warn(`[mtf-analyze] setTF(${tf}) did not confirm within ${timeoutMs}ms — data may be from wrong TF`);
+  await new Promise(r => setTimeout(r, 800));
+  return false;
+}
+
 function buildClosesExpr(count) {
   return `(function(){try{var bars=${BARS_PATH};var closes=[];var li=bars.lastIndex();var start=Math.max(0,li-${count}+1);for(var i=start;i<=li;i++){var v=bars.valueAt(i);if(v&&v[4]!=null)closes.push(v[4]);}return closes;}catch(e){return[];}})()`;
 }
@@ -231,19 +248,30 @@ function computeRSI(closes, period=14) {
 
 // ─── Per-TF Fetch ─────────────────────────────────────────────────────────────
 
-async function fetchTF(client, tf, closeCount) {
-  await cdpEval(client, buildSetTFExpr(tf));
-  await new Promise(r => setTimeout(r, 2500)); // 2.5s — gives indicators time to recalculate after TF switch
+async function fetchTF(client, tf, closeCount, prevTF) {
+  await setTFConfirmed(client, tf);
 
   let rawStudies = await cdpEval(client, STUDY_VALUES_EXPR) || [];
   let parsed     = parseStudies(Array.isArray(rawStudies) ? rawStudies : []);
 
-  // If core indicators (VWAP, CVD) are still null after the first read, the chart
-  // hasn't finished loading. Retry up to 2× with increasing delays.
-  for (let retry = 0; retry < 2 && (parsed.vwap == null || parsed.cvd == null); retry++) {
+  // Stale-detection: if VWAP, CVD, and OI all exactly match the previous TF's
+  // reads, the indicators haven't recomputed yet — three-way exact match across
+  // TFs is statistically near-zero in a live market.
+  const isStale = (p, c) => p && c &&
+    p.vwap != null && c.vwap === p.vwap &&
+    p.cvd  != null && c.cvd  === p.cvd  &&
+    p.oi   != null && c.oi   === p.oi;
+
+  // Retry up to 2× with increasing delays if core indicators are null or stale.
+  for (let retry = 0; retry < 2 &&
+       (parsed.vwap == null || parsed.cvd == null || isStale(prevTF, parsed));
+       retry++) {
     await new Promise(r => setTimeout(r, 1500 + retry * 1000));
     rawStudies = await cdpEval(client, STUDY_VALUES_EXPR) || [];
     parsed     = parseStudies(Array.isArray(rawStudies) ? rawStudies : []);
+  }
+  if (isStale(prevTF, parsed)) {
+    console.warn(`[mtf-analyze] TF ${tf} indicators match prior TF after retries — possible stale read`);
   }
 
   let macd = parsed.macdFromChart ?? null;
@@ -727,10 +755,10 @@ async function runMTFAnalysis() {
     //   4H:  60 closes for MACD (26 EMA + signal + buffer)
     //   1H/30M: indicator values only
     const tfs = {};
-    tfs['720'] = await fetchTF(client, '720', 30);
-    tfs['240'] = await fetchTF(client, '240', 60);
-    tfs['60']  = await fetchTF(client, '60',  0);
-    tfs['30']  = await fetchTF(client, '30',  0);
+    tfs['720'] = await fetchTF(client, '720', 30, null);
+    tfs['240'] = await fetchTF(client, '240', 60, tfs['720']);
+    tfs['60']  = await fetchTF(client, '60',  0,  tfs['240']);
+    tfs['30']  = await fetchTF(client, '30',  0,  tfs['60']);
 
     const currentOI = tfs['30'].oi;
     const oiDelta   = (prevOI != null && currentOI != null) ? currentOI - prevOI : null;

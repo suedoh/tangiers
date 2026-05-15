@@ -1995,7 +1995,20 @@ async function main() {
     if (userTF && userTF !== CANONICAL_TF) {
       log(`Chart TF: switching ${userTF} → ${CANONICAL_TF} for canonical VRVP/study read`);
       await cdpEval(client, buildSetTFExpr(CANONICAL_TF));
-      await new Promise(r => setTimeout(r, 1500)); // allow indicators to recompute
+      // Poll resolution() until confirmed instead of a fixed 1500ms sleep.
+      // Pre-fix: `VWAP: null` lines in trigger-check.log indicate the chart was
+      // mid-recompute when reads fired. See refactors/btc-cdp-tf-race-audit.md.
+      const tfDeadline = Date.now() + 5000;
+      let tfConfirmed = false;
+      while (Date.now() < tfDeadline) {
+        await new Promise(r => setTimeout(r, 300));
+        const current = await cdpEval(client, GET_TF_EXPR).catch(() => null);
+        if (current != null && String(current) === String(CANONICAL_TF)) { tfConfirmed = true; break; }
+      }
+      if (!tfConfirmed) {
+        log(`Chart TF: ${CANONICAL_TF} did not confirm within 5s — adding 800ms safety pause`);
+        await new Promise(r => setTimeout(r, 800));
+      }
     }
 
     // 3. Get VRVP data — PRIMARY TRIGGER SOURCE (now on 30M)
