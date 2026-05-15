@@ -6,45 +6,9 @@ Outstanding tasks for the Ace Trading System. Items are grouped by urgency and d
 
 ## Active — do these now or soon
 
-### Activate Phase 2 (when ready)
+### ✅ Phase 2 (`!took`/`!exit`) ACTIVATED 2026-05-15
 
-Phase 2 (`!took` / `!exit` execution tracking) is fully implemented but behind early-return guards. Activate it when `!trades` consistently shows 10+ entries with `outcome` populated and `confirmed: true` on most of them.
-
-**Steps:**
-1. Open `scripts/discord-bot.js`
-2. Find `handleTook()` — remove the "Phase 2 not yet active" early-return block (2–3 lines)
-3. Do the same in `handleExit()`
-4. Open `scripts/weekly-report.js`
-5. Find `// ── Phase 2 stub: your execution track ──` in `analyse()` — uncomment the `myTrack` lines
-6. Replace the `executionLines` stub in `formatReport()` with real `myTrack` data
-
-**Context:** See `BACKTESTING.md` Phase 2 section and `docs/performance-tracking.md` for full details.
-
----
-
-### Phase 2 data validation checklist
-
-Before activating Phase 2, verify these in `trades.json` (run `!trades` in Discord or read the file directly):
-
-- [ ] At least 10 entries exist
-- [ ] `confirmed: true` on 50–75% of entries
-- [ ] `confirmedAt` is hours after `firedAt` (not seconds — seconds = confirmation too loose)
-- [ ] `outcome` is populated on closed trades (`null` on open is correct)
-- [ ] `pnlR` values match the R:R ratios in the signal (TP2 should equal `rr2`)
-- [ ] `closedAt` times are realistic (hours to days, not minutes, not 29 days)
-- [ ] Manually verify one trade: find `firedAt` on TradingView 30M chart, confirm outcome matches what price did
-
----
-
-### Per-Bar CVD Confirmation (Phase 3)
-
-Currently `checkConfirmation()` checks CVD at the current poll time, not at the moment the 30M confirmation bar closed. Directionally correct ~85% of the time but introduces noise.
-
-**Steps (from `BACKTESTING.md`):**
-1. In `trigger-check.js` `main()`: append `{ ts: Date.now(), cvd: indicators.cvd }` to `state._cvdHistory` (cap at 200 entries)
-2. In `checkConfirmation()`: for each confirmation bar, find the closest `_cvdHistory` entry by timestamp and use that CVD reading instead of `indicators.cvd`
-
-**Effort:** ~1–2 hours.
+Done. Use `!took <id>` after a signal, `!exit tp1|tp2|tp3|stop|manual <price>` on close. Weekly report now shows your execution track vs system. See [refactors/2026-05-15-btc-took-exit-activation.md](refactors/2026-05-15-btc-took-exit-activation.md).
 
 ---
 

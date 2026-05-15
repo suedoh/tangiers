@@ -183,19 +183,16 @@ function analyse(trades, days) {
   const avgWinHours  = winTimes.length  ? winTimes.reduce((a,b)=>a+b,0)  / winTimes.length  : null;
   const avgLossHours = lossTimes.length ? lossTimes.reduce((a,b)=>a+b,0) / lossTimes.length : null;
 
-  // ── Phase 2 stub: your execution track ──────────────────────────────────────
-  // Reads my-trades.json once it exists. All values are null until !took / !exit
-  // are activated (remove the early-return guards in discord-bot.js handleTook/handleExit).
-  // TODO (Phase 2): uncomment and wire into formatReport()
-  //
-  // const MY_TRADES_FILE = path.join(ROOT, 'my-trades.json');
-  // function readMyTrades() { try { return JSON.parse(fs.readFileSync(MY_TRADES_FILE,'utf8')); } catch { return []; } }
-  // const myTrades = readMyTrades();
-  // const myWindow = myTrades.filter(t => new Date(t.tookAt).getTime() >= cutoff);
-  // const myClosed = myWindow.filter(t => t.outcome !== null);
-  // const myTrack  = calcTrack(myClosed);
-  // const selectivity = allWindow > 0 ? myWindow.length / allWindow : null; // % of signals you took
-  // return { ..., myTrack, selectivity };
+  // ── Phase 2: your execution track ──────────────────────────────────────────
+  // Reads my-trades.json (BTC entries only). Activated 2026-05-15.
+  const MY_TRADES_FILE = path.join(ROOT, 'my-trades.json');
+  let myTrades = [];
+  try { myTrades = JSON.parse(fs.readFileSync(MY_TRADES_FILE, 'utf8')); } catch {}
+  const myBtc       = myTrades.filter(t => t.instrument === 'BTC');
+  const myWindow    = myBtc.filter(t => t.tookAt && new Date(t.tookAt).getTime() >= cutoff);
+  const myClosed    = myWindow.filter(t => t.outcome != null);
+  const myTrack     = calcTrack(myClosed);
+  const selectivity = confirmedTotal > 0 ? myWindow.length / confirmedTotal : null;
 
   return {
     days,
@@ -207,6 +204,7 @@ function analyse(trades, days) {
     byLevel, best, worst, criteriaStats,
     streak, streakType,
     avgHoursToClose, avgWinHours, avgLossHours,
+    myTrack, selectivity, myOpen: myWindow.length - myClosed.length,
   };
 }
 
@@ -298,14 +296,27 @@ function formatReport(s) {
         : `⚠️ Confirmation filter not adding value this week — review entry criteria`)
     : '';
 
-  // ── Phase 2 execution stub ──
-  // Replace this block once !took / !exit are activated in discord-bot.js.
-  // When my-trades.json has data, uncomment the myTrack/selectivity lines in analyse()
-  // and replace this stub with real numbers.
-  const executionLines = [
-    `*Phase 2 not yet active — use \`!took <id>\` and \`!exit\` to track your entries.*`,
-    `*Once active: your win rate vs system win rate, selectivity %, and R comparison will appear here.*`,
-  ].join('\n');
+  // ── Phase 2 execution track ──
+  const { myTrack: my, selectivity, myOpen } = s;
+  let executionLines;
+  if (!my || my.count === 0) {
+    if (s.myOpen && s.myOpen > 0) {
+      executionLines = `*${s.myOpen} open entry(ies) logged — no closes yet. Use \`!exit tp1|tp2|tp3|stop|manual <price>\` to close and populate stats.*`;
+    } else {
+      executionLines = `*No entries logged this period. Use \`!took <id>\` after a signal to start tracking.*`;
+    }
+  } else {
+    const selPct = selectivity != null ? `${Math.round(selectivity * 100)}%` : '—';
+    const diff   = (my.winRate != null && conf.winRate != null) ? (my.winRate - conf.winRate) * 100 : null;
+    const diffStr = diff != null ? (diff >= 0 ? `+${diff.toFixed(1)}pp` : `${diff.toFixed(1)}pp`) : '—';
+    const rDiff   = (my.avgR != null && conf.avgR != null) ? (my.avgR - conf.avgR) : null;
+    const rDiffStr = rDiff != null ? (rDiff >= 0 ? `+${rDiff.toFixed(2)}R` : `${rDiff.toFixed(2)}R`) : '—';
+    executionLines = [
+      `You took: ${my.count} closed | ${myOpen} open | Selectivity: ${selPct} of confirmed signals`,
+      `Your wr: ${my.winRate != null ? Math.round(my.winRate*100)+'%' : '—'} (${my.wins}W/${my.losses}L) | vs system confirmed: ${diffStr}`,
+      `Your avg R: ${fmt(my.avgR)} | vs system: ${rDiffStr} | Total R: ${fmt(my.totalR)}`,
+    ].join('\n');
+  }
 
   const noDataNote = all.count === 0
     ? '\n⚠️ No closed trades yet — outcomes populate automatically each poll cycle.'
