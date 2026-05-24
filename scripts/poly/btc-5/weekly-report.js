@@ -29,11 +29,11 @@ function log(msg) { console.log(`[${new Date().toISOString()}] [poly-btc-5-repor
 
 function shouldRun() {
   if (FORCE) return true;
-  const now    = new Date();
-  const day    = now.getUTCDay();
-  const hour   = now.getUTCHours();
-  const minute = now.getUTCMinutes();
-  return day === 1 && hour === 9 && minute < 5;
+  // Gate on day-of-week only; trust cron for the hour. macOS cron interprets
+  // its schedule field in local time, so a UTC-hour gate inside the script
+  // silently dropped three weeks of reports (2026-05-04, 05-11, 05-18) when
+  // the cron fired at 13:00 UTC (= 09:00 ET) but this gate demanded UTC 09:00.
+  return new Date().getUTCDay() === 1;
 }
 
 async function readTrades() {

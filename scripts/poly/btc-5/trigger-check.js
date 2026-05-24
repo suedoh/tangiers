@@ -247,6 +247,28 @@ function evaluate({ price, vwap, vrvp, oiCurrent, cvd5m, cvdPrev, ohlcv1m, ohlcv
   return { score, direction, factors, upScore, downScore };
 }
 
+// ─── Backtest log line ────────────────────────────────────────────────────────
+//
+// One compact line per resolved signal, posted to #poly-btc-5-backtest at the
+// moment outcome resolves. Designed to be greppable + skimmable on mobile.
+// Only directional factors that fired in the predicted direction are listed.
+function formatBacktestLine(ev) {
+  const f = ev.factors || {};
+  const dir = ev.prediction;
+  const tags = [];
+  if (f.cvdDir === dir)    tags.push(f.cvdScore === 2 ? 'CVD²' : 'CVD');
+  if (f.vwapDir === dir)   tags.push('VWAP');
+  if (f.structDir === dir) tags.push('1H');
+  if (f.cleanAir)          tags.push('Clean');
+  if (f.goodSession)       tags.push('Session');
+
+  const time   = new Date(ev.barOpen).toISOString().slice(11, 16); // HH:MM
+  const emoji  = ev.correct ? '✅' : '❌';
+  const score  = `${ev.score}/6`;
+  const price  = ev.price ? `$${Math.round(ev.price).toLocaleString()}` : '';
+  return `${emoji} \`${time} UTC\` · **${dir}** ${score} · ${price} · ${tags.join('+')}`;
+}
+
 // ─── Discord embed ────────────────────────────────────────────────────────────
 
 function calcProbability(upScore, downScore) {
@@ -360,8 +382,9 @@ async function main() {
 
       if (pending.length > 0) {
         log(`Resolving ${pending.length} unresolved signaled bar(s) via Binance`);
-        const botToken  = process.env.DISCORD_BOT_TOKEN;
-        const channelId = process.env.POLY_BTC_5_SIGNALS_CHANNEL_ID;
+        const botToken     = process.env.DISCORD_BOT_TOKEN;
+        const channelId    = process.env.POLY_BTC_5_SIGNALS_CHANNEL_ID;
+        const backtestHook = process.env.POLY_BTC_5_BACKTEST_WEBHOOK;
         let writeMutated = false;
 
         // Cap per-run work; remaining bars will resolve on next cycle.
@@ -396,6 +419,17 @@ async function main() {
               } else {
                 log(`Reaction ${emoji} failed for signal ${sigMsg.id}`);
               }
+            }
+          }
+
+          // Per-signal backtest log line — fire-and-forget; failures don't
+          // block the outcome write.
+          if (backtestHook) {
+            try {
+              await postWebhook(backtestHook, ev.correct ? 'long' : 'short',
+                formatBacktestLine(ev), 'Poly BTC-5 • Backtest');
+            } catch (e) {
+              log(`Backtest post failed for ${ev.barOpen}: ${e.message}`);
             }
           }
         }
