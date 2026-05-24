@@ -19,6 +19,7 @@ This folder is the durable decision record for Tangiers. Every significant bug f
 
 | File | What | Date |
 |---|---|---|
+| [2026-05-24-poly-btc-5-entry-price-tracking.md](2026-05-24-poly-btc-5-entry-price-tracking.md) | Audit Tier A1: capture Polymarket entry bid/ask/mid/spread per signal at fire time via new `scripts/lib/polymarket.js`; backtest line + summary now show realized $-EV (≥30 signals required). Per-bar deterministic slug replaces broken search discovery | 2026-05-24 |
 | [2026-05-24-poly-btc-5-label-fixes.md](2026-05-24-poly-btc-5-label-fixes.md) | Ships Tier 1 fixes from the poly label audit: Binance-based outcome resolution (no TV race), all-orphan resolver, age-based message pruning, snowflake decoder fix, JSON + Discord backfill (13 wrong labels, 22 wrong emojis, 45 new emojis) | 2026-05-24 |
 | [2026-05-24-poly-btc-5-label-audit.md](2026-05-24-poly-btc-5-label-audit.md) | Audit: 6.4% of poly-btc-5 signaled bars carry wrong or missing labels (3.2% wrong via TV race, 3.3% orphans, plus 100%-broken snowflake decoder in backfill). Quant verdict: no feature optimization until labels fixed | 2026-05-24 |
 | [2026-05-24-btc-level-dedupe-all-sites.md](2026-05-24-btc-level-dedupe-all-sites.md) | Extracted VRVP same-type dedupe helper, called from all 4 state-insertion sites (was only on `markAlerted`). Fixed 25 accumulated duplicate level entries that were firing 2–6 invalidation messages per sweep | 2026-05-24 |

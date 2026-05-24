@@ -31,6 +31,7 @@ const {
 } = require('../../lib/cdp');
 const { postWebhook, addReaction } = require('../../lib/discord');
 const { btcDirection5m }            = require('../../lib/binance');
+const { fetchMarketTokens, fetchOrderBook, slugForBar } = require('../../lib/polymarket');
 
 loadEnv();
 
@@ -266,7 +267,17 @@ function formatBacktestLine(ev) {
   const emoji  = ev.correct ? '✅' : '❌';
   const score  = `${ev.score}/6`;
   const price  = ev.price ? `$${Math.round(ev.price).toLocaleString()}` : '';
-  return `${emoji} \`${time} UTC\` · **${dir}** ${score} · ${price} · ${tags.join('+')}`;
+
+  // Realized $ result when we have an entry ask: paid ask, received $1 on win,
+  // $0 on loss. Positive = profit, negative = loss. Skip when entry missing.
+  let evNote = '';
+  if (ev.entryAsk != null) {
+    const pnl = ev.correct ? (1 - ev.entryAsk) : -ev.entryAsk;
+    const sign = pnl >= 0 ? '+' : '';
+    evNote = ` · entry ${ev.entryAsk.toFixed(2)} → ${sign}${pnl.toFixed(2)}`;
+  }
+
+  return `${emoji} \`${time} UTC\` · **${dir}** ${score} · ${price}${evNote} · ${tags.join('+')}`;
 }
 
 // ─── Discord embed ────────────────────────────────────────────────────────────
@@ -276,7 +287,7 @@ function calcProbability(upScore, downScore) {
   return Math.min(88, 50 + netEdge * 9);
 }
 
-function buildEmbed(result, price, barOpenTs, marketUrl) {
+function buildEmbed(result, price, barOpenTs, marketUrl, entry) {
   const { score, direction, factors, upScore, downScore } = result;
   const isUp  = direction === 'UP';
   const arrow = isUp ? '↑' : '↓';
@@ -291,6 +302,13 @@ function buildEmbed(result, price, barOpenTs, marketUrl) {
     ? `${factors.cvdDir === direction ? '✅' : '❌'} CVD: ${factors.cvdStrong ? '1M momentum + CVD trend' : 'partial'} ${factors.cvdDir === 'UP' ? 'bullish' : 'bearish'} (+${factors.cvdScore})`
     : `❌ CVD: no clear trend`;
 
+  // Polymarket entry-price line. Skipped when entry capture failed (book
+  // unreachable). The ask is what we'd pay to enter; spread > ~500bps means
+  // execution will eat most of the directional edge.
+  const entryLine = entry?.entryAsk != null
+    ? `**Entry:** ${entry.entryBid.toFixed(2)} / ${entry.entryAsk.toFixed(2)} (mid ${entry.entryMid.toFixed(2)}, spread ${entry.entrySpreadBps}bps)`
+    : null;
+
   const lines = [
     `${emoji} **BTC ${direction} ${arrow} — ${prob}% probability**`,
     `Bar: ${barLabel} · Score: ${score}/6 · Tier: ${tier}`,
@@ -303,6 +321,7 @@ function buildEmbed(result, price, barOpenTs, marketUrl) {
     ``,
     `**Price:** $${price.toFixed(2)}   [Market →](${marketUrl})`,
   ];
+  if (entryLine) lines.push(entryLine);
 
   return lines.join('\n');
 }
@@ -507,17 +526,62 @@ async function main() {
       },
       upScore:         result.upScore,
       downScore:       result.downScore,
+      // Polymarket entry context (null when score < 5 or CLOB unreachable).
+      // Captures the bid/ask we'd actually trade at, so summary.js can compute
+      // realized $-EV instead of just win rate (audit Tier A1, 2026-05-24).
+      entryBid:        null,
+      entryAsk:        null,
+      entryMid:        null,
+      entrySpreadBps:  null,
+      entryDepthAsk:   null,
+      entryTokenId:    null,
+      entryMarketSlug: null,
+      bookTs:          null,
       discordMessageId: null,
       outcome:         null,
       correct:         null,
       closedAt:        null,
     };
+
+    // ── Polymarket entry-price capture (signal bars only) ─────────────────────
+    let entryMarketUrl = null;
+    if (score >= 5) {
+      const slug = slugForBar(new Date(currentBar).getTime());
+      try {
+        const tokens = await fetchMarketTokens(slug);
+        if (tokens) {
+          const tokenId = direction === 'UP' ? tokens.upTokenId : tokens.downTokenId;
+          const book    = await fetchOrderBook(tokenId);
+          if (book) {
+            evalEntry.entryBid        = book.bid;
+            evalEntry.entryAsk        = book.ask;
+            evalEntry.entryMid        = book.mid;
+            evalEntry.entrySpreadBps  = book.spreadBps;
+            evalEntry.entryDepthAsk   = book.depthAsk;
+            evalEntry.entryTokenId    = tokenId;
+            evalEntry.entryMarketSlug = slug;
+            evalEntry.bookTs          = book.ts;
+            entryMarketUrl = `https://polymarket.com/event/${slug}`;
+            log(`Entry book: ${direction} bid=${book.bid} ask=${book.ask} mid=${book.mid} spread=${book.spreadBps}bps`);
+          } else {
+            log(`Polymarket book unavailable for slug ${slug}`);
+          }
+        } else {
+          log(`Polymarket tokens not found for slug ${slug} (market may not be open yet)`);
+        }
+      } catch (e) {
+        log(`Polymarket lookup error: ${e.message}`);
+      }
+    }
+
     trades.push(evalEntry);
     writeTrades(trades);
 
     // ── Signal alert ──────────────────────────────────────────────────────────
     if (score >= 5 && SIGNALS_HOOK) {
-      const embed  = buildEmbed(result, price, currentBar, marketUrl);
+      // Prefer the bar-specific market URL we just resolved; fall back to the
+      // (often stale) cached one only when book capture failed.
+      const embed  = buildEmbed(result, price, currentBar, entryMarketUrl || marketUrl, evalEntry);
       const footer = `POLY BTC-5 • ${SYMBOL} • ${new Date().toUTCString().slice(5, 25)} UTC`;
       const type   = direction === 'UP' ? 'long' : 'short';
 

@@ -105,6 +105,20 @@ function computeSummary({ days = 7 } = {}) {
   const br   = brier(cohort);
   const ec   = ece(cohort);
 
+  // $-EV cohort: signals that captured a Polymarket entry ask at fire time.
+  // Pre-2026-05-24 signals don't have this (A1 ships forward-only). Need ≥30
+  // for the metric to be more than anecdote.
+  const evCohort = cohort.filter(t => typeof t.entryAsk === 'number');
+  let evStats = null;
+  if (evCohort.length >= 30) {
+    const meanAsk = evCohort.reduce((s, t) => s + t.entryAsk, 0) / evCohort.length;
+    const pnls    = evCohort.map(t => t.correct ? (1 - t.entryAsk) : -t.entryAsk);
+    const meanPnl = pnls.reduce((a, b) => a + b, 0) / pnls.length;
+    const totPnl  = pnls.reduce((a, b) => a + b, 0);
+    const meanSpread = evCohort.reduce((s, t) => s + (t.entrySpreadBps || 0), 0) / evCohort.length;
+    evStats = { n: evCohort.length, meanAsk, meanPnl, totPnl, meanSpread };
+  }
+
   // Direction split
   const upTrades   = cohort.filter(t => t.prediction === 'UP');
   const downTrades = cohort.filter(t => t.prediction === 'DOWN');
@@ -125,6 +139,12 @@ function computeSummary({ days = 7 } = {}) {
   lines.push('');
   lines.push(`**Signals:** ${cohort.length}  |  **Win rate:** ${fmtCI(wins, cohort.length)} (Wilson 95%)`);
   lines.push(`**Brier:** ${br.toFixed(3)}  |  **ECE:** ${(ec * 100).toFixed(1)}pp  (lower is better for both)`);
+  if (evStats) {
+    const sign = evStats.meanPnl >= 0 ? '+' : '';
+    lines.push(`**$-EV/signal:** ${sign}$${evStats.meanPnl.toFixed(3)}  |  **Total P&L:** ${evStats.totPnl >= 0 ? '+' : ''}$${evStats.totPnl.toFixed(2)} over ${evStats.n} signals  |  Mean ask ${evStats.meanAsk.toFixed(2)}, spread ${evStats.meanSpread.toFixed(0)}bps`);
+  } else if (evCohort.length > 0) {
+    lines.push(`*$-EV: ${evCohort.length} signals captured entry — need 30+ before showing*`);
+  }
   lines.push('');
 
   lines.push('**Direction**');

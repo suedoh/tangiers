@@ -52,7 +52,15 @@ function formatBacktestLine(ev) {
   const emoji  = ev.correct ? '✅' : '❌';
   const score  = `${ev.score}/6`;
   const price  = ev.price ? `$${Math.round(ev.price).toLocaleString()}` : '';
-  return `${emoji} \`${time} UTC\` · **${dir}** ${score} · ${price} · ${tags.join('+')}`;
+
+  let evNote = '';
+  if (ev.entryAsk != null) {
+    const pnl = ev.correct ? (1 - ev.entryAsk) : -ev.entryAsk;
+    const sign = pnl >= 0 ? '+' : '';
+    evNote = ` · entry ${ev.entryAsk.toFixed(2)} → ${sign}${pnl.toFixed(2)}`;
+  }
+
+  return `${emoji} \`${time} UTC\` · **${dir}** ${score} · ${price}${evNote} · ${tags.join('+')}`;
 }
 
 async function main() {
