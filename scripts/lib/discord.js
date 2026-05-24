@@ -147,6 +147,18 @@ async function addReaction(botToken, channelId, messageId, emoji) {
 }
 
 /**
+ * Remove the bot's own emoji reaction from a message. 204 or 404 both count as
+ * success (404 = it wasn't there in the first place).
+ */
+async function removeOwnReaction(botToken, channelId, messageId, emoji) {
+  const { status } = await _discordApi(
+    botToken, 'DELETE',
+    `/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}/@me`
+  );
+  return status === 204 || status === 404;
+}
+
+/**
  * Fetch messages from a channel (newest first).
  * @param {string} botToken
  * @param {string} channelId
@@ -164,4 +176,4 @@ async function getChannelMessages(botToken, channelId, { limit = 100, before } =
   try { return JSON.parse(body); } catch { return []; }
 }
 
-module.exports = { postWebhook, postRaw, addReaction, getChannelMessages };
+module.exports = { postWebhook, postRaw, addReaction, removeOwnReaction, getChannelMessages };

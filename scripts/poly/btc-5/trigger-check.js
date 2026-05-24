@@ -30,6 +30,7 @@ const {
   getStudyValues, getOHLCV, cdpEval, sleep,
 } = require('../../lib/cdp');
 const { postWebhook, addReaction } = require('../../lib/discord');
+const { btcDirection5m }            = require('../../lib/binance');
 
 loadEnv();
 
@@ -339,45 +340,71 @@ async function main() {
       }
     }
 
-    client = await cdpConnect('BTC');
-    await setSymbol(client, SYMBOL);
+    // ── Outcome resolution (Binance REST — ground truth) ────────────────────
+    //
+    // Why Binance and not TradingView OHLCV: TV CDP reads can race against
+    // chart tick refresh and return the wrong bar (audit 2026-05-24 found
+    // 3.2% label disagreements). Binance Futures klines are authoritative
+    // for a closed 5-min bar and work even when the TV chart is offline or
+    // backgrounded.
+    //
+    // We resolve ALL signaled bars with outcome=null whose barOpen is
+    // ≥ 6 minutes old (one full 5-min bar plus a 60s grace for the kline
+    // to publish). Single-prev-bar logic created orphans when crons skipped.
+    {
+      const trades  = readTrades();
+      const nowMs   = Date.now();
+      const minAge  = 6 * 60 * 1000;
+      const pending = trades.filter(t => t.signaled && !t.outcome
+        && (nowMs - new Date(t.barOpen).getTime()) >= minAge);
 
-    // ── Outcome check (previous bar) ─────────────────────────────────────────
-    const trades   = readTrades();
-    const prevEval = trades.find(t => t.barOpen === prevBar && !t.outcome);
-
-    if (prevEval) {
-      await setTimeframe(client, '5');
-      await waitForPrice(client);
-      const ohlcvCheck       = await getOHLCV(client, 3);
-      const prevCompletedBar = ohlcvCheck[ohlcvCheck.length - 2];
-      if (prevCompletedBar && prevCompletedBar.close != null) {
-        prevEval.outcome  = prevCompletedBar.close >= prevCompletedBar.open ? 'UP' : 'DOWN';
-        prevEval.correct  = prevEval.prediction === prevEval.outcome;
-        prevEval.closedAt = new Date().toISOString();
-        writeTrades(trades);
-        log(`Outcome for ${prevBar}: ${prevEval.outcome} (${prevEval.correct ? 'CORRECT ✓' : 'WRONG ✗'}) predicted=${prevEval.prediction}`);
-
-        // Post ✅/❌ reaction to the Discord signal message for this bar
+      if (pending.length > 0) {
+        log(`Resolving ${pending.length} unresolved signaled bar(s) via Binance`);
         const botToken  = process.env.DISCORD_BOT_TOKEN;
         const channelId = process.env.POLY_BTC_5_SIGNALS_CHANNEL_ID;
-        if (prevEval.signaled && botToken && channelId) {
-          const msgs   = state._signal_messages || [];
-          const sigMsg = msgs.find(m => m.barOpen === prevBar);
-          if (sigMsg?.id && !sigMsg.reacted) {
-            const emoji = prevEval.correct ? '✅' : '❌';
-            const ok    = await addReaction(botToken, channelId, sigMsg.id, emoji);
-            if (ok) {
-              sigMsg.reacted = true;
-              writeState(state);
-              log(`Reaction ${emoji} posted to signal ${sigMsg.id}`);
-            } else {
-              log(`Reaction ${emoji} failed for signal ${sigMsg.id}`);
+        let writeMutated = false;
+
+        // Cap per-run work; remaining bars will resolve on next cycle.
+        for (const ev of pending.slice(0, 20)) {
+          let truth;
+          try {
+            truth = await btcDirection5m(new Date(ev.barOpen).getTime());
+          } catch (e) {
+            log(`Binance lookup failed for ${ev.barOpen}: ${e.message}`);
+            continue;
+          }
+          if (!truth) {
+            log(`Bar ${ev.barOpen} not yet available on Binance — will retry next run`);
+            continue;
+          }
+          ev.outcome  = truth;
+          ev.correct  = ev.prediction === truth;
+          ev.closedAt = new Date().toISOString();
+          writeMutated = true;
+          log(`Outcome for ${ev.barOpen}: ${truth} (${ev.correct ? 'CORRECT ✓' : 'WRONG ✗'}) predicted=${ev.prediction}`);
+
+          if (botToken && channelId) {
+            const msgs   = state._signal_messages || [];
+            const sigMsg = msgs.find(m => m.barOpen === ev.barOpen);
+            if (sigMsg?.id && !sigMsg.reacted) {
+              const emoji = ev.correct ? '✅' : '❌';
+              const ok    = await addReaction(botToken, channelId, sigMsg.id, emoji);
+              if (ok) {
+                sigMsg.reacted = true;
+                writeState(state);
+                log(`Reaction ${emoji} posted to signal ${sigMsg.id}`);
+              } else {
+                log(`Reaction ${emoji} failed for signal ${sigMsg.id}`);
+              }
             }
           }
         }
+        if (writeMutated) writeTrades(trades);
       }
     }
+
+    client = await cdpConnect('BTC');
+    await setSymbol(client, SYMBOL);
 
     // ── 5M sweep (primary) ────────────────────────────────────────────────────
     await setTimeframe(client, '5');
@@ -469,7 +496,12 @@ async function main() {
 
         if (!Array.isArray(state._signal_messages)) state._signal_messages = [];
         state._signal_messages.push({ id: msgId, firedAt: Date.now(), barOpen: currentBar, analyzed: false, reacted: false });
-        if (state._signal_messages.length > 20) state._signal_messages = state._signal_messages.slice(-20);
+        // Prune by age, not count. Outcome resolution needs the message ID to
+        // post the ✅/❌ reaction; a 20-message cap dropped IDs for older bars
+        // before they were resolved. 14 days >> max resolution latency.
+        const MSG_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+        const cutoff = Date.now() - MSG_TTL_MS;
+        state._signal_messages = state._signal_messages.filter(m => (m.firedAt ?? 0) >= cutoff);
         writeState(state);
       }
     } else {
