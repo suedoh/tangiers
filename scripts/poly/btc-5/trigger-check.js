@@ -46,53 +46,18 @@ if (process.env.PRIMARY === 'false') {
 
 const SYMBOL        = 'BINANCE:BTCUSDT.P';
 const SIGNALS_HOOK  = process.env.POLY_BTC_5_SIGNALS_WEBHOOK;
-const SEED_URL      = process.env.POLY_BTC_5_MARKET_URL || 'https://polymarket.com';
 const STATE_FILE    = path.join(ROOT, '.poly-btc-5-state.json');
 const TRADES_FILE   = path.join(ROOT, 'poly-btc-5-trades.json');
 
-const CDP_ERROR_COOLDOWN_MS    = 2 * 60 * 60 * 1000;
-const MARKET_CHECK_INTERVAL_MS = 60 * 60 * 1000;
-const MARKET_ALERT_COOLDOWN_MS = 4 * 60 * 60 * 1000;
+const CDP_ERROR_COOLDOWN_MS = 2 * 60 * 60 * 1000;
 
 function log(msg) { console.log(`[${new Date().toISOString()}] [poly-btc-5] ${msg}`); }
 
-// ─── Market URL discovery (Gamma API) ────────────────────────────────────────
-
-function _httpsGet(url) {
-  const https = require('https');
-  return new Promise((resolve, reject) => {
-    const req = https.get(url, { headers: { 'User-Agent': 'ace-trading-bot/1.0' } }, res => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => resolve({ status: res.statusCode, body: data }));
-    });
-    req.on('error', reject);
-    req.setTimeout(6000, () => { req.destroy(); reject(new Error('timeout')); });
-  });
-}
-
-async function discoverActiveMarket() {
-  try {
-    const { status, body } = await _httpsGet(
-      'https://gamma-api.polymarket.com/markets?search=btc+5+minutes&active=true&closed=false&limit=20'
-    );
-    if (status !== 200) return null;
-    const data = JSON.parse(body);
-    const arr  = Array.isArray(data) ? data : (data.markets || data.results || []);
-    const match = arr.find(m => {
-      const slug     = (m.slug || '').toLowerCase();
-      const question = (m.question || '').toLowerCase();
-      const isBtc    = slug.includes('btc') || question.includes('btc') || question.includes('bitcoin');
-      const is5m     = slug.includes('5m') || slug.includes('5-m') ||
-                       question.includes('5 min') || question.includes('5min');
-      return isBtc && is5m;
-    });
-    if (!match || !match.slug) return null;
-    return `https://polymarket.com/event/${match.slug}`;
-  } catch {
-    return null;
-  }
-}
+// Retired 2026-05-24: search-based Gamma discovery and the hourly check were
+// silently returning null (state._marketUrl stayed null). Replaced by
+// deterministic `slugForBar(barOpenMs)` from scripts/lib/polymarket.js —
+// Polymarket creates exactly one market per 5-min bar with a predictable
+// slug. See refactors/2026-05-24-poly-btc-5-entry-price-tracking.md.
 
 function readState()    { try { return JSON.parse(fs.readFileSync(STATE_FILE,  'utf8')); } catch { return {}; } }
 function writeState(s) {
@@ -354,32 +319,9 @@ async function main() {
   let client;
 
   try {
-    // ── Market URL resolution (hourly) ────────────────────────────────────────
-    let marketUrl = state._marketUrl || SEED_URL;
-    if (Date.now() - (state._lastMarketCheck || 0) > MARKET_CHECK_INTERVAL_MS) {
-      const discovered = await discoverActiveMarket();
-      if (discovered) {
-        const changed = discovered !== marketUrl;
-        marketUrl              = discovered;
-        state._marketUrl       = discovered;
-        state._lastMarketCheck = Date.now();
-        writeState(state);
-        if (changed && SIGNALS_HOOK) {
-          await postWebhook(SIGNALS_HOOK, 'info',
-            `📎 **Poly BTC-5 — Market URL auto-updated**\n${discovered}`,
-            'Poly BTC-5 • Market Discovery');
-        }
-      } else {
-        const lastAlert = state._lastMarketAlertAt || 0;
-        if (Date.now() - lastAlert > MARKET_ALERT_COOLDOWN_MS && SIGNALS_HOOK) {
-          state._lastMarketAlertAt = Date.now();
-          writeState(state);
-          await postWebhook(SIGNALS_HOOK, 'error',
-            `⚠️ **Poly BTC-5 — Market URL check failed**\nAuto-discovery unavailable. If the market link is stale, update \`POLY_BTC_5_MARKET_URL\` in \`.env\`.`,
-            'Poly BTC-5 • Market Warning');
-        }
-      }
-    }
+    // Market URL is derived deterministically from the bar timestamp; no
+    // discovery, no caching, no alert layer. See the slugForBar import.
+    const marketUrl = `https://polymarket.com/event/${slugForBar(new Date(currentBar).getTime())}`;
 
     // ── Outcome resolution (Binance REST — ground truth) ────────────────────
     //
@@ -544,7 +486,6 @@ async function main() {
     };
 
     // ── Polymarket entry-price capture (signal bars only) ─────────────────────
-    let entryMarketUrl = null;
     if (score >= 5) {
       const slug = slugForBar(new Date(currentBar).getTime());
       try {
@@ -561,7 +502,6 @@ async function main() {
             evalEntry.entryTokenId    = tokenId;
             evalEntry.entryMarketSlug = slug;
             evalEntry.bookTs          = book.ts;
-            entryMarketUrl = `https://polymarket.com/event/${slug}`;
             log(`Entry book: ${direction} bid=${book.bid} ask=${book.ask} mid=${book.mid} spread=${book.spreadBps}bps`);
           } else {
             log(`Polymarket book unavailable for slug ${slug}`);
@@ -581,7 +521,7 @@ async function main() {
     if (score >= 5 && SIGNALS_HOOK) {
       // Prefer the bar-specific market URL we just resolved; fall back to the
       // (often stale) cached one only when book capture failed.
-      const embed  = buildEmbed(result, price, currentBar, entryMarketUrl || marketUrl, evalEntry);
+      const embed  = buildEmbed(result, price, currentBar, marketUrl, evalEntry);
       const footer = `POLY BTC-5 • ${SYMBOL} • ${new Date().toUTCString().slice(5, 25)} UTC`;
       const type   = direction === 'UP' ? 'long' : 'short';
 

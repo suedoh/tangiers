@@ -34,6 +34,39 @@ Review and update to:
 
 ---
 
+## Poly BTC-5 — quant follow-ups (audit 2026-05-24)
+
+See `refactors/2026-05-24-poly-btc-5-label-audit.md` and `2026-05-24-poly-btc-5-entry-price-tracking.md` for the underlying audit. Items below are gated on **≥150 entry-tracked OOS signals AND label-error rate <0.5%** before any code/threshold changes ship.
+
+### Comparator baselines in `!summary` (Tier A3)
+Add `naive_up`, `naive_continuation`, and `random` baselines to `scripts/poly/btc-5/summary.js` over the same window. Reports edge as `(strategy_wr − baseline_wr)`, not just absolute wr. Without comparators, 65% wr in a trending tape might be just 5pp above always-buy-UP.
+
+### Day-clustered bootstrap CIs (Tier B1)
+Wilson CI assumes independence. Two signals on the same UTC day share regime / news / vol. Switch the headline CI to day-clustered bootstrap once n ≥ 150. Expect intervals to widen ~30%.
+
+### BH-FDR correction when ranking buckets (Tier B2)
+`!summary` flags "best hour" by raw wr. With 13 hour-buckets tested, pure noise produces one ~85% bucket by chance. Apply Benjamini–Hochberg before claiming significance.
+
+### Fisher's exact test for score gradient (Tier B3)
+Currently 5/6 wr ≈ 65%, 6/6 wr ≈ 79%. Looks real but n=33 on 6/6. Run Fisher on the 2×2; if p < 0.05 survives FDR, 6/6 deserves higher sizing.
+
+### Pre-registered interaction tests (Tier B4)
+Pick 4–6 plausible interactions (direction × hour, score × cleanAir, CVD-strong × VWAP) and test only those. Skip exhaustive search — fishing finds noise.
+
+### Regime decomposition (Tier C1)
+Bucket signals by realized 1h vol (low/mid/high) and BTC weekly trend. A single 65% wr likely hides 80% in trend / 50% in chop. Both a finding and a sizing rule.
+
+### Calibration refit (Tier C2)
+Current `prob = 50 + 9·|edge|` is a guess; ECE is currently ~13pp. After OOS window, refit on actual data (isotonic or Platt). Only matters if sizing by probability.
+
+### Chainlink-vs-Binance oracle drift monitor (OQ1)
+Sample Chainlink BTC/USD reference at bar boundaries; log alongside Binance Futures bar close. After 500+ signals, quantify systematic bias and decide whether to switch outcome source.
+
+### Polymarket execution layer (eventually)
+Forward-only entry-price tracking is the foundation. Eventual paid-execution work would add: auth (Polymarket private key), order placement, fill tracking, real P&L (not paper). Not on the near roadmap.
+
+---
+
 ## Backlog — good improvements, not urgent
 
 ### Funding rate integration into probability score

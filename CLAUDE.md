@@ -18,7 +18,7 @@ Tangiers is the **Ace Trading System** — an automated multi-instrument trade s
 | Signal threshold | Zone proximity | Zone proximity + quality score | Score ≥ 5/6 |
 | TF sweep | 12H→4H→1H→30M | 4H→1H→30M | 5M primary → 1M momentum → 1H structure |
 | Session gating | None | Skips NYMEX close 5–6pm ET | Active 08–21 UTC (scored, not gated) |
-| Extra intelligence | — | AIS tanker monitoring + RSS news | Polymarket Gamma API market URL auto-discovery |
+| Extra intelligence | — | AIS tanker monitoring + RSS news | Polymarket CLOB entry-price capture per signal (bid/ask/spread for $-EV) |
 | Sentiment | None | Claude Haiku 4.5 (on trigger) | None |
 | Discord channels | `#btc-*` | `#bz!-*` | `#poly-btc-5*` |
 
@@ -44,7 +44,8 @@ Tangiers is the **Ace Trading System** — an automated multi-instrument trade s
 │   │   ├── discord.js                  ← shared webhook poster (6 alert types)
 │   │   ├── zones.js                    ← classifyZones(), nearestZones(), session cooldowns
 │   │   ├── sentiment.js               ← Claude Haiku 4.5 sentiment classifier (BZ only)
-│   │   └── polymarket.js              ← Gamma API market URL discovery (Poly BTC-5)
+│   │   ├── polymarket.js              ← Polymarket CLOB: per-bar slug, token resolution, order-book reads
+│   │   └── binance.js                 ← Binance Futures REST: ground-truth klines for Poly outcome resolution
 │   │
 │   ├── bz/                             ← BZ! (Brent Crude) instrument
 │   │   ├── trigger-check.js            ← 1-min session-aware zone poller
@@ -94,7 +95,7 @@ Tangiers is the **Ace Trading System** — an automated multi-instrument trade s
 ├── .bz-trigger-state.json              ← BZ: zone cooldowns, signal IDs
 ├── .bz-news-state.json                 ← BZ news monitor: seen articles, AIS history/baseline
 ├── .discord-bot-state.json            ← Discord bot: last-seen message IDs per channel
-├── .poly-btc-5-state.json             ← Poly BTC-5: last bar fired, CVD prev, OI prev, market URL cache
+├── .poly-btc-5-state.json             ← Poly BTC-5: last bar fired, CVD prev, OI prev, signal message IDs (14d TTL)
 └── tradingview-mcp/                    ← TradingView MCP server (Claude Desktop only, git submodule)
 ```
 
@@ -140,18 +141,19 @@ Tangiers is the **Ace Trading System** — an automated multi-instrument trade s
 ### `scripts/poly/btc-5/trigger-check.js` — Poly BTC-5 Bar Scorer
 - Runs **1 minute after each 5-min bar open** (`1,6,11,16,21,26,31,36,41,46,51,56 * * * *`)
 - Deduplicates by bar boundary: only fires once per `floor(minute/5)*5` bar
-- **TF sweep**: 5M (VWAP, CVD, OI, VRVP) → 1M (3 closes for micro momentum) → 1H (3 bars for structure)
-- **6 factors scored** (each worth 1 point, CVD up to 2):
+- **TF sweep**: 5M (VWAP, CVD, VRVP) → 1M (3 closes for micro momentum) → 1H (3 bars for structure)
+- **5 factors scored** (CVD worth 0–2 pts, others 1pt; max score = 6):
   - CVD: 1M momentum + CVD delta vs prior state (2pts if both agree, 1pt if momentum only)
-  - VWAP: price >0.15% above/below VWAP
-  - 1H structure: HH/HL or LL/LH over last 3 hourly bars
-  - OI rising: current OI > prior bar OI
+  - VWAP: price >0.15% above/below VWAP (directional)
+  - 1H structure: HH/HL or LL/LH over last 3 hourly bars (directional)
   - Clean air: price not within 0.3% of VRVP POC/VAH/VAL
   - Session: 08–21 UTC
-- **Signal fires if score ≥ 5/6** — posts to `#poly-btc-5` with direction, probability, factor breakdown
-- **Outcome check**: on each run reads prior bar's close vs open — updates `poly-btc-5-trades.json`
-- **Market URL auto-discovery**: once per hour queries Polymarket Gamma API; posts Discord alert on URL change or discovery failure; cached in `state._marketUrl`
-- State: `.poly-btc-5-state.json` (CVD prev, OI prev, last bar fired, last market check, market URL)
+  - (OI factor removed 2026-05-12 — −17.2pp lift on backtest)
+- **Signal fires if score ≥ 5/6** — posts to `#poly-btc-5` with direction, probability, factor breakdown, **Polymarket entry book line** (bid/ask/spread)
+- **Outcome resolution**: every cycle, loops over ALL signaled bars with `outcome=null` and `barOpen` ≥ 6 minutes old; resolves via Binance Futures REST (`/fapi/v1/klines`). No TV dependency for outcomes — works when chart is offline. Self-heals cron skips.
+- **Polymarket entry capture**: at signal-fire, fetches CLOB order book for the bet side using `slugForBar(barOpen)` (deterministic — `btc-updown-5m-<epochSec>`). Writes `entryBid/entryAsk/entryMid/entrySpreadBps` to the trade record. Null on CLOB outage; signal still fires.
+- **Backtest log**: posts a one-line entry to `#poly-btc-5-backtest` at outcome resolution — `✅ 10:05 UTC · UP 5/6 · $76,934 · entry 0.32 → +0.68 · CVD+VWAP+1H+Clean+Session`
+- State: `.poly-btc-5-state.json` (CVD prev, last bar fired, signal message IDs with 14d TTL)
 - Lock: `'poly-btc-5'`
 
 ### `scripts/poly/btc-5/analyze.js` — Poly BTC-5 On-Demand
@@ -271,9 +273,10 @@ Poly BTC-5 uses the same TradingView tab as BTC but sweeps three timeframes.
 | `BZ_DISCORD_WAR_REPORT_WEBHOOK` | `#bz!-weekly-war-report` | BZ Sunday war report |
 | `POLY_BTC_5_SIGNALS_WEBHOOK` | `#poly-btc-5` | Poly BTC-5 signals, analysis, errors |
 | `POLY_BTC_5_REPORT_WEBHOOK` | `#poly-btc-5-report` | Poly BTC-5 Monday weekly report |
+| `POLY_BTC_5_BACKTEST_WEBHOOK` | `#poly-btc-5-backtest` | Per-signal outcome lines (one per resolved signal) |
 
 ### Bot Channel IDs (set in `.env`)
-`DISCORD_CHANNEL_ID`, `BZ_DISCORD_SIGNALS_CHANNEL_ID`, `BZ_DISCORD_WAR_REPORT_CHANNEL_ID`, `BZ_DISCORD_BACKTEST_CHANNEL_ID`, `POLY_BTC_5_SIGNALS_CHANNEL_ID`, `POLY_BTC_5_REPORT_CHANNEL_ID`, `BTC_EW_SIGNALS_CHANNEL_ID`, `BTC_EW_BACKTEST_CHANNEL_ID`, `BTC_EW_REPORT_CHANNEL_ID`
+`DISCORD_CHANNEL_ID`, `BZ_DISCORD_SIGNALS_CHANNEL_ID`, `BZ_DISCORD_WAR_REPORT_CHANNEL_ID`, `BZ_DISCORD_BACKTEST_CHANNEL_ID`, `POLY_BTC_5_SIGNALS_CHANNEL_ID`, `POLY_BTC_5_REPORT_CHANNEL_ID`, `POLY_BTC_5_BACKTEST_CHANNEL_ID`, `BTC_EW_SIGNALS_CHANNEL_ID`, `BTC_EW_BACKTEST_CHANNEL_ID`, `BTC_EW_REPORT_CHANNEL_ID`
 
 ### BTC Elliott Wave (EW) channels
 | Variable | Channel | Used by |
@@ -293,10 +296,12 @@ full operator guide.
 | Variable | Purpose |
 |---|---|
 | `POLY_BTC_5_SIGNALS_WEBHOOK` | Webhook for signals + analysis + errors |
-| `POLY_BTC_5_REPORT_WEBHOOK` | Webhook for weekly report |
-| `POLY_BTC_5_SIGNALS_CHANNEL_ID` | Channel for bot polling |
+| `POLY_BTC_5_REPORT_WEBHOOK` | Webhook for Monday weekly report |
+| `POLY_BTC_5_BACKTEST_WEBHOOK` | Webhook for per-signal outcome lines |
+| `POLY_BTC_5_SIGNALS_CHANNEL_ID` | Channel for bot polling (`!analyze`, `!summary`, `!trades`, `!status`) |
 | `POLY_BTC_5_REPORT_CHANNEL_ID` | Channel for bot polling |
-| `POLY_BTC_5_MARKET_URL` | Seed URL for Polymarket market (auto-updated by Gamma API) |
+| `POLY_BTC_5_BACKTEST_CHANNEL_ID` | Channel for bot polling |
+| `POLY_BTC_5_MARKET_URL` | Deprecated seed (kept for backwards compat). Live market URLs are now built per-bar from `slugForBar(barOpenMs)` — `btc-updown-5m-<epochSec>`. |
 
 ### Alert Types (6)
 `approaching` (yellow) · `long` (green) · `short` (red) · `info` (blue) · `error` (dark red) · `catalyst` (orange, BZ only)
@@ -346,7 +351,7 @@ pm2 restart bz-news-watch
 | `.bz-trigger-state.json` | BZ trigger/analyze + discord-bot | Zone cooldowns, CDP error cooldown, signal message IDs |
 | `.bz-news-state.json` | bz-news-watch | Seen article IDs, AIS vessel history, AIS baseline |
 | `.discord-bot-state.json` | discord-bot | Last-seen Discord message ID per channel |
-| `.poly-btc-5-state.json` | poly/btc-5/trigger-check.js | Last bar fired, CVD prev, OI prev, market URL cache, last market check timestamp |
+| `.poly-btc-5-state.json` | poly/btc-5/trigger-check.js | Last bar fired, CVD prev, signal message IDs (14d TTL) |
 | `trades.json` | BTC pipeline | All BTC signals with lifecycle fields |
 | `bz-trades.json` | BZ pipeline | All BZ! signals with lifecycle fields |
 | `poly-btc-5-trades.json` | Poly BTC-5 pipeline | All 5-min bar evaluations: score, direction, signaled, outcome, correct |
