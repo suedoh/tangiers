@@ -4,10 +4,12 @@
  * handlers/poly-btc-5.js — Polymarket BTC 5-min signal commands
  *
  * Commands:
- *   !analyze  — on-demand 5M→1M→1H sweep, post current bar score
- *   !trades   — list last 20 evaluations (prediction, score, outcome, correct)
- *   !report   — generate weekly performance report immediately
- *   !status   — one-line current score for the live bar
+ *   !analyze       — on-demand 5M→1M→1H sweep, post current bar score
+ *   !trades        — list last 20 evaluations (prediction, score, outcome, correct)
+ *   !report        — generate weekly performance report immediately
+ *   !status        — one-line current score for the live bar
+ *   !summary [N]   — stats summary over last N days (default 7): wr + Wilson CI,
+ *                    Brier, ECE, direction/score/hour buckets
  */
 
 const fs   = require('fs');
@@ -18,6 +20,7 @@ const { postWebhook } = require('../../lib/discord');
 
 const ANALYZE_SCRIPT = path.join(ROOT, 'scripts', 'poly', 'btc-5', 'analyze.js');
 const REPORT_SCRIPT  = path.join(ROOT, 'scripts', 'poly', 'btc-5', 'weekly-report.js');
+const { computeSummary } = require('../../poly/btc-5/summary');
 const TRADES_FILE    = path.join(ROOT, 'poly-btc-5-trades.json');
 const SIGNALS_HOOK   = process.env.POLY_BTC_5_SIGNALS_WEBHOOK;
 const NODE           = process.execPath;
@@ -32,8 +35,23 @@ async function handle(message, api) {
   if (/^!trades\b/i.test(text))  { await handleTrades(user, api);  return true; }
   if (/^!report\b/i.test(text))  { await handleReport(user, api);  return true; }
   if (/^!status\b/i.test(text))  { await handleStatus(user, api);  return true; }
+  if (/^!summary\b/i.test(text)) { await handleSummary(text, api); return true; }
 
   return false;
+}
+
+// ─── !summary ────────────────────────────────────────────────────────────────
+
+async function handleSummary(text, api) {
+  // Parse optional N-days argument: `!summary 14`. Default 7. Cap at 365.
+  const m = text.match(/^!summary\s+(\d+)/i);
+  const days = m ? Math.min(365, Math.max(1, parseInt(m[1], 10))) : 7;
+  try {
+    const out = computeSummary({ days });
+    await api.sendMessage(out);
+  } catch (e) {
+    await api.sendMessage(`❌ **Summary failed:** ${e.message}`);
+  }
 }
 
 // ─── !analyze ────────────────────────────────────────────────────────────────
