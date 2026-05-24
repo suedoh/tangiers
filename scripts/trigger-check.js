@@ -1149,22 +1149,26 @@ function isCoolingDown(zoneKey, incomingDir, cvd) {
   } catch { return false; }
 }
 
-function markAlerted(levelKey, direction, trigger) {
-  const state = readState();
-
-  // Deduplicate: VRVP levels shift slightly each poll as the visible range changes.
-  // Remove any existing entry of the same levelType within 0.5% of this mid price
-  // before writing the new one — prevents accumulation of near-duplicate entries
-  // that would all fire as separate invalidation messages when price sweeps through.
-  const dedupeThreshold = trigger.mid * 0.005;
+// Deduplicate near-adjacent same-type levels in state. VRVP levels shift
+// slightly each poll as the visible range changes; without this we'd accumulate
+// multiple near-identical entries (e.g. two VAL @ 77842 + 77855) that all fire
+// separate invalidation pairs when price sweeps through. MUST be called before
+// every `state[levelKey] = {...}` write, not just markAlerted's.
+function dedupeNearbyLevels(state, keepKey, levelType, levelMid) {
+  const threshold = levelMid * 0.005;
   for (const [k, v] of Object.entries(state)) {
-    if (k.startsWith('_') || k === levelKey) continue;
-    if (typeof v !== 'object' || v.levelType !== trigger.type) continue;
-    if (Math.abs((v.levelMid ?? 0) - trigger.mid) <= dedupeThreshold) {
-      log(`Deduplicating state: removing ${k} (${v.levelType} @${v.levelMid}) → replaced by ${levelKey}`);
+    if (k.startsWith('_') || k === keepKey) continue;
+    if (typeof v !== 'object' || v.levelType !== levelType) continue;
+    if (Math.abs((v.levelMid ?? 0) - levelMid) <= threshold) {
+      log(`Deduplicating state: removing ${k} (${v.levelType} @${v.levelMid}) → replaced by ${keepKey}`);
       delete state[k];
     }
   }
+}
+
+function markAlerted(levelKey, direction, trigger) {
+  const state = readState();
+  dedupeNearbyLevels(state, levelKey, trigger.type, trigger.mid);
 
   state[levelKey] = {
     ts:        Date.now(),
@@ -1277,6 +1281,7 @@ function checkInvalidations(price, indicators) {
 
       const watchKey = `_watch_${key}`;
       state[watchKey] = { ts: Date.now(), direction, levelType, levelMid, levelLo, levelHi, expires: Date.now() + 4 * 60 * 60 * 1000 };
+      dedupeNearbyLevels(state, key, levelType, levelMid);
       state[key] = { ts: Date.now() - (COOLDOWN_MS - 30 * 60 * 1000), direction, levelType, levelMid, levelLo, levelHi };
       log(`Level ${key} → stop hunt | re-entry alert fired | cooldown reset to 30m`);
     }
@@ -1439,6 +1444,7 @@ function checkReclaimWatch(price, indicators) {
 
       delete state[key];
       const levelKey = key.replace('_watch_', '');
+      dedupeNearbyLevels(state, levelKey, levelType, levelMid);
       state[levelKey] = { ts: Date.now(), direction, levelType, levelMid, levelLo, levelHi };
     } else {
       log(`Reclaim watch ${key}: price near level but order flow not confirming (CVD aligned: ${cvdAligned}, OI aligned: ${oiAligned})`);
@@ -1546,6 +1552,7 @@ function checkPendingConfirmation(price, indicators) {
     // Remove pending state, refresh the level's cooldown timestamp
     delete state[key];
     const levelKey = key.replace('_pending_', '');
+    dedupeNearbyLevels(state, levelKey, levelType, levelMid);
     state[levelKey] = { ts: Date.now(), direction, levelType, levelMid, levelLo: low, levelHi: high };
 
     results.push({ msg, direction });

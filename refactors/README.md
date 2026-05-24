@@ -19,6 +19,7 @@ This folder is the durable decision record for Tangiers. Every significant bug f
 
 | File | What | Date |
 |---|---|---|
+| [2026-05-24-btc-level-dedupe-all-sites.md](2026-05-24-btc-level-dedupe-all-sites.md) | Extracted VRVP same-type dedupe helper, called from all 4 state-insertion sites (was only on `markAlerted`). Fixed 25 accumulated duplicate level entries that were firing 2–6 invalidation messages per sweep | 2026-05-24 |
 | [2026-05-15-btc-position-sizing-and-drawdown-mode.md](2026-05-15-btc-position-sizing-and-drawdown-mode.md) | Adds $ position sizing math + drawdown-mode (0.5×) size suggestion to BTC alerts. Alert-only; observation-safe | 2026-05-15 |
 | [2026-05-15-btc-canonical-tf-enforcement.md](2026-05-15-btc-canonical-tf-enforcement.md) | BTC trigger-check now switches to 30M before VRVP/study read; restores user TF on exit. Fixes ~44% of historical polls reading from wrong TF | 2026-05-15 |
 | [2026-05-15-btc-took-exit-activation.md](2026-05-15-btc-took-exit-activation.md) | Activated BTC `!took` / `!exit` Phase 2 execution tracking | 2026-05-15 |
