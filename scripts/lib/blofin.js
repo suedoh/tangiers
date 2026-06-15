@@ -119,6 +119,32 @@ async function getPositions(instId) {
   return _request('GET', '/api/v1/account/positions', { query: { instId } });
 }
 
+// ─── Demo-only writes ────────────────────────────────────────────────────────
+
+/**
+ * Top up the demo account with virtual funds. Demo env only.
+ *
+ * NOTE — BloFin's docs JSON example for this endpoint OMITS the `accountType`
+ * field. The server requires it. When omitted, the error message is
+ * `Parameter toAccount cannot be empty` (code 152001), which is misleading
+ * — `toAccount` is not a real field on this endpoint, just a constant error
+ * string the server returns when the required account-routing param is
+ * missing. The right field name is `accountType`, matching the balance
+ * endpoint's query param.
+ *
+ * `adjustType=0` adds; `=1` subtracts.
+ */
+async function applyDemoMoney(currency, amount, { accountType = 'futures', adjustType = 0 } = {}) {
+  if (!isDemo()) throw new Error('applyDemoMoney refuses to run when BLOFIN_ENV=prod');
+  return _request('POST', '/api/v1/asset/demo-apply-money', {
+    body: {
+      accountType,
+      adjustType,
+      demoApplyMoney: [{ currency, amountStr: String(amount) }],
+    },
+  });
+}
+
 module.exports = {
   baseUrl,
   isDemo,
@@ -126,4 +152,5 @@ module.exports = {
   getInstruments,
   getBalance,
   getPositions,
+  applyDemoMoney,
 };

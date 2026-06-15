@@ -166,3 +166,6 @@ ew-cron: ## Install all six EW cron entries (idempotent). Runs alongside `make c
 
 blofin-status: ## Phase A health check: confirms BloFin demo API + credentials work
 	@$(NODE) $(TRADING)/scripts/blofin/status.js
+
+blofin-fund: ## Top up the BloFin demo account with 10000 USDT (demo only)
+	@$(NODE) $(TRADING)/scripts/blofin/fund-demo.js
