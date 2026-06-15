@@ -44,13 +44,13 @@ async function main() {
   // 2) Private — confirms signing + creds
   console.log('[2/3] Account balance (signed)…');
   try {
-    const bal = await blofin.getBalance('futures');
-    const details = bal?.details || bal?.[0]?.details || [];
-    if (details.length === 0) {
-      console.log('  ✓ auth ok, no futures balance yet (demo accounts need POST /asset/demo-apply-money)');
+    const rows = await blofin.getBalance('futures');
+    const funded = (rows || []).filter(r => Number(r.balance) > 0);
+    if (funded.length === 0) {
+      console.log('  ✓ auth ok, no futures balance yet (top up with `make blofin-fund` or the BloFin UI)');
     } else {
-      details.forEach(d => {
-        console.log(`  ✓ ${d.currency}: equity=${fmt(d.equity)}  available=${fmt(d.available)}  margin=${fmt(d.frozen || 0)}`);
+      funded.forEach(r => {
+        console.log(`  ✓ ${r.currency}: balance=${fmt(r.balance)}  available=${fmt(r.available)}  frozen=${fmt(r.frozen)}`);
       });
     }
   } catch (e) {

@@ -25,13 +25,13 @@ function fmt(n) {
 }
 
 function printBalance(label, bal) {
-  const details = bal?.details || bal?.[0]?.details || [];
-  if (details.length === 0) {
+  const funded = (bal || []).filter(r => Number(r.balance) > 0);
+  if (funded.length === 0) {
     console.log(`  ${label}: (empty)`);
     return;
   }
-  details.forEach(d => {
-    console.log(`  ${label}: ${d.currency} equity=${fmt(d.equity)} available=${fmt(d.available)}`);
+  funded.forEach(r => {
+    console.log(`  ${label}: ${r.currency} balance=${fmt(r.balance)} available=${fmt(r.available)}`);
   });
 }
 
