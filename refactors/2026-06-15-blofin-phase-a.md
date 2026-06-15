@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-15
 **Phase:** A of [BloFin roadmap](2026-06-15-blofin-roadmap.md)
-**Status:** Shipped — pending user credential paste + `make blofin-status` confirmation
+**Status:** ✅ Closed — `make blofin-status` exits 0 on demo with all three checks passing.
 
 ## What shipped
 
@@ -30,6 +30,23 @@ Other quirks worth knowing:
 - `ACCESS-TIMESTAMP` is in **milliseconds**, not seconds
 - `requestPath` in the prehash MUST include the query string for GET
 - Response envelope is `{code, msg, data}` where `code === '0'` (string) means success
+
+## Two gotchas surfaced during validation (2026-06-15)
+
+1. **Trailing `?` on empty queries kills the signature.** When a callsite
+   passes `{ instId: undefined }`, the empty-after-filter query string
+   was leaving a bare `?` at the end of the signed path. BloFin's
+   server normalizes the path before computing its own signature, so
+   it gets a 152409 "Signature verification failed" while every other
+   request with a real query works fine. Fix at [lib/blofin.js:60](../scripts/lib/blofin.js#L60):
+   only prepend `?` when at least one param survived the filter.
+
+2. **Positions endpoint is `/api/v1/account/positions`, NOT `/api/v1/trade/positions`.**
+   The BloFin docs page (and the AI-summarized fetch) both say `/trade/positions`,
+   but that path returns 152404 "operation not supported." The actual working
+   path is `/account/positions`. This is a docs bug on BloFin's side; we got
+   the truth by trial. **If you change the path, validate with
+   `make blofin-status` — don't trust the docs alone.**
 
 ## Demo defaults
 

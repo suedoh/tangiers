@@ -53,12 +53,16 @@ function sign(method, requestPath, body, secret) {
 }
 
 function _request(method, path, { query, body, signed = true, timeoutMs = 10000 } = {}) {
-  const qs = query
-    ? '?' + Object.entries(query)
-        .filter(([, v]) => v !== undefined && v !== null)
+  // Build the query string AFTER filtering empties so a callsite passing
+  // `{ instId: undefined }` doesn't leave a trailing `?` in the signed path.
+  // BloFin's server normalizes the path before computing its own signature;
+  // a trailing `?` here gives a 152409 "Signature verification failed".
+  const parts = query
+    ? Object.entries(query)
+        .filter(([, v]) => v !== undefined && v !== null && v !== '')
         .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
-        .join('&')
-    : '';
+    : [];
+  const qs = parts.length ? '?' + parts.join('&') : '';
   const requestPath = path + qs;
   const url         = baseUrl() + requestPath;
   const bodyStr     = body ? JSON.stringify(body) : '';
