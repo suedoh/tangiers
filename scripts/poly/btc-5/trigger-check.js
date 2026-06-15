@@ -334,8 +334,10 @@ async function main() {
     // We resolve ALL signaled bars with outcome=null whose barOpen is
     // ≥ 6 minutes old (one full 5-min bar plus a 60s grace for the kline
     // to publish). Single-prev-bar logic created orphans when crons skipped.
+    // `trades` is hoisted to the try scope — downstream code appends the
+    // current bar's evaluation to the same array.
+    const trades  = readTrades();
     {
-      const trades  = readTrades();
       const nowMs   = Date.now();
       const minAge  = 6 * 60 * 1000;
       const pending = trades.filter(t => t.signaled && !t.outcome
