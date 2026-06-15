@@ -2002,17 +2002,31 @@ async function main() {
     if (userTF && userTF !== CANONICAL_TF) {
       log(`Chart TF: switching ${userTF} → ${CANONICAL_TF} for canonical VRVP/study read`);
       await cdpEval(client, buildSetTFExpr(CANONICAL_TF));
-      await new Promise(r => setTimeout(r, 1500)); // allow indicators to recompute
+      await new Promise(r => setTimeout(r, 600)); // initial settle; full readiness is polled below
     }
 
-    // 3. Get VRVP data — PRIMARY TRIGGER SOURCE (now on 30M)
-    const vrvpRaw = await cdpEval(client, VRVP_EXPR);
+    // 3. Get VRVP data — PRIMARY TRIGGER SOURCE (now on 30M).
+    // The VRVP data source becomes reachable before its histogram is rebuilt
+    // after a TF switch (and after the chart's own internal redraws between
+    // polls). A single fixed-delay read was missing the populated histogram
+    // ~75% of the time. Poll until rows appear, with a hard timeout.
+    let vrvpRaw = null;
+    let vrvpAttempts = 0;
+    const VRVP_MAX_ATTEMPTS = 8;
+    const VRVP_POLL_MS = 500;
+    for (let i = 0; i < VRVP_MAX_ATTEMPTS; i++) {
+      vrvpAttempts = i + 1;
+      vrvpRaw = await cdpEval(client, VRVP_EXPR);
+      if (vrvpRaw && !vrvpRaw.error && vrvpRaw.rows?.length) break;
+      if (i < VRVP_MAX_ATTEMPTS - 1) await new Promise(r => setTimeout(r, VRVP_POLL_MS));
+    }
+
     studies = [];
     studies._vrvpRaw = vrvpRaw;
     if (!vrvpRaw || vrvpRaw.error || !vrvpRaw.rows?.length) {
-      log(`VRVP unavailable: ${vrvpRaw?.error || 'no data'} — check Visible Range Volume Profile is on chart`);
+      log(`VRVP unavailable after ${vrvpAttempts} attempts: ${vrvpRaw?.error || 'no data'} — check Visible Range Volume Profile is on chart`);
     } else {
-      log(`VRVP: ${vrvpRaw.rows.length} histogram rows | POC ~$${Math.round(vrvpRaw.poc ?? 0).toLocaleString()} | VAH ~$${Math.round(vrvpRaw.vah ?? 0).toLocaleString()} | VAL ~$${Math.round(vrvpRaw.val ?? 0).toLocaleString()}`);
+      log(`VRVP ready in ${vrvpAttempts} attempt${vrvpAttempts > 1 ? 's' : ''}: ${vrvpRaw.rows.length} histogram rows | POC ~$${Math.round(vrvpRaw.poc ?? 0).toLocaleString()} | VAH ~$${Math.round(vrvpRaw.vah ?? 0).toLocaleString()} | VAL ~$${Math.round(vrvpRaw.val ?? 0).toLocaleString()}`);
     }
 
     // 4. Get study values (CVD, OI, Session VP, VWAP)

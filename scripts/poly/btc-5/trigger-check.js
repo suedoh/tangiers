@@ -436,8 +436,12 @@ async function main() {
 
     const ohlcv1h = await getOHLCV(client, 4);
 
-    // Restore to 5M
-    await setTimeframe(client, '5');
+    // Intentionally do NOT restore the chart to 5M here. This script shares the
+    // BINANCE:BTCUSDT.P tab with the BTC trigger-check (canonical 30M) and the
+    // user; yanking the chart back to 5M every 5 minutes was overwriting both
+    // the BTC trigger's 30M state and any manual TF the user had selected.
+    // Leaving the chart on 1H is harmless: each script asserts the TF it needs
+    // at the top of its own run.
 
     log(`price=$${price?.toFixed(2)} vwap=${vwap?.toFixed(2)} oi=${oiCurrent?.toFixed(0)} cvd=${cvd5m?.toFixed(0)} cvdPrev=${cvdPrev?.toFixed(0)}`);
 
