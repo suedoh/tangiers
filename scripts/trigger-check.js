@@ -2194,6 +2194,18 @@ async function main() {
           && indicators.vwap != null
           && price >= indicators.vwap;
 
+        // Gate: structural — suppress ALL C-type shorts at VAH regardless of flow.
+        // 2026-06-15 investigation found short|C|VAH realized 39W/39L over n=78
+        // (50.0% wr) — a pure coin flip on top of the existing CVD/VWAP gate.
+        // Mean R per trade is +0.67 only because of asymmetric payouts; dropping
+        // the cell lifts overall short wr from 62.3% to ~67.5% and removes the
+        // largest single source of variance in the short book. Same-zone longs
+        // at VAH realize 78%, so the bias is direction-specific to this zone.
+        // See refactors/2026-06-15-short-c-vah-gate.md.
+        const isCVAHShort = setup.direction === 'short'
+          && setup.setupType.startsWith('C')
+          && trigger.type === 'VAH';
+
         // Daily-R kill switch: if today's realized R has dropped below the
         // floor, suppress new signals until UTC midnight. Stop hunts and bad
         // streaks compound otherwise.
@@ -2214,6 +2226,24 @@ async function main() {
           ].join('\n'));
           markAlerted(levelKey, setup.direction, trigger);
           triggered = true;
+        } else if (isCVAHShort) {
+          log(`C-VAH-short gate: suppressing ${levelKey} — structural 50% wr cell (n=78 baseline)`);
+          const levelStr = `$${Math.round(trigger.lo).toLocaleString()}–$${Math.round(trigger.hi).toLocaleString()}`;
+          notify('info', [
+            `📊 ${trigger.type} APPROACHED — SIGNAL SUPPRESSED | BTCUSDT.P`,
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+            `**Price** $${Math.round(price).toLocaleString()} | **${trigger.type}** ${levelStr}`,
+            ``,
+            `**C-SHORT AT VAH SUPPRESSED — STRUCTURAL COIN FLIP**`,
+            `Historical 50.0% wr over n=78 (2026-06-15 audit). Fade-the-VAH C-shorts get steamrolled in bull-leaning tape regardless of flow. Same-zone longs realize 78%.`,
+            ``,
+            `**FLIP TRIGGER**  Upgrade to B-tier (more confluence) or wait for HVN`,
+            ``,
+            `**CRITERIA**`,
+            setup.criteria.map(c => `${c.pass === true ? '✅' : c.pass === false ? '❌' : '⚠️'} ${c.label}`).join('\n'),
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+          ].join('\n'));
+          markAlerted(levelKey, setup.direction, trigger);
         } else if (isCShortCoinFlip) {
           log(`C-short gate: suppressing ${levelKey} — CVD ${Math.round(indicators.cvd ?? 0)} near-zero + price above VWAP $${Math.round(indicators.vwap)}`);
           const levelStr = `$${Math.round(trigger.lo).toLocaleString()}–$${Math.round(trigger.hi).toLocaleString()}`;
