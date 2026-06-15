@@ -169,3 +169,9 @@ blofin-status: ## Phase A health check: confirms BloFin demo API + credentials w
 
 blofin-fund: ## Top up the BloFin demo account with 10000 USDT (demo only)
 	@$(NODE) $(TRADING)/scripts/blofin/fund-demo.js
+
+blofin-setup: ## One-time: set futures account to one-way mode + 10× isolated leverage for BTC-USDT
+	@$(NODE) $(TRADING)/scripts/blofin/setup-account.js
+
+blofin-probe: ## Phase B.2 health check: place limit far below market, verify, cancel, verify clean
+	@$(NODE) $(TRADING)/scripts/blofin/order-probe.js

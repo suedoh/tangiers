@@ -119,6 +119,88 @@ async function getPositions(instId) {
   return _request('GET', '/api/v1/account/positions', { query: { instId } });
 }
 
+// ─── Account configuration (one-time) ────────────────────────────────────────
+
+/**
+ * Switch the futures account between one-way and hedge mode.
+ * User-facing values are 'net' / 'hedge'; BloFin's actual enum is
+ * `net_mode` / `long_short_mode` (caller doesn't need to care).
+ * Tangiers uses 'net' — never opens opposing positions.
+ *
+ * Path note: docs claim `/api/v1/trade/position-mode` (returns 152404).
+ * Real path is `/api/v1/account/set-position-mode`.
+ */
+async function setPositionMode(positionMode) {
+  const map = { net: 'net_mode', hedge: 'long_short_mode' };
+  if (!(positionMode in map)) {
+    throw new Error(`positionMode must be 'net' or 'hedge', got: ${positionMode}`);
+  }
+  return _request('POST', '/api/v1/account/set-position-mode', {
+    body: { positionMode: map[positionMode] },
+  });
+}
+
+/**
+ * Set leverage for a specific instrument under a margin mode.
+ * marginMode: 'isolated' bounds loss per trade; 'cross' shares margin.
+ * Tangiers prefers isolated for bounded per-trade loss.
+ *
+ * Path: BloFin docs claim `/api/v1/trade/leverage` but the live path
+ * follows the same `/api/v1/account/set-leverage` pattern as position-mode.
+ */
+async function setLeverage(instId, leverage, marginMode = 'isolated') {
+  return _request('POST', '/api/v1/account/set-leverage', {
+    body: { instId, leverage: String(leverage), marginMode },
+  });
+}
+
+// ─── Order placement / management ────────────────────────────────────────────
+
+/**
+ * Generic order placement. Pass-through for all BloFin order fields.
+ * For market entries with attached protection, include
+ * `stopLossTriggerPrice` and `takeProfitTriggerPrice` (BloFin attaches
+ * these directly to the entry — no separate stop order needed for SL).
+ *
+ * Returns `{ orderId, clientOrdId }`.
+ */
+async function placeOrder({
+  instId,
+  side,                // 'buy' | 'sell'
+  orderType,           // 'market' | 'limit'
+  size,                // string or number, in contracts (minSize 0.1 for BTC-USDT)
+  price,               // required for limit orders
+  marginMode = 'isolated',
+  positionSide = 'net',
+  reduceOnly,
+  stopLossTriggerPrice,
+  takeProfitTriggerPrice,
+  clientOrdId,
+}) {
+  const body = {
+    instId, marginMode, side, positionSide, orderType,
+    size: String(size),
+  };
+  if (price !== undefined)                  body.price = String(price);
+  if (reduceOnly !== undefined)             body.reduceOnly = reduceOnly;
+  if (stopLossTriggerPrice !== undefined)   body.stopLossTriggerPrice = String(stopLossTriggerPrice);
+  if (takeProfitTriggerPrice !== undefined) body.takeProfitTriggerPrice = String(takeProfitTriggerPrice);
+  if (clientOrdId !== undefined)            body.clientOrdId = clientOrdId;
+  return _request('POST', '/api/v1/trade/order', { body });
+}
+
+/** Cancel a single order by id. */
+async function cancelOrder(orderId, instId) {
+  const body = { orderId };
+  if (instId) body.instId = instId;
+  return _request('POST', '/api/v1/trade/cancel-order', { body });
+}
+
+/** List open/pending orders. `state` and `instId` are optional filters. */
+async function getActiveOrders({ instId, orderType } = {}) {
+  return _request('GET', '/api/v1/trade/orders-pending', { query: { instId, orderType } });
+}
+
 // ─── Demo-only writes ────────────────────────────────────────────────────────
 
 /**
@@ -152,5 +234,10 @@ module.exports = {
   getInstruments,
   getBalance,
   getPositions,
+  setPositionMode,
+  setLeverage,
+  placeOrder,
+  cancelOrder,
+  getActiveOrders,
   applyDemoMoney,
 };
