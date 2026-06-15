@@ -163,3 +163,6 @@ poly-backfill-reactions-dry: ## Dry-run: show which reactions would be posted wi
 
 ew-cron: ## Install all six EW cron entries (idempotent). Runs alongside `make cron`.
 	@NODE=$(NODE) TRADING=$(TRADING) bash $(TRADING)/scripts/ew/install-cron.sh
+
+blofin-status: ## Phase A health check: confirms BloFin demo API + credentials work
+	@$(NODE) $(TRADING)/scripts/blofin/status.js
