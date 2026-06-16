@@ -152,6 +152,7 @@ Two surfaces since 2026-06-16. CDP-bound triggers stay on the host (TradingView 
 */1  * * * *                    bz/trigger-check.js          — BZ! zone poller (self-throttles off-session)
 1,6,11,16,21,26,31,36,41,46,51,56 * * * *  poly/btc-5/trigger-check.js  — Poly BTC-5 bar scorer
 5   0,4,8,12,16,20 * * *         ew/run.js                    — EW analysis 6×/day at 4H bar close +5min
+*/1  * * * *                    discord-bot/index.js         — multi-channel bot (handlers spawn CDP scripts)
 ```
 
 View installed host jobs: `crontab -l`
@@ -159,7 +160,6 @@ View installed host jobs: `crontab -l`
 ### Docker `ace-cron` (everything else — `scripts/cron/ace.crontab`)
 
 ```
-*/1  * * * *                    discord-bot/index.js         — multi-channel bot (all instruments)
 */3  * * * *                    blofin/recon-once.js         — BloFin order reconciliation
 55   * * * *                    migrate/import-trades.js     — JSON → Mongo sync hourly :55
 0    9 * * 1                    weekly-report.js             — BTC Monday 09:00 UTC → #btc-backtest

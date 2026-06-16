@@ -54,7 +54,7 @@ mcp: ## Register TradingView MCP server with Claude Desktop
 	  echo "⚠  Could not register MCP — is 'claude' CLI installed? Register manually: claude mcp add tradingview -s user -- node $(TRADING)/tradingview-mcp/src/server.js"; \
 	fi
 
-cron: ## Install host crontab entries (CDP-bound triggers only). Docker-side jobs live in scripts/cron/ace.crontab.
+cron: ## Install host crontab entries (CDP-bound — BTC trigger + Discord bot). Docker-side jobs live in scripts/cron/ace.crontab.
 	@NODEDIR=$$(dirname $(NODE)); \
 	if crontab -l 2>/dev/null | grep -q "scripts/trigger-check.js"; then \
 	  echo "✓  BTC trigger cron already installed — skipping"; \
@@ -62,6 +62,13 @@ cron: ## Install host crontab entries (CDP-bound triggers only). Docker-side job
 	  CRONLINE="*/10 * * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/trigger-check.js >> $(TRADING)/logs/trigger-check.log 2>&1"; \
 	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — BTC trigger every 10 minutes (CDP-bound — host only)"; echo "$$CRONLINE") | crontab -; \
 	  echo "✓  BTC trigger cron installed (every 10 min)"; \
+	fi; \
+	if crontab -l 2>/dev/null | grep -q "scripts/discord-bot/index.js"; then \
+	  echo "✓  Discord bot cron already installed — skipping"; \
+	else \
+	  BOTLINE="* * * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/discord-bot/index.js >> $(TRADING)/logs/discord-bot.log 2>&1"; \
+	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — Discord bot every 1 minute (CDP-bound handlers — host only)"; echo "$$BOTLINE") | crontab -; \
+	  echo "✓  Discord bot cron installed (every 1 min)"; \
 	fi; \
 	echo ""; \
 	echo "Docker-side scheduled jobs:    edit scripts/cron/ace.crontab"; \

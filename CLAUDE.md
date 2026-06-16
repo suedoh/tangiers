@@ -321,16 +321,22 @@ macOS), and **Docker `ace-cron` container** for everything else.
 */1  * * * *                                  scripts/bz/trigger-check.js TZ=ET      — BZ! zone poller (session-gated)
 1,6,11,16,21,26,31,36,41,46,51,56 * * * *    scripts/poly/btc-5/trigger-check.js   — Poly BTC-5 bar scorer
 5   0,4,8,12,16,20 * * *                     scripts/ew/run.js                      — EW analysis 6×/day
+*   * * * *                                  scripts/discord-bot/index.js           — multi-channel bot every minute (CDP-bound handlers)
 ```
 
 View installed host jobs: `crontab -l`
+
+> Discord bot stays on the host because handlers spawn `mtf-analyze.js`,
+> `bz/analyze.js`, and `poly/btc-5/analyze.js` — all CDP-bound. Originally
+> migrated to Docker on 2026-06-16, reverted same day after `!mtf` /
+> `📊 reaction` handlers errored silently. See
+> `refactors/2026-06-16-discord-bot-revert.md`.
 
 ### Docker `ace-cron` (everything else — `scripts/cron/ace.crontab`)
 
 ```
 55  * * * *                                  scripts/migrate/import-trades.js       — Mongo sync hourly :55
 */3 * * * *                                  scripts/blofin/recon-once.js           — BloFin order recon every 3 min
-*   * * * *                                  scripts/discord-bot/index.js           — multi-channel bot every minute
 0   9 * * 1                                  scripts/weekly-report.js               — BTC Monday 09:00 UTC
 0   14 * * 0                                 scripts/weekly-war-report.js           — BTC Sunday 14:00 UTC
 0   21 * * 0                                 scripts/bz/weekly-report.js            — BZ! Sunday 21:00 UTC

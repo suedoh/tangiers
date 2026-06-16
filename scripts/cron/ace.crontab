@@ -21,8 +21,10 @@
 # BloFin order reconciliation — every 3 min, heals state drift, resolves disappeared→filled/cancelled
 */3 * * * * node /app/scripts/blofin/recon-once.js >> /app/logs/blofin-recon.log 2>&1
 
-# Discord bot — polls all channels every minute for !commands and 📊 reactions
-* * * * * node /app/scripts/discord-bot/index.js >> /app/logs/discord-bot.log 2>&1
+# Discord bot — STAYS NATIVE. Lives on the host crontab because handlers spawn
+# mtf-analyze.js / bz/analyze.js / poly/btc-5/analyze.js — all CDP-bound. From
+# Docker the spawned analysis errors silently on CDP, leaving Discord stuck in
+# "Ace is typing…" with no response. See refactors/2026-06-16-discord-bot-revert.md.
 
 # BTC weekly performance report — Monday 09:00 UTC
 0 9 * * 1 node /app/scripts/weekly-report.js >> /app/logs/weekly-report.log 2>&1
