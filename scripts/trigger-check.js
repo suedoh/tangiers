@@ -28,6 +28,7 @@ const path  = require('path');
 const fs    = require('fs');
 const https = require('https');
 const { execFileSync } = require('child_process');
+const autotrade = require('./lib/blofin-autotrade');
 const { acquireLock, releaseLock } = require('./lib/lock');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -1739,6 +1740,7 @@ function logTrade(price, trigger, setup) {
   });
   writeTrades(trades);
   log(`Trade logged: ${id}`);
+  return id;
 }
 
 // ─── Bar-accurate outcome detection ──────────────────────────────────────────
@@ -2281,10 +2283,20 @@ async function main() {
           const message = formatSetupMessage(price, trigger, setup);
           notify(setup.direction, message);
           markAlerted(levelKey, setup.direction, trigger);
-          logTrade(price, trigger, setup);
+          const signalId = logTrade(price, trigger, setup);
           if (!indicators.oiTrend || indicators.oiTrend === 'flat') {
             markPending(levelKey, setup.direction, trigger, indicators);
           }
+          // Autotrade — fire-and-forget, gated by BLOFIN_AUTOTRADE=true.
+          // Errors here MUST NOT block Discord posting or trades.json.
+          autotrade.autotrade({
+            signalId, direction: setup.direction, setupType: setup.setupType,
+            entry: setup.entry, stop: setup.stop,
+            tp1: setup.tp1Price, tp2: setup.tp2Price, tp3: setup.tp3Price,
+          }).then(r => {
+            if (r.skipped) log(`Autotrade skipped: ${r.skipped}`);
+            else          log(`Autotrade placed ${r.orders?.length || 0} orders for ${signalId}`);
+          }).catch(e => log(`Autotrade error: ${e.message}`));
         }
         triggered = true;
       }

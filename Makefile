@@ -181,3 +181,6 @@ blofin-store-probe: ## Phase B.3 health check: persisted order lifecycle place �
 
 blofin-recon-once: ## One-shot reconciliation between local Mongo state and BloFin exchange truth
 	@$(NODE) $(TRADING)/scripts/blofin/recon-once.js
+
+blofin-autotrade-probe: ## Phase B.4 health check: synthetic signal → 4 orders → idempotency → cleanup (needs BLOFIN_AUTOTRADE=true)
+	@$(NODE) $(TRADING)/scripts/blofin/autotrade-probe.js
