@@ -176,7 +176,14 @@ async function resolveDisappeared({ instId } = {}) {
               updatedAt:    now(),
             } },
         );
-        out.filled.push({ orderId: order.orderId, fillPrice: avgPrice, fillSize: totalSize });
+        out.filled.push({
+          orderId:  order.orderId,
+          instId:   order.instId,
+          side:     order.side,
+          signalId: order.signalId,
+          fillPrice: avgPrice,
+          fillSize:  totalSize,
+        });
       } else {
         // No fills found — externally cancelled (or expired)
         await db.blofinOrders().updateOne(
@@ -256,6 +263,8 @@ async function reconcileOnce({ instId } = {}) {
   // Resolve any orders that landed in 'disappeared' (either this pass or
   // a prior one) so the local state catches up to fill/cancel truth.
   const resolved = await resolveDisappeared({ instId });
+  report.filled            = resolved.filled;        // full fill detail objects
+  report.cancelled         = resolved.cancelled;     // orderId list
   report.resolvedFilled    = resolved.filled.length;
   report.resolvedCancelled = resolved.cancelled.length;
   report.resolveErrors     = resolved.errors;
