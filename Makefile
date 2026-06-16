@@ -175,3 +175,9 @@ blofin-setup: ## One-time: set futures account to one-way mode + 10× isolated l
 
 blofin-probe: ## Phase B.2 health check: place limit far below market, verify, cancel, verify clean
 	@$(NODE) $(TRADING)/scripts/blofin/order-probe.js
+
+blofin-store-probe: ## Phase B.3 health check: persisted order lifecycle place → recon → cancel → recon
+	@$(NODE) $(TRADING)/scripts/blofin/store-probe.js
+
+blofin-recon-once: ## One-shot reconciliation between local Mongo state and BloFin exchange truth
+	@$(NODE) $(TRADING)/scripts/blofin/recon-once.js

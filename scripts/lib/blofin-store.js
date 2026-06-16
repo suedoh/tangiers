@@ -1,0 +1,203 @@
+'use strict';
+
+/**
+ * Persistence + reconciliation for BloFin orders.
+ *
+ * Wraps the API client so every state transition (place / cancel / fill)
+ * is written to MongoDB. The `recon` loop diffs exchange truth against
+ * local state and heals drift.
+ *
+ * State machine (intentionally narrow for Phase B.3):
+ *   live         — placed and known to exchange, on the book
+ *   cancelled    — cancelled (by us or by exchange)
+ *   filled       — fully filled
+ *   disappeared  — exchange forgot it; needs B.5 fill-history lookup to
+ *                  resolve filled-vs-cancelled-externally
+ *
+ * Every doc carries `env: 'demo'|'prod'` so a misconfigured machine
+ * cannot mix order books. The unique index is (orderId, env).
+ *
+ * Schema is stable; if it changes later, bump SCHEMA_VERSION and migrate.
+ */
+
+const blofin = require('./blofin');
+const db     = require('./db');
+
+const SCHEMA_VERSION = 1;
+
+let _indexesEnsured = false;
+async function ensureIndexes() {
+  if (_indexesEnsured) return;
+  await db.connect();
+  const col = db.blofinOrders();
+  await col.createIndex({ orderId: 1, env: 1 }, { unique: true, name: 'orderId_env_uniq' });
+  await col.createIndex({ state: 1 },                                      { name: 'state' });
+  await col.createIndex({ signalId: 1 },                                   { name: 'signalId' });
+  await col.createIndex({ instId: 1, state: 1 },                           { name: 'instId_state' });
+  _indexesEnsured = true;
+}
+
+function env() { return blofin.isDemo() ? 'demo' : 'prod'; }
+function now() { return new Date(); }
+
+// ─── Write wrappers ──────────────────────────────────────────────────────────
+
+/**
+ * Place an order and persist it. Returns the BloFin response + the
+ * Mongo document. Throws if either side fails — caller decides how to
+ * recover (re-try, alert, etc.).
+ *
+ * On signature mismatch between place-then-persist (rare but possible
+ * if the network drops between API ack and Mongo write), the order
+ * exists on the exchange but not locally — reconciliation will detect
+ * this as "exchange has order we don't know about" and create the
+ * local record retroactively. See reconcileOnce().
+ */
+async function placeAndPersist(orderArgs, { signalId } = {}) {
+  await ensureIndexes();
+  const apiRes = await blofin.placeOrder(orderArgs);
+  const orderId = apiRes?.orderId || apiRes?.[0]?.orderId;
+  if (!orderId) throw new Error('placeOrder returned no orderId: ' + JSON.stringify(apiRes));
+
+  const doc = {
+    orderId,
+    clientOrdId:    apiRes?.clientOrdId || apiRes?.[0]?.clientOrdId || null,
+    signalId:       signalId || null,
+    instId:         orderArgs.instId,
+    side:           orderArgs.side,
+    orderType:      orderArgs.orderType,
+    size:           String(orderArgs.size),
+    price:          orderArgs.price !== undefined ? String(orderArgs.price) : null,
+    state:          'live',
+    marginMode:     orderArgs.marginMode || 'isolated',
+    positionSide:   orderArgs.positionSide || 'net',
+    stopLossTriggerPrice:   orderArgs.stopLossTriggerPrice ?? null,
+    takeProfitTriggerPrice: orderArgs.takeProfitTriggerPrice ?? null,
+    env:            env(),
+    schemaVersion:  SCHEMA_VERSION,
+    createdAt:      now(),
+    updatedAt:      now(),
+    lastSyncedAt:   now(),
+    cancelledAt:    null,
+    filledAt:       null,
+  };
+  await db.blofinOrders().insertOne(doc);
+  return { apiRes, doc };
+}
+
+/**
+ * Cancel an order and update local state. Idempotent: re-cancelling a
+ * cancelled order is a local no-op (the API call still fires; BloFin
+ * returns the standard "order doesn't exist" error which we surface).
+ */
+async function cancelAndPersist(orderId, instId) {
+  await ensureIndexes();
+  const apiRes = await blofin.cancelOrder(orderId, instId);
+  await db.blofinOrders().updateOne(
+    { orderId, env: env() },
+    { $set: { state: 'cancelled', updatedAt: now(), cancelledAt: now() } },
+  );
+  return apiRes;
+}
+
+// ─── Reads ───────────────────────────────────────────────────────────────────
+
+async function listLocalOpen(instId) {
+  await ensureIndexes();
+  const filter = { env: env(), state: 'live' };
+  if (instId) filter.instId = instId;
+  return db.blofinOrders().find(filter).toArray();
+}
+
+async function getLocalByOrderId(orderId) {
+  await ensureIndexes();
+  return db.blofinOrders().findOne({ orderId, env: env() });
+}
+
+// ─── Reconciliation ──────────────────────────────────────────────────────────
+
+/**
+ * Single-pass reconciliation between local state and BloFin's active
+ * orders. Returns a summary report; mutates Mongo as needed.
+ *
+ *   1. For every local 'live' order:
+ *        - if still on exchange → bump lastSyncedAt
+ *        - if NOT on exchange   → mark 'disappeared' (B.5 will resolve
+ *                                  filled-vs-externally-cancelled via
+ *                                  fills-history lookup)
+ *   2. For every exchange-active order not in local:
+ *        - create a retroactive local record. This catches the
+ *          place-succeeded-but-Mongo-write-failed race plus any orders
+ *          placed by other clients (UI, another script).
+ */
+async function reconcileOnce({ instId } = {}) {
+  await ensureIndexes();
+  const exchangeOrders = await blofin.getActiveOrders({ instId });
+  const exchangeById   = new Map((exchangeOrders || []).map(o => [o.orderId, o]));
+
+  const localOpen = await listLocalOpen(instId);
+  const localById = new Map(localOpen.map(o => [o.orderId, o]));
+
+  const report = { matched: 0, disappeared: [], retroactive: [], errors: [] };
+
+  // Local → exchange
+  for (const local of localOpen) {
+    if (exchangeById.has(local.orderId)) {
+      await db.blofinOrders().updateOne(
+        { orderId: local.orderId, env: env() },
+        { $set: { lastSyncedAt: now() } },
+      );
+      report.matched++;
+    } else {
+      await db.blofinOrders().updateOne(
+        { orderId: local.orderId, env: env() },
+        { $set: { state: 'disappeared', updatedAt: now() } },
+      );
+      report.disappeared.push(local.orderId);
+    }
+  }
+
+  // Exchange → local (catch retroactive)
+  for (const ex of exchangeOrders || []) {
+    if (localById.has(ex.orderId)) continue;
+    try {
+      await db.blofinOrders().insertOne({
+        orderId:        ex.orderId,
+        clientOrdId:    ex.clientOrdId || null,
+        signalId:       null,
+        instId:         ex.instId,
+        side:           ex.side,
+        orderType:      ex.orderType,
+        size:           ex.size,
+        price:          ex.price ?? null,
+        state:          'live',
+        marginMode:     ex.marginMode || 'isolated',
+        positionSide:   ex.positionSide || 'net',
+        stopLossTriggerPrice:   ex.stopLossTriggerPrice ?? null,
+        takeProfitTriggerPrice: ex.takeProfitTriggerPrice ?? null,
+        env:            env(),
+        schemaVersion:  SCHEMA_VERSION,
+        createdAt:      now(),
+        updatedAt:      now(),
+        lastSyncedAt:   now(),
+        cancelledAt:    null,
+        filledAt:       null,
+        retroactive:    true,
+      });
+      report.retroactive.push(ex.orderId);
+    } catch (e) {
+      report.errors.push({ orderId: ex.orderId, error: e.message });
+    }
+  }
+
+  return report;
+}
+
+module.exports = {
+  ensureIndexes,
+  placeAndPersist,
+  cancelAndPersist,
+  listLocalOpen,
+  getLocalByOrderId,
+  reconcileOnce,
+};
