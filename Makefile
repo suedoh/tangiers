@@ -54,52 +54,22 @@ mcp: ## Register TradingView MCP server with Claude Desktop
 	  echo "⚠  Could not register MCP — is 'claude' CLI installed? Register manually: claude mcp add tradingview -s user -- node $(TRADING)/tradingview-mcp/src/server.js"; \
 	fi
 
-cron: ## Install all cron jobs: trigger-check (10m), discord-bot (1m), weekly-report, war-report (idempotent)
+cron: ## Install host crontab entries (CDP-bound triggers only). Docker-side jobs live in scripts/cron/ace.crontab.
 	@NODEDIR=$$(dirname $(NODE)); \
-	ADDED=0; \
-	if crontab -l 2>/dev/null | grep -q "trigger-check.js"; then \
-	  echo "✓  Trigger cron already installed — skipping"; \
+	if crontab -l 2>/dev/null | grep -q "scripts/trigger-check.js"; then \
+	  echo "✓  BTC trigger cron already installed — skipping"; \
 	else \
 	  CRONLINE="*/10 * * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/trigger-check.js >> $(TRADING)/logs/trigger-check.log 2>&1"; \
-	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — trigger check every 10 minutes"; echo "$$CRONLINE") | crontab -; \
-	  echo "✓  Trigger cron installed (runs every 10 minutes)"; \
-	  ADDED=1; \
+	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — BTC trigger every 10 minutes (CDP-bound — host only)"; echo "$$CRONLINE") | crontab -; \
+	  echo "✓  BTC trigger cron installed (every 10 min)"; \
 	fi; \
-	if crontab -l 2>/dev/null | grep -q "discord-bot/index.js"; then \
-	  echo "✓  Discord bot cron already installed — skipping"; \
-	else \
-	  BOTLINE="*/1 * * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/discord-bot/index.js >> $(TRADING)/logs/discord-bot.log 2>&1"; \
-	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — Discord !analyze listener every minute"; echo "$$BOTLINE") | crontab -; \
-	  echo "✓  Discord bot cron installed (runs every minute)"; \
-	fi; \
-	if crontab -l 2>/dev/null | grep -q "weekly-report.js"; then \
-	  echo "✓  Weekly report cron already installed — skipping"; \
-	else \
-	  REPORTLINE="0 9 * * 1 PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/weekly-report.js >> $(TRADING)/logs/weekly-report.log 2>&1"; \
-	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — weekly report every Monday 09:00 UTC"; echo "$$REPORTLINE") | crontab -; \
-	  echo "✓  Weekly report cron installed (runs Mondays at 09:00 UTC)"; \
-	fi; \
-	if crontab -l 2>/dev/null | grep -q "weekly-war-report.js"; then \
-	  echo "✓  War report cron already installed — skipping"; \
-	else \
-	  WARLINE="0 14 * * 0 PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/weekly-war-report.js >> $(TRADING)/logs/weekly-war-report.log 2>&1"; \
-	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — weekly war report every Sunday 14:00 UTC (09:00 EST / 10:00 EDT)"; echo "$$WARLINE") | crontab -; \
-	  echo "✓  War report cron installed (runs Sundays at 14:00 UTC)"; \
-	fi; \
-	if crontab -l 2>/dev/null | grep -q "import-trades.js"; then \
-	  echo "✓  Mongo sync cron already installed — skipping"; \
-	else \
-	  SYNCLINE="55 * * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/migrate/import-trades.js >> $(TRADING)/logs/migrate.log 2>&1"; \
-	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — sync JSON files into Mongo every hour at :55 (Phase 2 read replica)"; echo "$$SYNCLINE") | crontab -; \
-	  echo "✓  Mongo sync cron installed (runs hourly at :55 — keeps Mongo current with JSON canonical writes)"; \
-	fi; \
-	if crontab -l 2>/dev/null | grep -q "blofin/recon-once.js"; then \
-	  echo "✓  BloFin recon cron already installed — skipping"; \
-	else \
-	  RECONLINE="*/3 * * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/blofin/recon-once.js >> $(TRADING)/logs/blofin-recon.log 2>&1"; \
-	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — BloFin order/position reconciliation every 3 minutes (Phase B.5)"; echo "$$RECONLINE") | crontab -; \
-	  echo "✓  BloFin recon cron installed (runs every 3 minutes — heals state drift, resolves fills)"; \
-	fi
+	echo ""; \
+	echo "Docker-side scheduled jobs:    edit scripts/cron/ace.crontab"; \
+	echo "Apply changes:                 docker compose restart ace-cron"; \
+	echo ""; \
+	echo "NOTE: BZ + Poly + EW run.js trigger crons are installed by their own scripts:"; \
+	echo "  make ew-cron       (installs EW run.js host entry only)"; \
+	echo "  BZ + Poly triggers — see README cron section"
 
 test: ## Run trigger-check.js once and show output
 	@echo "→ Running trigger check..."

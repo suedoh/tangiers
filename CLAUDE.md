@@ -310,24 +310,41 @@ full operator guide.
 
 ## Cron Schedule
 
+Two surfaces since 2026-06-16: **host crontab** for CDP-bound triggers (they
+need TradingView Desktop on `localhost:9222`, unreachable from Docker on
+macOS), and **Docker `ace-cron` container** for everything else.
+
+### Host crontab (CDP-bound — install via `make cron` + `make ew-cron`)
+
 ```
-*/10 * * * *                                  scripts/trigger-check.js               — BTC zone trigger + outcome tracking
-*/1  * * * *                                  scripts/discord-bot/index.js           — multi-channel bot (all instruments)
+*/10 * * * *                                  scripts/trigger-check.js               — BTC zone trigger
 */1  * * * *                                  scripts/bz/trigger-check.js TZ=ET      — BZ! zone poller (session-gated)
-1,6,11,16,21,26,31,36,41,46,51,56 * * * *    scripts/poly/btc-5/trigger-check.js   — Poly BTC-5 bar scorer (1 min after bar open)
-0    9 * * 1                                  scripts/weekly-report.js               — BTC Monday 09:00 UTC
-0    9 * * 1                                  scripts/poly/btc-5/weekly-report.js   — Poly Monday 09:00 UTC
-0   14 * * 0                                  scripts/weekly-war-report.js           — BTC Sunday 14:00 UTC
-0   21 * * 0                                  scripts/bz/weekly-report.js            — BZ! Sunday 21:00 UTC (17:00 ET)
-5   0,4,8,12,16,20 * * *                     scripts/ew/run.js                      — EW analysis 6×/day at 4H bar close +5min
-10  0,4,8,12,16,20 * * *                     scripts/ew/backtest.js                 — EW backtest sweep 6×/day +5min after run
-55  23 * * *                                  scripts/ew/daily-summary.js            — EW daily stats post (#btc-ew-backtest)
-15  12 * * *                                  scripts/ew/daily-brief.js              — EW daily narrative brief (#btc-ew-report)
-0   22 * * 0                                  scripts/ew/weekly-outlook.js           — EW Sunday weekly outlook
-0   14 1 * *                                  scripts/ew/monthly-review.js           — EW 1st-of-month cycle review
+1,6,11,16,21,26,31,36,41,46,51,56 * * * *    scripts/poly/btc-5/trigger-check.js   — Poly BTC-5 bar scorer
+5   0,4,8,12,16,20 * * *                     scripts/ew/run.js                      — EW analysis 6×/day
 ```
 
-View installed jobs: `crontab -l`
+View installed host jobs: `crontab -l`
+
+### Docker `ace-cron` (everything else — `scripts/cron/ace.crontab`)
+
+```
+55  * * * *                                  scripts/migrate/import-trades.js       — Mongo sync hourly :55
+*/3 * * * *                                  scripts/blofin/recon-once.js           — BloFin order recon every 3 min
+*   * * * *                                  scripts/discord-bot/index.js           — multi-channel bot every minute
+0   9 * * 1                                  scripts/weekly-report.js               — BTC Monday 09:00 UTC
+0   14 * * 0                                 scripts/weekly-war-report.js           — BTC Sunday 14:00 UTC
+0   21 * * 0                                 scripts/bz/weekly-report.js            — BZ! Sunday 21:00 UTC
+0   9 * * 1                                  scripts/poly/btc-5/weekly-report.js   — Poly Monday 09:00 UTC
+10  0,4,8,12,16,20 * * *                     scripts/ew/backtest.js                 — EW backtest 6×/day
+55  23 * * *                                 scripts/ew/daily-summary.js            — EW daily stats post
+15  12 * * *                                 scripts/ew/daily-brief.js              — EW daily narrative brief
+0   22 * * 0                                 scripts/ew/weekly-outlook.js           — EW weekly outlook
+0   14 1 * *                                 scripts/ew/monthly-review.js           — EW monthly review
+0   13 * * 3                                 scripts/audit/run-mid-week-diff.sh     — Mid-week win-rate diff
+```
+
+Edit Docker schedule: `scripts/cron/ace.crontab` → `docker compose restart ace-cron`.
+View Docker logs: `docker logs ace_cron`.
 
 ## pm2 Process
 
@@ -471,18 +488,19 @@ Installed via `make cron`. Verify it's running: `crontab -l | grep migrate`
 ### Docker quick-reference
 ```bash
 docker compose up -d mongodb    # start mongodb (survives reboots via restart:unless-stopped)
-docker compose up -d audit-cron # start the Wed-13:00-UTC win-rate diff cron
+docker compose up -d ace-cron   # start the scheduled-task host (all non-CDP cron jobs)
 docker compose ps               # check health of both
 docker compose down             # stop everything (data persists in volumes)
 ```
 
-### audit-cron service
-`audit-cron` is a small `node:20-alpine` container that runs `scripts/audit/run-mid-week-diff.sh` every Wednesday 13:00 UTC via busybox `crond`. It reads from MongoDB on the internal Docker network (`mongodb:27017`) and writes output to `notes/audits/` (bind-mounted from the host).
-- Crontab is the static file `scripts/audit/audit-cron.crontab` (avoids YAML escape hell).
-- Output: `notes/audits/latest.txt` (overwritten each run) + `mid-week-diff-<utc-ts>.txt` (history).
-- Cron log: `notes/audits/cron.log` (gitignored).
-- Manual run: `docker compose exec audit-cron /app/scripts/audit/run-mid-week-diff.sh`.
-- See `notes/README.md` for the full layout.
+### ace-cron service (was audit-cron — renamed 2026-06-16)
+`ace-cron` is a `node:20-alpine` container running busybox `crond`. It hosts every scheduled task that does NOT need TradingView CDP — Mongo sync, BloFin recon, Discord bot, all weekly reports, EW backtest/reports, mid-week audit. Connects to MongoDB on the internal Docker network (`mongodb:27017`).
+- Crontab is the static file `scripts/cron/ace.crontab` (avoids YAML escape hell).
+- The whole repo is bind-mounted at `/app` so scripts read `.env`, write logs, and access JSON/Mongo through the same paths as the host.
+- Cron logs: `logs/<job>.log` (gitignored, bind-mounted to host).
+- Manual one-off run: `docker compose exec ace-cron node /app/scripts/<path>`.
+- Apply schedule changes: edit `scripts/cron/ace.crontab` → `docker compose restart ace-cron`.
+- Mid-week audit output: `notes/audits/latest.txt` + `mid-week-diff-<utc-ts>.txt` (history). See `notes/README.md`.
 
 ---
 

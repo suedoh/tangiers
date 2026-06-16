@@ -1,7 +1,11 @@
 #!/bin/bash
-# scripts/ew/install-cron.sh — install all six EW cron entries
+# scripts/ew/install-cron.sh — install host-side EW cron entries
 # Idempotent: re-running is safe; existing entries are detected by script path
 # and skipped. Errors out if any single entry fails to install.
+#
+# Only ew/run.js stays on the host (CDP-bound — needs TradingView Desktop).
+# The other five EW entries (backtest + 4 reports) live in Docker
+# (scripts/cron/ace.crontab) since 2026-06-16; they don't need CDP.
 
 set -euo pipefail
 
@@ -15,12 +19,7 @@ mkdir -p "$LOGDIR"
 
 # Each entry: schedule | script | log | description
 ENTRIES=(
-  "5 0,4,8,12,16,20 * * *|scripts/ew/run.js|ew-run.log|EW run (6x/day at 4H bar close +5min)"
-  "10 0,4,8,12,16,20 * * *|scripts/ew/backtest.js|ew-backtest.log|EW backtest (6x/day +5min after run)"
-  "55 23 * * *|scripts/ew/daily-summary.js|ew-summary.log|EW daily summary (23:55 UTC)"
-  "15 12 * * *|scripts/ew/daily-brief.js|ew-brief.log|EW daily brief (12:15 UTC)"
-  "0 22 * * 0|scripts/ew/weekly-outlook.js|ew-outlook.log|EW weekly outlook (Sunday 22:00 UTC)"
-  "0 14 1 * *|scripts/ew/monthly-review.js|ew-review.log|EW monthly review (1st of month 14:00 UTC)"
+  "5 0,4,8,12,16,20 * * *|scripts/ew/run.js|ew-run.log|EW run (6x/day at 4H bar close +5min — CDP-bound)"
 )
 
 # Snapshot existing crontab (if any)
@@ -53,7 +52,7 @@ for entry in "${ENTRIES[@]}"; do
 done
 
 if [ "$ADDED" -eq 0 ]; then
-  echo "All six EW entries already installed -- nothing to do."
+  echo "EW host entry already installed -- nothing to do."
   exit 0
 fi
 

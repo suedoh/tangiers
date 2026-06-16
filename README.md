@@ -143,18 +143,39 @@ These are decision records, not summaries of diffs. They exist so future session
 
 ## Cron Schedule
 
+Two surfaces since 2026-06-16. CDP-bound triggers stay on the host (TradingView Desktop runs there); everything else moved into the `ace-cron` Docker container.
+
+### Host crontab (CDP-bound — `make cron` + `make ew-cron`)
+
 ```
 */10 * * * *                    trigger-check.js             — BTC zone trigger + outcome updates
-*/1  * * * *                    discord-bot/index.js         — multi-channel bot (all instruments)
 */1  * * * *                    bz/trigger-check.js          — BZ! zone poller (self-throttles off-session)
-1,6,11,16,21,26,31,36,41,46,51,56 * * * *  poly/btc-5/trigger-check.js  — Poly BTC-5 bar scorer (1 min after bar open)
-0    9 * * 1                    weekly-report.js             — BTC Monday 09:00 UTC → #btc-backtest
-0    9 * * 1                    poly/btc-5/weekly-report.js  — Poly Monday 09:00 UTC → #poly-btc-5-report
-0   14 * * 0                    weekly-war-report.js         — BTC Sunday 14:00 UTC → #btc-weekly-war-report
-0   21 * * 0                    bz/weekly-report.js          — BZ! Sunday 21:00 UTC (17:00 ET) → #bz!-weekly-war-report
+1,6,11,16,21,26,31,36,41,46,51,56 * * * *  poly/btc-5/trigger-check.js  — Poly BTC-5 bar scorer
+5   0,4,8,12,16,20 * * *         ew/run.js                    — EW analysis 6×/day at 4H bar close +5min
 ```
 
-View: `crontab -l`
+View installed host jobs: `crontab -l`
+
+### Docker `ace-cron` (everything else — `scripts/cron/ace.crontab`)
+
+```
+*/1  * * * *                    discord-bot/index.js         — multi-channel bot (all instruments)
+*/3  * * * *                    blofin/recon-once.js         — BloFin order reconciliation
+55   * * * *                    migrate/import-trades.js     — JSON → Mongo sync hourly :55
+0    9 * * 1                    weekly-report.js             — BTC Monday 09:00 UTC → #btc-backtest
+0   14 * * 0                    weekly-war-report.js         — BTC Sunday 14:00 UTC → #btc-weekly-war-report
+0   21 * * 0                    bz/weekly-report.js          — BZ! Sunday 21:00 UTC → #bz!-weekly-war-report
+0    9 * * 1                    poly/btc-5/weekly-report.js  — Poly Monday 09:00 UTC → #poly-btc-5-report
+10  0,4,8,12,16,20 * * *         ew/backtest.js               — EW backtest 6×/day
+55  23 * * *                    ew/daily-summary.js          — EW daily stats post
+15  12 * * *                    ew/daily-brief.js            — EW daily narrative brief
+0   22 * * 0                    ew/weekly-outlook.js         — EW weekly outlook
+0   14 1 * *                    ew/monthly-review.js         — EW monthly review
+0   13 * * 3                    audit/run-mid-week-diff.sh   — Mid-week win-rate diff
+```
+
+Edit Docker schedule: `scripts/cron/ace.crontab` → `docker compose restart ace-cron`.
+View Docker logs: `docker logs ace_cron`.
 
 ---
 

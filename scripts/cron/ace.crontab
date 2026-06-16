@@ -1,0 +1,57 @@
+# Ace Trading System — Docker-side scheduled tasks
+# ─────────────────────────────────────────────────────────────────────────────
+# All times UTC. Lines run inside the ace-cron container (busybox crond).
+#
+# CONSTRAINT: scripts here MUST NOT touch TradingView CDP (port 9222 is
+# unreachable from Docker on macOS). The four CDP-bound triggers
+# (BTC/BZ/Poly trigger-check + EW run.js) remain on the host crontab and
+# are installed by `make cron`.
+#
+# Inside-container paths: scripts at /app/scripts, logs at /app/logs,
+# .env at /app/.env (all via host bind-mount in docker-compose.yml).
+# MongoDB hostname: `mongodb` (internal Docker network).
+#
+# Manual run from host:
+#   docker compose exec ace-cron node /app/scripts/<path>
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Mongo sync — hourly :55, syncs JSON canonical writes into ace_trading.* collections
+55 * * * * node /app/scripts/migrate/import-trades.js >> /app/logs/migrate.log 2>&1
+
+# BloFin order reconciliation — every 3 min, heals state drift, resolves disappeared→filled/cancelled
+*/3 * * * * node /app/scripts/blofin/recon-once.js >> /app/logs/blofin-recon.log 2>&1
+
+# Discord bot — polls all channels every minute for !commands and 📊 reactions
+* * * * * node /app/scripts/discord-bot/index.js >> /app/logs/discord-bot.log 2>&1
+
+# BTC weekly performance report — Monday 09:00 UTC
+0 9 * * 1 node /app/scripts/weekly-report.js >> /app/logs/weekly-report.log 2>&1
+
+# BTC weekly war report — Sunday 14:00 UTC
+0 14 * * 0 node /app/scripts/weekly-war-report.js >> /app/logs/weekly-war-report.log 2>&1
+
+# BZ! weekly war report — Sunday 21:00 UTC (17:00 ET)
+0 21 * * 0 node /app/scripts/bz/weekly-report.js >> /app/logs/bz-weekly.log 2>&1
+
+# Poly BTC-5 weekly performance report — Monday 09:00 UTC
+0 9 * * 1 node /app/scripts/poly/btc-5/weekly-report.js >> /app/logs/poly-btc-5-report.log 2>&1
+
+# EW backtest — 6×/day, +5min after EW run completes on host
+10 0,4,8,12,16,20 * * * node /app/scripts/ew/backtest.js >> /app/logs/ew-backtest.log 2>&1
+
+# EW daily summary — 23:55 UTC
+55 23 * * * node /app/scripts/ew/daily-summary.js >> /app/logs/ew-summary.log 2>&1
+
+# EW daily brief — 12:15 UTC
+15 12 * * * node /app/scripts/ew/daily-brief.js >> /app/logs/ew-brief.log 2>&1
+
+# EW weekly outlook — Sunday 22:00 UTC
+0 22 * * 0 node /app/scripts/ew/weekly-outlook.js >> /app/logs/ew-outlook.log 2>&1
+
+# EW monthly review — 1st of month 14:00 UTC
+0 14 1 * * node /app/scripts/ew/monthly-review.js >> /app/logs/ew-review.log 2>&1
+
+# Mid-week BTC win-rate audit — Wednesday 13:00 UTC
+0 13 * * 3 /app/scripts/audit/run-mid-week-diff.sh >> /app/notes/audits/cron.log 2>&1
+
+# busybox crond requires a trailing newline below

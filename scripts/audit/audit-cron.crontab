@@ -1,2 +1,0 @@
-# Mid-week BTC win-rate diff — Wednesday 13:00 UTC
-0 13 * * 3 /app/scripts/audit/run-mid-week-diff.sh >> /app/notes/audits/cron.log 2>&1

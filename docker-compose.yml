@@ -18,16 +18,25 @@ services:
       retries: 3
       start_period: 20s
 
-  # Mid-week audit cron — runs win-rate-diff.js every Wednesday 13:00 UTC
-  # and writes output to notes/audits/. Output files persist on the host via
-  # the bind mount; the container itself is stateless.
+  # Ace scheduled-task host (Phase B.5+ — previously audit-cron).
+  # Runs every cron job that does NOT need TradingView CDP:
+  #   - Mongo sync (hourly :55)
+  #   - BloFin order reconciliation (every 3 min)
+  #   - Discord bot (every minute)
+  #   - BTC / BZ / Poly weekly reports
+  #   - EW backtest + daily/weekly/monthly reports
+  #   - Mid-week audit (formerly the only entry)
   #
-  # Verify it's running:    docker compose ps audit-cron
-  # See its logs:           docker logs ace_audit_cron
-  # Trigger manually:       docker compose exec audit-cron /app/scripts/audit/run-mid-week-diff.sh
-  audit-cron:
+  # The four CDP-bound triggers (BTC/BZ/Poly trigger-check + EW run.js) stay
+  # on the host crontab — Docker for Mac can't reach localhost:9222.
+  #
+  # Verify it's running:    docker compose ps ace-cron
+  # See its logs:           docker logs ace_cron
+  # Trigger one manually:   docker compose exec ace-cron node /app/scripts/blofin/recon-once.js
+  # Add/remove a job:       edit scripts/cron/ace.crontab + `docker compose restart ace-cron`
+  ace-cron:
     image: node:20-alpine
-    container_name: ace_audit_cron
+    container_name: ace_cron
     restart: unless-stopped
     working_dir: /app
     volumes:
@@ -42,9 +51,9 @@ services:
       - sh
       - -c
       - |
-        mkdir -p /app/notes/audits /etc/crontabs &&
-        cp /app/scripts/audit/audit-cron.crontab /etc/crontabs/root &&
-        echo 'audit-cron: crontab installed, starting crond (Wed 13:00 UTC)' &&
+        mkdir -p /app/logs /app/notes/audits /etc/crontabs &&
+        cp /app/scripts/cron/ace.crontab /etc/crontabs/root &&
+        echo 'ace-cron: crontab installed, starting crond' &&
         crond -f -l 8
 
 volumes:
