@@ -201,6 +201,18 @@ async function getActiveOrders({ instId, orderType } = {}) {
   return _request('GET', '/api/v1/trade/orders-pending', { query: { instId, orderType } });
 }
 
+/**
+ * Trade fills history. `orderId` filter scopes to a single order; without
+ * it, returns all fills for `instId` (or all instruments if omitted).
+ * Docs claim `/api/v1/trade/trade-history`; live path may differ — probe
+ * if 152404.
+ */
+async function getTradeHistory({ instId, orderId, after, before, limit } = {}) {
+  return _request('GET', '/api/v1/trade/fills-history', {
+    query: { instId, orderId, after, before, limit },
+  });
+}
+
 // ─── Demo-only writes ────────────────────────────────────────────────────────
 
 /**
@@ -239,5 +251,6 @@ module.exports = {
   placeOrder,
   cancelOrder,
   getActiveOrders,
+  getTradeHistory,
   applyDemoMoney,
 };

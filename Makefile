@@ -92,6 +92,13 @@ cron: ## Install all cron jobs: trigger-check (10m), discord-bot (1m), weekly-re
 	  SYNCLINE="55 * * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/migrate/import-trades.js >> $(TRADING)/logs/migrate.log 2>&1"; \
 	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — sync JSON files into Mongo every hour at :55 (Phase 2 read replica)"; echo "$$SYNCLINE") | crontab -; \
 	  echo "✓  Mongo sync cron installed (runs hourly at :55 — keeps Mongo current with JSON canonical writes)"; \
+	fi; \
+	if crontab -l 2>/dev/null | grep -q "blofin/recon-once.js"; then \
+	  echo "✓  BloFin recon cron already installed — skipping"; \
+	else \
+	  RECONLINE="*/3 * * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/blofin/recon-once.js >> $(TRADING)/logs/blofin-recon.log 2>&1"; \
+	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — BloFin order/position reconciliation every 3 minutes (Phase B.5)"; echo "$$RECONLINE") | crontab -; \
+	  echo "✓  BloFin recon cron installed (runs every 3 minutes — heals state drift, resolves fills)"; \
 	fi
 
 test: ## Run trigger-check.js once and show output
@@ -184,3 +191,6 @@ blofin-recon-once: ## One-shot reconciliation between local Mongo state and BloF
 
 blofin-autotrade-probe: ## Phase B.4 health check: synthetic signal → 4 orders → idempotency → cleanup (needs BLOFIN_AUTOTRADE=true)
 	@$(NODE) $(TRADING)/scripts/blofin/autotrade-probe.js
+
+blofin-resolve-probe: ## Phase B.5 health check: market entry → live → disappeared → filled (via fills-history)
+	@$(NODE) $(TRADING)/scripts/blofin/resolve-probe.js

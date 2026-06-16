@@ -30,6 +30,7 @@
 const blofin = require('./blofin');
 const store  = require('./blofin-store');
 const db     = require('./db');
+const dailyR = require('./daily-r');
 
 // BloFin BTC-USDT-PERP contract specs (Phase A discovery):
 //   contractValue 0.001 BTC, tickSize 0.1, lotSize 0.1, minSize 0.1
@@ -115,6 +116,14 @@ async function autotrade({
   if (!signalId)           throw new Error('autotrade: signalId required');
   if (direction !== 'long' && direction !== 'short') {
     throw new Error(`autotrade: bad direction: ${direction}`);
+  }
+
+  // Defense-in-depth daily-R kill: even if the trigger-check signal-time
+  // gate is bypassed (e.g. manual call, future signal source), the
+  // autotrade module refuses to open new positions during a drawdown day.
+  const todayR = dailyR.todayUtcR();
+  if (todayR <= dailyR.DAILY_R_KILL_FLOOR) {
+    return { skipped: `daily-R kill active: today's R = ${todayR.toFixed(2)} ≤ floor ${dailyR.DAILY_R_KILL_FLOOR}` };
   }
 
   // Ensure Mongo connection + indexes before any read (idempotency lookup

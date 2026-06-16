@@ -130,6 +130,69 @@ async function getLocalByOrderId(orderId) {
  *          place-succeeded-but-Mongo-write-failed race plus any orders
  *          placed by other clients (UI, another script).
  */
+/**
+ * Resolve orders in 'disappeared' state by querying fills-history.
+ *   - Fills exist  → state='filled', record avg fillPrice and total fillSize
+ *   - No fills     → state='cancelled' (externally cancelled or expired)
+ *
+ * Called as the final step of reconcileOnce; can also be invoked directly.
+ */
+async function resolveDisappeared({ instId } = {}) {
+  await ensureIndexes();
+  const filter = { env: env(), state: 'disappeared' };
+  if (instId) filter.instId = instId;
+  const candidates = await db.blofinOrders().find(filter).toArray();
+
+  const out = { filled: [], cancelled: [], errors: [] };
+
+  for (const order of candidates) {
+    try {
+      const fills = await blofin.getTradeHistory({
+        instId: order.instId, orderId: order.orderId, limit: 100,
+      });
+
+      if (fills && fills.length > 0) {
+        let totalSize = 0, weightedPrice = 0;
+        let latestTs = 0;
+        for (const f of fills) {
+          const sz = Number(f.fillSize);
+          const px = Number(f.fillPrice);
+          if (Number.isFinite(sz) && Number.isFinite(px)) {
+            totalSize     += sz;
+            weightedPrice += sz * px;
+          }
+          const ts = Number(f.ts || f.fillTime || 0);
+          if (ts > latestTs) latestTs = ts;
+        }
+        const avgPrice = totalSize > 0 ? (weightedPrice / totalSize) : null;
+
+        await db.blofinOrders().updateOne(
+          { orderId: order.orderId, env: env() },
+          { $set: {
+              state:        'filled',
+              fillPrice:    avgPrice != null ? String(avgPrice) : null,
+              fillSize:     String(totalSize),
+              filledAt:     latestTs ? new Date(latestTs) : now(),
+              updatedAt:    now(),
+            } },
+        );
+        out.filled.push({ orderId: order.orderId, fillPrice: avgPrice, fillSize: totalSize });
+      } else {
+        // No fills found — externally cancelled (or expired)
+        await db.blofinOrders().updateOne(
+          { orderId: order.orderId, env: env() },
+          { $set: { state: 'cancelled', cancelledAt: now(), updatedAt: now() } },
+        );
+        out.cancelled.push(order.orderId);
+      }
+    } catch (e) {
+      out.errors.push({ orderId: order.orderId, error: e.message });
+    }
+  }
+
+  return out;
+}
+
 async function reconcileOnce({ instId } = {}) {
   await ensureIndexes();
   const exchangeOrders = await blofin.getActiveOrders({ instId });
@@ -190,6 +253,13 @@ async function reconcileOnce({ instId } = {}) {
     }
   }
 
+  // Resolve any orders that landed in 'disappeared' (either this pass or
+  // a prior one) so the local state catches up to fill/cancel truth.
+  const resolved = await resolveDisappeared({ instId });
+  report.resolvedFilled    = resolved.filled.length;
+  report.resolvedCancelled = resolved.cancelled.length;
+  report.resolveErrors     = resolved.errors;
+
   return report;
 }
 
@@ -199,5 +269,6 @@ module.exports = {
   cancelAndPersist,
   listLocalOpen,
   getLocalByOrderId,
+  resolveDisappeared,
   reconcileOnce,
 };

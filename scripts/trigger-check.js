@@ -1596,21 +1596,8 @@ const CONFIRM_MAX_AGE_SEC = 60 * 60; // 1 hour
 // suppressed for the rest of the UTC day. Baseline saw 11 consecutive stops;
 // without a circuit breaker, a bad streak can compound. Re-evaluate after
 // 60 days of post-fix data.
-const DAILY_R_KILL_FLOOR = -3.0;
-
-function todayUtcR() {
-  try {
-    const all = JSON.parse(fs.readFileSync(TRADES_FILE, 'utf8'));
-    const startOfUtcDay = new Date();
-    startOfUtcDay.setUTCHours(0, 0, 0, 0);
-    const cutoff = startOfUtcDay.getTime();
-    return all.reduce((sum, t) => {
-      if (!t.closedAt || t.pnlR == null) return sum;
-      const ms = new Date(t.closedAt).getTime();
-      return ms >= cutoff ? sum + t.pnlR : sum;
-    }, 0);
-  } catch { return 0; }
-}
+// Daily-R kill switch is shared with blofin-autotrade.js — see scripts/lib/daily-r.js
+const { DAILY_R_KILL_FLOOR, todayUtcR } = require('./lib/daily-r');
 
 async function checkConfirmation(client, indicators) {
   const trades = readTrades();
