@@ -12,6 +12,23 @@ Done. Use `!took <id>` after a signal, `!exit tp1|tp2|tp3|stop|manual <price>` o
 
 ---
 
+### Phase D attribution — `trades.json` outcome vs exchange ground truth
+
+**Status:** Tracking. Don't start until ≥15 paired signals accumulate (~mid-July 2026 at current 5/day cadence).
+
+**Why:** Phase D health check on 2026-06-19 surfaced signal `1781716810783-VAH-65724` (2026-06-17T17:20 UTC short B) marked `outcome=stop` in `trades.json` but on BloFin its TP1 + TP2 buy-limits both filled profitably at $65,454 / $65,310 before any stop trigger. The bar-walk outcome detector in `trigger-check.js` conservatively scores `stop` when a 30M candle wicks above SL *and* below TP1 in the same bar; the exchange knows the atomic fill order. CLAUDE.md flagged this as a known limitation; Phase D is the first time we have paired data to quantify systematic drift.
+
+**What to do when ready:**
+- Pull Phase-D-era signals from `trades.json` (firedAt ≥ 2026-06-15)
+- Join to `blofin_orders` collection by `signalId`
+- Per signal compute: `pnlR_trades_json`, `pnlR_exchange_realized`, `delta`
+- If systematic delta > 0.2R, fix the bar-walk detector OR pivot Phase D evaluation to use exchange fills as ground truth
+- Save analysis to `refactors/2026-07-XX-phase-d-attribution.md`
+
+This is measurement-and-decision, not a code change. **No urgency** — exchange fills are durable in Mongo, the analysis can wait until the data is rich enough.
+
+---
+
 ### Update `strategies/smc-setups.md`
 
 The setup criteria file still references LuxAlgo CHoCH/BOS as entry triggers. The automated system now uses VRVP levels. The file needs updating to:
