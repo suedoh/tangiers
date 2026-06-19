@@ -204,6 +204,84 @@ Tangiers is the **Ace Trading System** — an automated multi-instrument trade s
 
 ---
 
+## Execution Layer — BloFin Demo Trading (Phase D, live since 2026-06-15)
+
+The three instrument pipelines above are **signal generation**. BloFin is the **execution layer** — when a BTC signal fires and `BLOFIN_AUTOTRADE=true`, the system also places real orders on BloFin's demo (paper-trading) exchange. Currently in **Phase D** — 4–8 week forward test on demo before any live capital. Roadmap: [refactors/2026-06-15-blofin-roadmap.md](refactors/2026-06-15-blofin-roadmap.md).
+
+### Per-signal order layout (after Phase B.6 fix)
+
+1. **Market entry** at signal direction, full sized via `ACCOUNT_EQUITY_USD × RISK_PER_TRADE_PCT × tierMult` math
+2. **Standalone SL** via `/api/v1/trade/order-tpsl` (mark-price trigger) — verified before continuing; if verification fails, entry is immediately reduce-only-flattened
+3. **Three reduce-only TP limits** at 1/3 size each at TP1 / TP2 / TP3 prices
+
+### Why the SL is standalone, not attached
+
+BloFin's `stopLossTriggerPrice` field on entry orders gets **cancelled by the exchange** as TP rungs fill and as subsequent entries arrive. Phase B.4 used the attached field and held an unprotected SHORT on 2026-06-19 — see [refactors/2026-06-19-blofin-phase-b6.md](refactors/2026-06-19-blofin-phase-b6.md). Standalone TPSL conditional orders survive partial closes; multiple can coexist per instrument.
+
+### Operational checks
+
+| Cadence | What runs | Where |
+|---|---|---|
+| Every 3 min | `recon-once.js` — heals state, resolves fills, checks protection invariant | `ace-cron` container |
+| Daily 21:00 UTC | `daily-pnl-report.js` — account snapshot + open positions + today's activity → `#blofin-recon` | `ace-cron` container |
+
+**Protection invariant:** every recon cycle calls `findUnprotectedPositions()` — any open exchange position without an active SL triggers a red 🚨 error post in `#blofin-recon` (same alert palette as recon errors). This is the safety net if Phase B.6 verification ever fails to fire.
+
+### Key file structure
+
+```
+scripts/lib/blofin.js              ← REST client (auth, orders, TPSL, positions, fills)
+scripts/lib/blofin-store.js        ← Mongo persistence + reconciliation + protection invariant
+scripts/lib/blofin-autotrade.js    ← Signal → orders + post-condition verification
+scripts/lib/daily-r.js             ← Shared kill-switch helper (BTC + BloFin)
+scripts/blofin/status.js           ← `make blofin-status` — Phase A health check
+scripts/blofin/fund-demo.js        ← `make blofin-fund` — top up demo USDT
+scripts/blofin/setup-account.js    ← `make blofin-setup` — one-time: net mode + 10× iso
+scripts/blofin/order-probe.js      ← `make blofin-probe` — Phase B.2 smoke
+scripts/blofin/store-probe.js      ← `make blofin-store-probe` — Phase B.3 smoke
+scripts/blofin/autotrade-probe.js  ← `make blofin-autotrade-probe` — Phase B.4 smoke
+scripts/blofin/resolve-probe.js    ← `make blofin-resolve-probe` — Phase B.5 smoke
+scripts/blofin/sl-probe.js         ← `make blofin-sl-probe` — Phase B.6 smoke
+scripts/blofin/recon-once.js       ← every-3-min reconciliation runner (Docker cron)
+scripts/blofin/daily-pnl-report.js ← daily 21:00 UTC P&L summary (Docker cron)
+```
+
+### Required `.env` keys
+
+```
+BLOFIN_ENV=demo                  # 'demo' (default) | 'prod' — DO NOT touch until Phase E
+BLOFIN_API_KEY=
+BLOFIN_API_SECRET=
+BLOFIN_API_PASSPHRASE=
+BLOFIN_AUTOTRADE=true            # set to true to make signals fire orders
+BLOFIN_RECON_WEBHOOK=https://discord.com/api/webhooks/...
+ACCOUNT_EQUITY_USD=1500          # used for sizing
+RISK_PER_TRADE_PCT=1.0
+```
+
+### Mongo: `blofin_orders` collection
+
+Unique index on `(orderId, env)` — `env` prevents demo/prod book mixing. Schema fields: `orderId | tpslId | kind ('entry'|'tp_limit'|'sl_conditional') | signalId | side | size | state ('live'|'cancelled'|'filled'|'disappeared') | fillPrice | filledAt`. State machine in [refactors/2026-06-16-blofin-phase-b3.md](refactors/2026-06-16-blofin-phase-b3.md).
+
+### BloFin docs are wrong — probe first, trust later
+
+Catalog of docs-vs-truth discoveries from Phases A–B.6:
+
+| Operation | Docs say | Truth |
+|---|---|---|
+| Get positions | `/api/v1/trade/positions` | `/api/v1/account/positions` |
+| Set position mode | `/api/v1/trade/position-mode` | `/api/v1/account/set-position-mode` |
+| Set leverage | `/api/v1/trade/leverage` | `/api/v1/account/set-leverage` |
+| Get active orders | `/api/v1/trade/active-orders` | `/api/v1/trade/orders-pending` |
+| Trade history | `/api/v1/trade/trade-history` | `/api/v1/trade/fills-history` |
+| Position-mode value | `'net'` / `'hedge'` | `'net_mode'` / `'long_short_mode'` |
+| Cancel TPSL body | single object | **array** `[{instId, tpslId}]` |
+| Apply demo money | docs omit `accountType` | **required** — without it returns misleading 152001 |
+
+When extending the BloFin integration: write a quick probe script first, never trust the path verbatim from the docs.
+
+---
+
 ## CDP Architecture
 
 All scripts connect to **TradingView Desktop** via Chrome DevTools Protocol on `localhost:9222`. No external market data APIs. No Anthropic API in the automated pipeline (only BZ news context classification).
