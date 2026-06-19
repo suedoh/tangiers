@@ -213,6 +213,74 @@ async function getTradeHistory({ instId, orderId, after, before, limit } = {}) {
   });
 }
 
+// ─── Conditional TP/SL orders (Phase B.6 — standalone, position-level) ───────
+//
+// IMPORTANT: BloFin's "attached" stopLossTriggerPrice on entry orders does NOT
+// persist across position changes in net mode — it gets cancelled when TP
+// rungs fill and shrink the position. Use these standalone endpoints instead
+// for any SL/TP that must outlive partial closes.
+//
+// Field names use TPSL endpoint vocabulary (slTriggerPrice, etc.), NOT the
+// attached-field vocab (stopLossTriggerPrice). Confirmed by API probe.
+
+/**
+ * Place a standalone conditional TP/SL order. Survives partial position
+ * closes — independent of the entry order's lifecycle.
+ *
+ * For a SHORT position: side='buy', size=position, slTriggerPrice > entry
+ * For a LONG position:  side='sell', size=position, slTriggerPrice < entry
+ *
+ * slOrderPrice='-1' means market-on-trigger (industry default for SL).
+ * slTriggerPriceType='mark' resists wicks (industry default for futures).
+ *
+ * Returns `{ tpslId, clientOrderId }`.
+ */
+async function placeTPSL({
+  instId,
+  side,                              // close-side: 'buy' for short, 'sell' for long
+  size,                              // contracts
+  marginMode = 'isolated',
+  positionSide = 'net',
+  reduceOnly = true,                 // string 'true' per BloFin contract
+  slTriggerPrice,
+  slOrderPrice = '-1',               // -1 = market on trigger
+  slTriggerPriceType = 'mark',       // 'mark' | 'last' | 'index'
+  tpTriggerPrice,                    // optional — attach TP alongside SL in the same order
+  tpOrderPrice = '-1',
+  tpTriggerPriceType = 'mark',
+}) {
+  const body = {
+    instId, marginMode, positionSide, side,
+    size: String(size),
+    reduceOnly: String(reduceOnly),
+  };
+  if (slTriggerPrice !== undefined) {
+    body.slTriggerPrice = String(slTriggerPrice);
+    body.slOrderPrice = String(slOrderPrice);
+    body.slTriggerPriceType = slTriggerPriceType;
+  }
+  if (tpTriggerPrice !== undefined) {
+    body.tpTriggerPrice = String(tpTriggerPrice);
+    body.tpOrderPrice = String(tpOrderPrice);
+    body.tpTriggerPriceType = tpTriggerPriceType;
+  }
+  return _request('POST', '/api/v1/trade/order-tpsl', { body });
+}
+
+/** Read all pending TP/SL conditional orders. */
+async function getPendingTPSL({ instId } = {}) {
+  return _request('GET', '/api/v1/trade/orders-tpsl-pending', { query: { instId } });
+}
+
+/**
+ * Cancel one or more TP/SL conditional orders. Body is an ARRAY of
+ * {instId, tpslId} (BloFin's quirk — single-object body returns 152004).
+ */
+async function cancelTPSL(items) {
+  const arr = Array.isArray(items) ? items : [items];
+  return _request('POST', '/api/v1/trade/cancel-tpsl', { body: arr });
+}
+
 // ─── Demo-only writes ────────────────────────────────────────────────────────
 
 /**
@@ -252,5 +320,8 @@ module.exports = {
   cancelOrder,
   getActiveOrders,
   getTradeHistory,
+  placeTPSL,
+  getPendingTPSL,
+  cancelTPSL,
   applyDemoMoney,
 };

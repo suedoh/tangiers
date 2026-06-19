@@ -57,6 +57,12 @@ function buildSummary(report) {
     if (unresolved > 0) lines.push('', `**Disappeared, unresolved (retry next cycle):** ${unresolved}`);
   }
 
+  if (report.unprotectedPositions?.length) {
+    lines.push('', `🚨 **UNPROTECTED POSITIONS — NO ACTIVE SL** 🚨`);
+    report.unprotectedPositions.forEach(p => lines.push(fmtUnprotected(p)));
+    lines.push('**Action:** flip BLOFIN_AUTOTRADE=false and set SL via UI immediately.');
+  }
+
   if (report.resolveErrors?.length || report.errors?.length) {
     const errs = [...(report.resolveErrors || []), ...(report.errors || [])];
     lines.push('', `**Errors:** ${errs.length}`);
@@ -71,7 +77,12 @@ function isMaterial(report) {
       || (report.cancelled?.length || 0) > 0
       || (report.retroactive?.length || 0) > 0
       || (report.resolveErrors?.length || 0) > 0
-      || (report.errors?.length || 0) > 0;
+      || (report.errors?.length || 0) > 0
+      || (report.unprotectedPositions?.length || 0) > 0;
+}
+
+function fmtUnprotected(p) {
+  return `• ${p.instId}  ${p.side.toUpperCase()}  size=${p.size}  avgPx=${Number(p.avgPrice).toFixed(2)}`;
 }
 
 async function main() {
@@ -101,10 +112,13 @@ async function main() {
   // Post a Discord summary only when something happened.
   const webhook = process.env.BLOFIN_RECON_WEBHOOK;
   if (webhook && isMaterial(report)) {
-    const hasErrors = (report.resolveErrors?.length || 0) + (report.errors?.length || 0) > 0;
-    const summary   = buildSummary(report);
-    const footer    = `BloFin recon · ${blofin.isDemo() ? 'demo' : 'PROD'} · ${new Date().toUTCString().slice(5, 25)} UTC`;
-    await discord.postWebhook(webhook, hasErrors ? 'error' : 'info', summary, footer);
+    const isUnprotected = (report.unprotectedPositions?.length || 0) > 0;
+    const hasErrors     = (report.resolveErrors?.length || 0) + (report.errors?.length || 0) > 0;
+    // Unprotected positions are the loudest alert — error type, takes priority.
+    const type    = (isUnprotected || hasErrors) ? 'error' : 'info';
+    const summary = buildSummary(report);
+    const footer  = `BloFin recon · ${blofin.isDemo() ? 'demo' : 'PROD'} · ${new Date().toUTCString().slice(5, 25)} UTC`;
+    await discord.postWebhook(webhook, type, summary, footer);
   }
 
   console.log('');

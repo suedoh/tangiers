@@ -140,10 +140,14 @@ async function autotrade({
   const { contracts, sizePerTp, rDollar } = sizing;
   const side       = direction === 'long' ? 'buy' : 'sell';
   const closeSide  = direction === 'long' ? 'sell' : 'buy';
+  const stopPx     = quantizePrice(stop);
 
   const orders = [];
 
-  // 1. Market entry with attached SL covering full position.
+  // 1. Market entry (NO attached SL — see Phase B.6 architectural fix). The
+  //    attached `stopLossTriggerPrice` field gets cancelled by BloFin in net
+  //    mode when subsequent entries fire or TP rungs fill. Standalone TPSL
+  //    (step 2) survives partial closes and additional entries.
   const entryResult = await store.placeAndPersist({
     instId,
     side,
@@ -151,9 +155,57 @@ async function autotrade({
     size:                 String(contracts),
     marginMode:           'isolated',
     positionSide:         'net',
-    stopLossTriggerPrice: String(quantizePrice(stop)),
   }, { signalId });
   orders.push({ kind: 'entry', orderId: entryResult.doc.orderId });
+
+  // 1b. STANDALONE SL via /order-tpsl. Mark-price trigger resists wicks.
+  //     We POST then VERIFY then auto-flatten on verification failure —
+  //     this is the post-condition invariant that makes the whole design
+  //     safe. Without it, a silent SL failure leaves the position naked.
+  let slPlaced = false;
+  let slTpslId = null;
+  try {
+    const slRes = await blofin.placeTPSL({
+      instId, side: closeSide, size: contracts,
+      marginMode: 'isolated', positionSide: 'net', reduceOnly: 'true',
+      slTriggerPrice: stopPx, slOrderPrice: '-1', slTriggerPriceType: 'mark',
+    });
+    slTpslId = slRes?.tpslId || slRes?.[0]?.tpslId;
+
+    // VERIFY — read back from the pending list and confirm by tpslId.
+    const pending = await blofin.getPendingTPSL({ instId });
+    slPlaced = (pending || []).some(o => o.tpslId === slTpslId
+      && Math.abs(Number(o.slTriggerPrice) - stopPx) < 0.5);
+    if (slPlaced) {
+      await store.persistTPSL({
+        tpslId: slTpslId, signalId, instId,
+        side: closeSide, size: contracts,
+        slTriggerPrice: stopPx, slTriggerPriceType: 'mark',
+      });
+    }
+  } catch (e) {
+    orders.push({ kind: 'sl', error: e.message });
+  }
+
+  // 1c. FORCING MITIGATION — if the SL didn't attach and verify, flatten
+  //     the entry IMMEDIATELY with a reduce-only market order. Better a
+  //     known small loss than an unbounded position. Loud Discord alert.
+  if (!slPlaced) {
+    try {
+      await blofin.placeOrder({
+        instId, side: closeSide, orderType: 'market', size: String(contracts),
+        marginMode: 'isolated', positionSide: 'net', reduceOnly: true,
+      });
+    } catch (e) {
+      // If even the flatten fails we're in deep trouble — surface it.
+      orders.push({ kind: 'flatten_failed', error: e.message });
+    }
+    return {
+      signalId, direction, contracts, sizePerTp, rDollar, orders,
+      aborted: 'SL verification failed — entry flattened',
+    };
+  }
+  orders.push({ kind: 'sl', tpslId: slTpslId, trigger: stopPx });
 
   // 2-4. TP rungs as reduce-only limits at 1/3 size each.
   for (const [kind, tpPrice] of [['tp1', tp1], ['tp2', tp2], ['tp3', tp3]]) {

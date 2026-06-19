@@ -171,3 +171,6 @@ blofin-autotrade-probe: ## Phase B.4 health check: synthetic signal → 4 orders
 
 blofin-resolve-probe: ## Phase B.5 health check: market entry → live → disappeared → filled (via fills-history)
 	@$(NODE) $(TRADING)/scripts/blofin/resolve-probe.js
+
+blofin-sl-probe: ## Phase B.6 health check: standalone TPSL conditional placement + verify + cancel + protection invariant
+	@$(NODE) $(TRADING)/scripts/blofin/sl-probe.js

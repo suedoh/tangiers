@@ -269,7 +269,70 @@ async function reconcileOnce({ instId } = {}) {
   report.resolvedCancelled = resolved.cancelled.length;
   report.resolveErrors     = resolved.errors;
 
+  // Position-protection invariant — every open position MUST have an
+  // active SL. This is the Phase B.6 safety net: catches drift if the
+  // autotrade SL placement somehow slipped past verification, or if a
+  // position got opened outside the system (e.g. UI).
+  try {
+    report.unprotectedPositions = await findUnprotectedPositions();
+  } catch (e) {
+    report.errors.push({ orderId: 'findUnprotectedPositions', error: e.message });
+    report.unprotectedPositions = [];
+  }
+
   return report;
+}
+
+/**
+ * Persist a standalone TPSL conditional order (different orderId namespace —
+ * BloFin returns `tpslId`, not `orderId`). Stored in the same collection
+ * with `kind: 'sl_conditional'` so reconcileOnce can find them.
+ */
+async function persistTPSL({ tpslId, signalId, instId, side, size, slTriggerPrice, slTriggerPriceType }) {
+  await ensureIndexes();
+  return db.blofinOrders().insertOne({
+    orderId:          tpslId,            // reuse the field for indexing
+    tpslId,                              // explicit too, for clarity
+    kind:             'sl_conditional',
+    signalId:         signalId || null,
+    instId,
+    side,
+    orderType:        'conditional',
+    size:             String(size),
+    price:            null,
+    state:            'live',
+    marginMode:       'isolated',
+    positionSide:     'net',
+    slTriggerPrice:   String(slTriggerPrice),
+    slTriggerPriceType,
+    env:              env(),
+    schemaVersion:    SCHEMA_VERSION,
+    createdAt:        now(),
+    updatedAt:        now(),
+    lastSyncedAt:     now(),
+    cancelledAt:      null,
+    filledAt:         null,
+  });
+}
+
+/**
+ * Position-protection invariant check. For each open position on the
+ * exchange, confirms a live SL exists in `blofin_orders_tpsl`. Returns a
+ * list of unprotected (instId, size) pairs — empty when all positions
+ * are covered. Caller decides what to do (Discord page, auto-flatten).
+ */
+async function findUnprotectedPositions() {
+  await ensureIndexes();
+  const positions = await blofin.getPositions();
+  const out = [];
+  for (const pos of positions || []) {
+    const sz = Math.abs(Number(pos.positions || pos.pos || 0));
+    if (sz === 0) continue;
+    const pendingSL = await blofin.getPendingTPSL({ instId: pos.instId });
+    const hasSL = (pendingSL || []).some(o => Number(o.slTriggerPrice) > 0);
+    if (!hasSL) out.push({ instId: pos.instId, size: sz, side: Number(pos.positions || pos.pos) > 0 ? 'long' : 'short', avgPrice: pos.averagePrice });
+  }
+  return out;
 }
 
 module.exports = {
@@ -280,4 +343,6 @@ module.exports = {
   getLocalByOrderId,
   resolveDisappeared,
   reconcileOnce,
+  persistTPSL,
+  findUnprotectedPositions,
 };
