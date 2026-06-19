@@ -21,6 +21,10 @@
 # BloFin order reconciliation — every 3 min, heals state drift, resolves disappeared→filled/cancelled
 */3 * * * * node /app/scripts/blofin/recon-once.js >> /app/logs/blofin-recon.log 2>&1
 
+# BloFin daily P&L report — 21:00 UTC = 5 PM EDT (summer) / 4 PM EST (winter).
+# If you want a strict 5 PM EST year-round, change to `0 22 * * *`.
+0 21 * * * node /app/scripts/blofin/daily-pnl-report.js >> /app/logs/blofin-daily-pnl.log 2>&1
+
 # Discord bot — STAYS NATIVE. Lives on the host crontab because handlers spawn
 # mtf-analyze.js / bz/analyze.js / poly/btc-5/analyze.js — all CDP-bound. From
 # Docker the spawned analysis errors silently on CDP, leaving Discord stuck in

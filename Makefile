@@ -174,3 +174,6 @@ blofin-resolve-probe: ## Phase B.5 health check: market entry → live → disap
 
 blofin-sl-probe: ## Phase B.6 health check: standalone TPSL conditional placement + verify + cancel + protection invariant
 	@$(NODE) $(TRADING)/scripts/blofin/sl-probe.js
+
+blofin-daily-pnl: ## Run the daily P&L report now (posts to #blofin-recon). Cron runs it at 21:00 UTC.
+	@$(NODE) $(TRADING)/scripts/blofin/daily-pnl-report.js
