@@ -16,11 +16,18 @@
  */
 
 const https  = require('https');
+const dns    = require('dns');
 const fs     = require('fs');
 const path   = require('path');
 
 const { loadEnv, ROOT } = require('../lib/env');
 const router            = require('./router');
+
+// Force IPv4 DNS resolution. Node 22 defaults to verbatim (IPv6-first when
+// available); on this host that intermittently returns getaddrinfo ENOTFOUND
+// for discord.com despite cmdline DNS working. Reproduces only inside the
+// cron-spawned bot process. Forcing ipv4first eliminates the failure mode.
+dns.setDefaultResultOrder('ipv4first');
 
 loadEnv();
 

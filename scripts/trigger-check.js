@@ -1249,6 +1249,12 @@ function checkInvalidations(price, indicators) {
 
     if (!isLevelBroken) continue;
 
+    // Re-fire guard: one stop-hunt alert per break event. Without this, a level
+    // that stays broken across multiple poll cycles re-fires the LEVEL BROKEN +
+    // STOP HUNT pair every 10 min. Window matches the 4h _watch_${key} expiry.
+    const STOPHUNT_REFIRE_GUARD_MS = 4 * 60 * 60 * 1000;
+    if (entry.stopHuntFiredAt && Date.now() - entry.stopHuntFiredAt < STOPHUNT_REFIRE_GUARD_MS) continue;
+
     const cvdConfirmsBreak = direction === 'long' ? (cvd != null && cvd < 0) : (cvd != null && cvd > 0);
     const oiExpanding      = oiTrend === 'rising';
     const isRealBreak      = (cvdConfirmsBreak && oiExpanding) || (isHighVolBreak && oiExpanding);
@@ -1283,8 +1289,8 @@ function checkInvalidations(price, indicators) {
       const watchKey = `_watch_${key}`;
       state[watchKey] = { ts: Date.now(), direction, levelType, levelMid, levelLo, levelHi, expires: Date.now() + 4 * 60 * 60 * 1000 };
       dedupeNearbyLevels(state, key, levelType, levelMid);
-      state[key] = { ts: Date.now() - (COOLDOWN_MS - 30 * 60 * 1000), direction, levelType, levelMid, levelLo, levelHi };
-      log(`Level ${key} → stop hunt | re-entry alert fired | cooldown reset to 30m`);
+      state[key] = { ts: Date.now() - (COOLDOWN_MS - 30 * 60 * 1000), direction, levelType, levelMid, levelLo, levelHi, stopHuntFiredAt: Date.now() };
+      log(`Level ${key} → stop hunt | re-entry alert fired | cooldown reset to 30m | re-fire guard armed (4h)`);
     }
   }
 
