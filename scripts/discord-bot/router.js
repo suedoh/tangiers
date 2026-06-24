@@ -16,6 +16,7 @@ const btcHandler       = require('./handlers/btc');
 const btcEwHandler     = require('./handlers/btc-ew');
 const bzHandler        = require('./handlers/bz');
 const polyBtc5Handler  = require('./handlers/poly-btc-5');
+const blofinHandler    = require('./handlers/blofin');
 const sharedHandler    = require('./handlers/shared');
 
 loadEnv();
@@ -28,6 +29,7 @@ const ROUTES = [
   { prefix: 'btc',          handler: btcHandler       },
   { prefix: 'poly-btc-5',   handler: polyBtc5Handler  },
   { prefix: 'poly-btc',     handler: polyBtc5Handler  },  // fallback → btc-5
+  { prefix: 'blofin',       handler: blofinHandler    },
 ];
 
 /**
@@ -64,6 +66,7 @@ function allChannelIds() {
 if (process.env.BTC_EW_SIGNALS_CHANNEL_ID && !process.env.BTC_EW_SIGNALS_CHANNEL_ID.startsWith('PENDING')) {
       ids.push({ id: process.env.BTC_EW_SIGNALS_CHANNEL_ID, prefix: 'btc-ew' });
     }
+    if (process.env.BLOFIN_RECON_CHANNEL_ID) ids.push({ id: process.env.BLOFIN_RECON_CHANNEL_ID, prefix: 'blofin' });
   }
 
   return ids;
