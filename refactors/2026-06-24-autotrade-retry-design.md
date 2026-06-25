@@ -1,9 +1,22 @@
 # Autotrade idempotent retry — design (probe-first)
 
 **Date:** 2026-06-24
-**Status:** PROPOSED — awaiting probe results + user sign-off. DO NOT IMPLEMENT yet.
+**Status:** PROBED & GROUNDED — autotrade wiring awaiting final sign-off. Infrastructure (field fix + getOrderHistory + probe) shipped.
 **Problem source:** autotrade timeout audit (this session)
 **Companion (shipped):** [2026-06-24-autotrade-drop-tagging.md](2026-06-24-autotrade-drop-tagging.md)
+
+## Probe results (2026-06-24, `scripts/blofin/clientordid-probe.js`)
+
+| # | Question | Result |
+|---|---|---|
+| BUG | Does the entry send a usable client id? | **No — wrong field name.** BloFin's field is `clientOrderId`, not the docs' `clientOrdId`. The old wrapper sent `clientOrdId` → silently ignored, order came back `clientOrderId: ""`. **Fixed** in blofin.js. |
+| P1 | Accept + echo a signalId-derived id? | ✓ 21-char alphanumeric (`1782387640158VAH65080`) accepted and echoed |
+| P2 | Resolve a resting order by clientOrderId? | ✓ via `getActiveOrders` (orders-pending) |
+| P3 | Resolve a FILLED entry by clientOrderId? | ✓ via new `getOrderHistory` (orders-history) — records carry `clientOrderId` + `state` + `filledSize` + `averagePrice`. (fills-history does NOT carry it — dead end.) |
+| P4 | Is 10s the right timeout? | Latency 181–395ms (median 194, p90 219). 10s timeouts are rare HARD STALLS, not latency. Don't lower the timeout; retry instead. |
+| DEDUP | Does BloFin reject a duplicate clientOrderId? | ✓ **YES** — second place with same id → "All operations failed". So reusing the id across retries makes a double-position physically impossible at the exchange. |
+
+**Finalized decisions:** retry count = **2**. Limbo handling = **adopt-and-protect** (if the entry is found on the exchange in any non-cancelled/non-rejected state, persist it and continue to SL placement — never cancel-and-retry a live order). Dropped bar = **no auto re-arm** (dead-letter + loud #blofin-recon alert so the user can manually enter; don't auto-enter a stale signal into a moved market).
 
 ## The defect being fixed
 

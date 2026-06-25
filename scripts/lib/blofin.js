@@ -175,7 +175,7 @@ async function placeOrder({
   reduceOnly,
   stopLossTriggerPrice,
   takeProfitTriggerPrice,
-  clientOrdId,
+  clientOrderId,
 }) {
   const body = {
     instId, marginMode, side, positionSide, orderType,
@@ -185,7 +185,10 @@ async function placeOrder({
   if (reduceOnly !== undefined)             body.reduceOnly = reduceOnly;
   if (stopLossTriggerPrice !== undefined)   body.stopLossTriggerPrice = String(stopLossTriggerPrice);
   if (takeProfitTriggerPrice !== undefined) body.takeProfitTriggerPrice = String(takeProfitTriggerPrice);
-  if (clientOrdId !== undefined)            body.clientOrdId = clientOrdId;
+  // BloFin's field is `clientOrderId` (full "Order"), NOT the docs' `clientOrdId`.
+  // Probed 2026-06-24: sending `clientOrdId` is silently ignored and the order
+  // comes back with an empty clientOrderId. See the "docs are wrong" table.
+  if (clientOrderId !== undefined)          body.clientOrderId = clientOrderId;
   return _request('POST', '/api/v1/trade/order', { body });
 }
 
@@ -210,6 +213,18 @@ async function getActiveOrders({ instId, orderType } = {}) {
 async function getTradeHistory({ instId, orderId, after, before, limit } = {}) {
   return _request('GET', '/api/v1/trade/fills-history', {
     query: { instId, orderId, after, before, limit },
+  });
+}
+
+/**
+ * Order history (filled/cancelled orders — NOT resting). Unlike fills-history,
+ * order records DO carry `clientOrderId`, so this is how a market entry that
+ * filled-on-timeout is resolved by its deterministic clientOrderId. Resting
+ * orders use getActiveOrders (orders-pending); this covers everything else.
+ */
+async function getOrderHistory({ instId, orderId, clientOrderId, after, before, limit } = {}) {
+  return _request('GET', '/api/v1/trade/orders-history', {
+    query: { instId, orderId, clientOrderId, after, before, limit },
   });
 }
 
@@ -320,6 +335,7 @@ module.exports = {
   cancelOrder,
   getActiveOrders,
   getTradeHistory,
+  getOrderHistory,
   placeTPSL,
   getPendingTPSL,
   cancelTPSL,
