@@ -1736,6 +1736,40 @@ function logTrade(price, trigger, setup) {
   return id;
 }
 
+// ─── Execution disposition tagging ───────────────────────────────────────────
+//
+// Records whether a logged signal actually reached the exchange via autotrade.
+// Phase D's exit gate compares paper P&L (exchange fills) against trades.json
+// hypothetical expectancy — but a signal that never executed (API timeout, a
+// deliberate skip, or an aborted/flattened entry) still sits in trades.json and
+// would drag the comparison around as a pure artifact, not real slippage. This
+// stamp lets the Phase-D attribution query include only executionStatus==='placed'
+// rows when measuring execution fidelity, instead of conflating bug-drops with
+// genuine fill friction. See refactors/2026-06-24-autotrade-drop-tagging.md.
+//
+//   status: 'placed' | 'skipped' | 'aborted' | 'dropped'
+//     placed  — orders confirmed on the exchange
+//     skipped — autotrade deliberately declined (daily-R kill, sizing, disabled, idempotent)
+//     aborted — entry placed then auto-flattened (SL verification failed, Phase B.6)
+//     dropped — autotrade threw (timeout / API error) — the execution BUG bucket
+//
+// Fire-and-forget safe: re-reads trades.json fresh, mutates one record, never
+// throws (a throw here would reject the autotrade promise's callback chain).
+function markExecution(signalId, status, detail) {
+  try {
+    if (!signalId) return;
+    const trades = readTrades();
+    const t = trades.find(x => x.id === signalId);
+    if (!t) { log(`markExecution: signal ${signalId} not found in trades.json`); return; }
+    t.executionStatus = status;
+    t.executionDetail = detail != null ? String(detail).slice(0, 200) : null;
+    t.executionAt     = new Date().toISOString();
+    writeTrades(trades);
+  } catch (e) {
+    log(`markExecution failed for ${signalId}: ${e.message}`);
+  }
+}
+
 // ─── Bar-accurate outcome detection ──────────────────────────────────────────
 //
 // Replaces spot-price polling. For each open trade, fetches 30M OHLCV bars
@@ -2287,9 +2321,10 @@ async function main() {
             entry: setup.entry, stop: setup.stop,
             tp1: setup.tp1Price, tp2: setup.tp2Price, tp3: setup.tp3Price,
           }).then(r => {
-            if (r.skipped) log(`Autotrade skipped: ${r.skipped}`);
-            else          log(`Autotrade placed ${r.orders?.length || 0} orders for ${signalId}`);
-          }).catch(e => log(`Autotrade error: ${e.message}`));
+            if (r.skipped)      { log(`Autotrade skipped: ${r.skipped}`);              markExecution(signalId, 'skipped', r.skipped); }
+            else if (r.aborted) { log(`Autotrade aborted: ${r.aborted}`);              markExecution(signalId, 'aborted', r.aborted); }
+            else                { log(`Autotrade placed ${r.orders?.length || 0} orders for ${signalId}`); markExecution(signalId, 'placed', `${r.orders?.length || 0} orders`); }
+          }).catch(e => { log(`Autotrade error: ${e.message}`); markExecution(signalId, 'dropped', e.message); });
         }
         triggered = true;
       }
