@@ -79,7 +79,13 @@ function _request(method, path, { query, body, signed = true, timeoutMs = 10000 
   }
 
   return new Promise((resolve, reject) => {
-    const req = https.request(url, { method, headers }, res => {
+    // Force IPv4. This host's IPv6 route to BloFin's Cloudflare endpoint is
+    // broken; node's default Happy Eyeballs (autoSelectFamily) races v6+v4 and
+    // intermittently hangs ~5s on the dead v6 path, surfacing as 'blofin
+    // timeout'. Proven 2026-06-25: default → timeout, family:4 → 200 in 1.5s.
+    // dns.setDefaultResultOrder('ipv4first') alone is NOT enough — autoSelect
+    // still attempts v6. (Docker/curl unaffected — different network paths.)
+    const req = https.request(url, { method, headers, family: 4, autoSelectFamily: false }, res => {
       let data = '';
       res.on('data', c => (data += c));
       res.on('end', () => {
