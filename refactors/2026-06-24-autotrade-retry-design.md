@@ -1,9 +1,33 @@
 # Autotrade idempotent retry — design (probe-first)
 
 **Date:** 2026-06-24
-**Status:** PROBED & GROUNDED — autotrade wiring awaiting final sign-off. Infrastructure (field fix + getOrderHistory + probe) shipped.
+**Status:** DONE — implemented, smoke-tested on demo, shipped.
 **Problem source:** autotrade timeout audit (this session)
 **Companion (shipped):** [2026-06-24-autotrade-drop-tagging.md](2026-06-24-autotrade-drop-tagging.md)
+
+## Implementation (shipped)
+
+| File | Change |
+|---|---|
+| [blofin-autotrade.js](../scripts/lib/blofin-autotrade.js) | `clientOrderIdFor`, `resolveEntry`, `placeEntryResilient` (place→resolve→adopt-or-retry, max 2); entry call site returns `{ dropped }` on exhaustion |
+| [blofin-store.js](../scripts/lib/blofin-store.js) | `persistAdoptedEntry` — upsert a resolved/adopted entry with our signalId |
+| [trigger-check.js](../scripts/trigger-check.js) | callback handles `r.dropped` → `markExecution('dropped')` + `postAutotradeDeadLetter` (red #blofin-recon alert); no auto re-arm |
+| [autotrade-probe.js](../scripts/blofin/autotrade-probe.js) | fixed stale 4→5 order count (B.6 added the standalone SL) + TPSL cleanup |
+
+## Verification (2026-06-24, demo)
+
+- **New paths direct test:** `clientOrderIdFor` transform ✓; `resolveEntry` finds a placed order by clientOrderId (state=live) ✓; `persistAdoptedEntry` upserts a tracked doc with signalId+adopted ✓; cleanup clean ✓.
+- **Full `autotrade-probe` (BLOFIN_AUTOTRADE=true):** synthetic A-long → 5 orders placed (entry via `placeEntryResilient` + SL + 3 TPs) ✓; 5 Mongo docs linked ✓; idempotent re-fire skipped ✓; reconcileOnce ✓; cleanup completed (flatten ran, no error).
+
+## Live outage observed mid-test (refines the design)
+
+Right after the probe passed, BloFin's **private/signed** API went into a ~minutes-long timeout cluster (public market endpoint stayed 200). This is the exact failure mode, live: stalls come in **bursts**, not single blips. Implication:
+- The 2-attempt retry (~seconds) recovers an **isolated** stall — which is what the 2 Phase-D drops were.
+- A **sustained** outage still dead-letters after 2 attempts — and that is correct: don't hammer a down exchange; surface a loud #blofin-recon alert + tag `dropped` so the user enters manually. The recon protection-invariant remains the backstop for any position opened during the window.
+
+## Possible refinement (not shipped)
+
+`resolveEntry` uses the default 10s per-call timeout; during a sustained outage a dead-letter can take ~2 min (2 attempts × stacked timeouts). Bounded and fire-and-forget (doesn't block the main loop; next cron is 10 min out), but a shorter per-call timeout for resolve/retry would make dead-letters snappier. Low priority.
 
 ## Probe results (2026-06-24, `scripts/blofin/clientordid-probe.js`)
 

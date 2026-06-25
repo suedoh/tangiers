@@ -1770,6 +1770,34 @@ function markExecution(signalId, status, detail) {
   }
 }
 
+// Loud dead-letter: an autotrade that exhausted its retries (or threw) never
+// reached the exchange. Post a red alert to #blofin-recon so a drop is never
+// silent — the user can manually enter if the setup is still live. No auto
+// re-arm: we don't re-fire a stale signal into a moved market.
+function postAutotradeDeadLetter(signalId, setup, trigger, detail) {
+  try {
+    const webhook = process.env.BLOFIN_RECON_WEBHOOK;
+    if (!webhook) return;
+    const { postWebhook } = require('./lib/discord');
+    const dir = setup?.direction ? setup.direction.toUpperCase() : '?';
+    const body = [
+      `🚨 **AUTOTRADE DROPPED — SIGNAL NOT EXECUTED** 🚨`,
+      `A fully-qualified signal failed to place after retries. No position was opened.`,
+      ``,
+      `**Signal** \`${signalId}\``,
+      `**Setup** ${setup?.setupType ?? '?'} · ${dir} · ${trigger?.type ?? '?'}`,
+      `**Entry** $${setup?.entry?.toLocaleString?.() ?? setup?.entry} | **SL** $${setup?.stop?.toLocaleString?.() ?? setup?.stop}`,
+      `**Reason** ${detail}`,
+      ``,
+      `**Action** Enter manually on BloFin if the setup is still valid. The signal is tagged \`executionStatus=dropped\` in trades.json.`,
+    ].join('\n');
+    postWebhook(webhook, 'error', body, `Autotrade dead-letter · ${new Date().toUTCString().slice(5, 25)} UTC`)
+      .catch(e => log(`dead-letter post failed: ${e.message}`));
+  } catch (e) {
+    log(`postAutotradeDeadLetter failed for ${signalId}: ${e.message}`);
+  }
+}
+
 // ─── Bar-accurate outcome detection ──────────────────────────────────────────
 //
 // Replaces spot-price polling. For each open trade, fetches 30M OHLCV bars
@@ -2322,9 +2350,10 @@ async function main() {
             tp1: setup.tp1Price, tp2: setup.tp2Price, tp3: setup.tp3Price,
           }).then(r => {
             if (r.skipped)      { log(`Autotrade skipped: ${r.skipped}`);              markExecution(signalId, 'skipped', r.skipped); }
+            else if (r.dropped) { log(`Autotrade DROPPED: ${r.dropped}`);              markExecution(signalId, 'dropped', r.dropped); postAutotradeDeadLetter(signalId, setup, trigger, r.dropped); }
             else if (r.aborted) { log(`Autotrade aborted: ${r.aborted}`);              markExecution(signalId, 'aborted', r.aborted); }
             else                { log(`Autotrade placed ${r.orders?.length || 0} orders for ${signalId}`); markExecution(signalId, 'placed', `${r.orders?.length || 0} orders`); }
-          }).catch(e => { log(`Autotrade error: ${e.message}`); markExecution(signalId, 'dropped', e.message); });
+          }).catch(e => { log(`Autotrade error: ${e.message}`); markExecution(signalId, 'dropped', e.message); postAutotradeDeadLetter(signalId, setup, trigger, e.message); });
         }
         triggered = true;
       }

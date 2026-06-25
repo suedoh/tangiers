@@ -86,6 +86,46 @@ async function placeAndPersist(orderArgs, { signalId } = {}) {
 }
 
 /**
+ * Persist an entry order discovered on the exchange after an ambiguous-write
+ * timeout (the autotrade resilient-retry adopt path). The order is already
+ * live/filled on BloFin; we attach our signalId and persist so the SL step
+ * and reconciliation treat it as a tracked entry. Upsert by (orderId, env)
+ * so it co-exists harmlessly if recon already retro-created the same order.
+ */
+async function persistAdoptedEntry(exOrder, signalId) {
+  await ensureIndexes();
+  const doc = {
+    orderId:        exOrder.orderId,
+    clientOrdId:    exOrder.clientOrderId || null,
+    signalId:       signalId || null,
+    instId:         exOrder.instId,
+    side:           exOrder.side,
+    orderType:      exOrder.orderType || 'market',
+    size:           String(exOrder.size),
+    price:          exOrder.price ?? null,
+    state:          'live',
+    marginMode:     exOrder.marginMode || 'isolated',
+    positionSide:   exOrder.positionSide || 'net',
+    stopLossTriggerPrice:   null,
+    takeProfitTriggerPrice: null,
+    env:            env(),
+    schemaVersion:  SCHEMA_VERSION,
+    createdAt:      now(),
+    updatedAt:      now(),
+    lastSyncedAt:   now(),
+    cancelledAt:    null,
+    filledAt:       null,
+    adopted:        true,
+  };
+  await db.blofinOrders().updateOne(
+    { orderId: doc.orderId, env: env() },
+    { $setOnInsert: doc },
+    { upsert: true },
+  );
+  return doc;
+}
+
+/**
  * Cancel an order and update local state. Idempotent: re-cancelling a
  * cancelled order is a local no-op (the API call still fires; BloFin
  * returns the standard "order doesn't exist" error which we surface).
@@ -338,6 +378,7 @@ async function findUnprotectedPositions() {
 module.exports = {
   ensureIndexes,
   placeAndPersist,
+  persistAdoptedEntry,
   cancelAndPersist,
   listLocalOpen,
   getLocalByOrderId,

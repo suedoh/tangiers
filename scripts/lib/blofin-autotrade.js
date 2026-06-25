@@ -95,6 +95,76 @@ function sizingFor({ entry, stop, setupType }) {
   return { contracts, sizePerTp, rDollar };
 }
 
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// signalId → exchange-legal clientOrderId. BloFin accepts ≤32 alphanumeric
+// (probed 2026-06-24). "1782137423928-VAH-65080" → "1782137423928VAH65080".
+// Deterministic so an ambiguous-write entry can be looked up after a timeout.
+function clientOrderIdFor(signalId) {
+  return signalId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 32);
+}
+
+// After an ambiguous timeout: did the entry actually land? Poll briefly
+// (propagation ~200ms). Resting orders live on orders-pending; a filled
+// market entry lands in orders-history (which carries clientOrderId — fills-
+// history does NOT). Returns the exchange order record (with .state) or null.
+async function resolveEntry(instId, clientOrderId) {
+  for (let i = 0; i < 3; i++) {
+    try {
+      const live = (await blofin.getActiveOrders({ instId }) || [])
+        .find(o => o.clientOrderId === clientOrderId);
+      if (live) return live;
+      const hist = (await blofin.getOrderHistory({ instId, clientOrderId, limit: 10 }) || [])
+        .find(o => o.clientOrderId === clientOrderId);
+      if (hist) return hist;
+    } catch (_) { /* keep polling */ }
+    await sleep(700);
+  }
+  return null;
+}
+
+const LANDED_STATES = new Set(['live', 'filled', 'partially_filled', 'partial_filled']);
+
+/**
+ * Resilient market-entry placement (the autotrade-timeout fix).
+ *
+ *   place → on timeout/error, resolve by clientOrderId:
+ *     • landed (live/filled) → ADOPT: persist + return (SL step then protects it)
+ *     • not landed / cancelled / rejected → retry (max 2 attempts)
+ *   exhausted → throw err with err.dropped=true (caller dead-letters)
+ *
+ * Reusing the SAME clientOrderId across attempts means BloFin rejects a
+ * duplicate (probed), so a double-position is impossible even if resolve
+ * has a false-negative — the retry's dup-rejection routes back through
+ * resolve→adopt. Returns { doc, adopted }.
+ */
+async function placeEntryResilient({ instId, side, contracts, signalId }) {
+  const clientOrderId = clientOrderIdFor(signalId);
+  const orderArgs = {
+    instId, side, orderType: 'market', size: String(contracts),
+    marginMode: 'isolated', positionSide: 'net', clientOrderId,
+  };
+  const MAX_ATTEMPTS = 2;
+  let lastErr;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const { doc } = await store.placeAndPersist(orderArgs, { signalId });
+      return { doc, adopted: false };
+    } catch (e) {
+      lastErr = e;
+      const found = await resolveEntry(instId, clientOrderId);
+      if (found && LANDED_STATES.has(String(found.state).toLowerCase())) {
+        const doc = await store.persistAdoptedEntry(found, signalId);
+        return { doc, adopted: true };
+      }
+      // not landed (or explicitly cancelled/rejected) → retry with same id
+    }
+  }
+  const err = new Error(`entry dropped after ${MAX_ATTEMPTS} attempts: ${lastErr?.message || 'unknown'}`);
+  err.dropped = true;
+  throw err;
+}
+
 /**
  * Main entry. Throws on hard failures (sizing, no equity); returns
  * `{ skipped: 'reason' }` on soft skips; returns `{ orders: [...] }`
@@ -148,15 +218,19 @@ async function autotrade({
   //    attached `stopLossTriggerPrice` field gets cancelled by BloFin in net
   //    mode when subsequent entries fire or TP rungs fill. Standalone TPSL
   //    (step 2) survives partial closes and additional entries.
-  const entryResult = await store.placeAndPersist({
-    instId,
-    side,
-    orderType:            'market',
-    size:                 String(contracts),
-    marginMode:           'isolated',
-    positionSide:         'net',
-  }, { signalId });
-  orders.push({ kind: 'entry', orderId: entryResult.doc.orderId });
+  //
+  //    Resilient placement: a transient API timeout no longer silently drops
+  //    the signal. On timeout we resolve by clientOrderId and adopt a landed
+  //    entry (so the SL step protects it) or retry; only a genuine exhaustion
+  //    returns { dropped } for the caller to dead-letter.
+  let entryResult;
+  try {
+    entryResult = await placeEntryResilient({ instId, side, contracts, signalId });
+  } catch (e) {
+    if (e.dropped) return { signalId, direction, dropped: e.message, orders };
+    throw e;
+  }
+  orders.push({ kind: 'entry', orderId: entryResult.doc.orderId, adopted: entryResult.adopted });
 
   // 1b. STANDALONE SL via /order-tpsl. Mark-price trigger resists wicks.
   //     We POST then VERIFY then auto-flatten on verification failure —

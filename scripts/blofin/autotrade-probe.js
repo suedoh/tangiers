@@ -55,6 +55,12 @@ async function cleanup(signalId) {
       try { await store.cancelAndPersist(d.orderId, SYMBOL); } catch (_) { /* swallow */ }
     }
   }
+  // Cancel any standalone SL conditional (Phase B.6 — separate tpslId namespace).
+  try {
+    const pendingSL = await blofin.getPendingTPSL({ instId: SYMBOL });
+    const items = (pendingSL || []).map(o => ({ instId: SYMBOL, tpslId: o.tpslId }));
+    if (items.length) await blofin.cancelTPSL(items);
+  } catch (_) { /* swallow */ }
   // Flatten any position from the entry that may have filled.
   try {
     const positions = await blofin.getPositions(SYMBOL);
@@ -120,16 +126,18 @@ async function main() {
       entry, stop, tp1, tp2, tp3,
     });
     assert(!result.skipped, `autotrade skipped: ${result.skipped}`);
-    assert(result.orders.length === 4, `expected 4 orders, got ${result.orders.length}`);
-    result.orders.forEach(o => console.log(`  ✓ ${o.kind}: ${o.orderId || ('ERROR — ' + o.error)}`));
+    assert(!result.dropped, `autotrade dropped: ${result.dropped}`);
+    // Post-B.6: entry + standalone SL + tp1/tp2/tp3 = 5 orders.
+    assert(result.orders.length === 5, `expected 5 orders, got ${result.orders.length}`);
+    result.orders.forEach(o => console.log(`  ✓ ${o.kind}: ${o.orderId || o.tpslId || ('ERROR — ' + o.error)}`));
 
     await sleep(800);
 
-    // [3/5] Mongo has all 4 orders linked to signalId
-    console.log('[3/5] Mongo — 4 orders linked to signalId…');
+    // [3/5] Mongo has all 5 orders linked to signalId (entry + sl + 3 TPs)
+    console.log('[3/5] Mongo — 5 orders linked to signalId…');
     const linked = await db.blofinOrders().find({ signalId, env: 'demo' }).toArray();
-    assert(linked.length === 4, `expected 4 docs, got ${linked.length}`);
-    console.log(`  ✓ ${linked.length} docs (entry + tp1 + tp2 + tp3)`);
+    assert(linked.length === 5, `expected 5 docs, got ${linked.length}`);
+    console.log(`  ✓ ${linked.length} docs (entry + sl + tp1 + tp2 + tp3)`);
 
     // [4/5] Idempotency — re-firing same signal is a no-op
     console.log('[4/5] idempotency check…');
