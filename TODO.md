@@ -14,7 +14,12 @@ Done. Use `!took <id>` after a signal, `!exit tp1|tp2|tp3|stop|manual <price>` o
 
 ### Phase D attribution — `trades.json` outcome vs exchange ground truth
 
-**Status:** DATA THRESHOLD MET 2026-07-02 — 18 placed signals (14 with resolved outcomes) ≥ the 15-pair gate. Analysis can start any time.
+**Status:** ✅ ANALYSIS COMPLETE 2026-07-02 — verdict: mean delta −0.71R/signal (3.5× the 0.2R threshold), **Phase D evaluation pivots to exchange fills as ground truth**. Full decomposition in [refactors/2026-07-02-phase-d-attribution.md](refactors/2026-07-02-phase-d-attribution.md). Tool: `scripts/audit/phase-d-attribution.js` (re-run at the D→E gate).
+
+**Three execution decisions now pending (user sign-off, value order):**
+1. Reprice TP ladder + SL off actual entry fill (kills the burned-rung defect — a "+3R" trade realized +0.05R)
+2. Entry-model choice: confirmation-gated autotrade vs bar-walk-all-placed-signals (2 unconfirmed Jun-27 shorts cost −4.2R on trades the strategy never takes)
+3. One-direction book guard (net-mode cross-cancellation poisoned 4 of 18 signals' attribution)
 
 **Caveats for the join (2026-07-02):**
 - Filter to `executionStatus === 'placed'`; report `dropped` rows separately (7 timeout-era + 11 Mongo-outage-era — see `refactors/2026-07-02-phase-d-ops-resilience.md`)
