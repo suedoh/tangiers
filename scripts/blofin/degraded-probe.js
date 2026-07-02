@@ -109,7 +109,11 @@ async function main() {
     : 0;
 
   const mark    = await getMarkPrice();
-  const entry   = quantize(mark * 0.95);
+  // Near-mark geometry: since the 2026-07-02 ladder-repricing fix, a planned
+  // entry far below mark correctly ABORTS (all rungs inside fill) — that path
+  // is covered by autotrade-probe scenario C. Here we want the full 5-order
+  // placement to exercise the spool.
+  const entry   = quantize(mark * 0.9995);
   const stop    = quantize(entry * 0.995);
   const tp1     = quantize(entry * 1.005);
   const tp2     = quantize(entry * 1.01);
@@ -127,9 +131,10 @@ async function main() {
     assert(!result.skipped, `autotrade skipped: ${result.skipped}`);
     assert(!result.dropped, `autotrade DROPPED — the fix did not hold: ${result.dropped}`);
     assert(!result.aborted, `autotrade aborted: ${result.aborted}`);
-    assert(result.orders.length === 5, `expected 5 orders, got ${result.orders.length}`);
+    const placedOrders = result.orders.filter(o => o.orderId || o.tpslId);
+    assert(placedOrders.length === 5, `expected 5 orders, got ${placedOrders.length}`);
     assert(result.unsynced === true, 'expected unsynced=true in degraded mode');
-    result.orders.forEach(o => console.log(`  ✓ ${o.kind}: ${o.orderId || o.tpslId || ('ERROR — ' + o.error)}`));
+    placedOrders.forEach(o => console.log(`  ✓ ${o.kind}: ${o.orderId || o.tpslId || ('ERROR — ' + o.error)}`));
 
     // [2/5] Spool has all 5 docs for this signal
     console.log('[2/5] spool contains 5 docs for signalId…');

@@ -31,3 +31,4 @@ notes/audits/cron.log
 .blofin-spool.ndjson.processing-*
 .watchdog-state.json
 .blofin-recon-alert.json
+trades.json.bak-executedtrack-fix

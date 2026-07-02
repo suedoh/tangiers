@@ -208,11 +208,16 @@ Tangiers is the **Ace Trading System** — an automated multi-instrument trade s
 
 The three instrument pipelines above are **signal generation**. BloFin is the **execution layer** — when a BTC signal fires and `BLOFIN_AUTOTRADE=true`, the system also places real orders on BloFin's demo (paper-trading) exchange. Currently in **Phase D** — 4–8 week forward test on demo before any live capital. Roadmap: [refactors/2026-06-15-blofin-roadmap.md](refactors/2026-06-15-blofin-roadmap.md).
 
-### Per-signal order layout (after Phase B.6 fix)
+### Per-signal order layout (after B.6 SL fix + 2026-07-02 fill-repricing fixes)
 
-1. **Market entry** at signal direction, full sized via `ACCOUNT_EQUITY_USD × RISK_PER_TRADE_PCT × tierMult` math
-2. **Standalone SL** via `/api/v1/trade/order-tpsl` (mark-price trigger) — verified before continuing; if verification fails, entry is immediately reduce-only-flattened
-3. **Three reduce-only TP limits** at 1/3 size each at TP1 / TP2 / TP3 prices
+0. **One-direction book guard** — if an opposite-direction net position is open, the signal is skipped (`executionStatus='skipped'`). Net mode makes fills fungible; an opposite entry silently *closes* the old position against its cost basis (fail-open on read errors).
+1. **Market entry** at signal direction, sized via `ACCOUNT_EQUITY_USD × RISK_PER_TRADE_PCT × tierMult` off the planned entry→stop distance
+2. **Actual fill fetched** (orders-history by clientOrderId). Everything downstream keys off the fill, not the plan. Fallback to planned entry = pre-fix behavior.
+3. **Risk trim** — if fill→stop distance exceeds plan by >25% (entry chased toward the stop), position is reduced so dollar risk returns to budget. The SL **price** stays structural (zone break = thesis invalidation); size, not stop, absorbs the slippage.
+4. **Standalone SL** via `/api/v1/trade/order-tpsl` (mark-price trigger) — verified before continuing; if verification fails, entry is immediately reduce-only-flattened
+5. **TP ladder repriced off the fill** — rungs the fill already ran through are *burned* (dropped; their size redistributes to survivors so a full run still flattens). Zero survivors ⇒ the move consumed the target zone before entry: flatten + `aborted`. Measured origin: a "+3R" signal realized +0.05R on 2026-06-26 with all rungs burned. See [refactors/2026-07-02-execution-model-fixes.md](refactors/2026-07-02-execution-model-fixes.md).
+
+**Executed-hypothetical track:** placed signals are also bar-walked from fire-time into `executedOutcome/executedPnlR/executedClosedAt` in trades.json (separate fields — the canonical confirmation-gated outcome pipeline and its anomaly counters are untouched). Exchange fills remain the true P&L (`scripts/audit/phase-d-attribution.js`); Phase D evaluation uses exchange truth per the 2026-07-02 attribution verdict.
 
 ### Why the SL is standalone, not attached
 

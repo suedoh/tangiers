@@ -1840,6 +1840,29 @@ function postAutotradeDeadLetter(signalId, setup, trigger, detail) {
 // Bars since signal: capped at 336 (7 days × 48 × 30M bars) — more than enough
 // for any trade to resolve. Older open trades expire after 30 days as before.
 
+// Shared bar-walk: first bar to cross stop or a TP decides the outcome
+// (stop wins same-bar ambiguity — conservative, documented). Used by the
+// canonical confirmed-track and the executed-hypothetical track below.
+function walkBarsForOutcome(t, relevantBars) {
+  const stop = t.stop, tp1 = t.tp1, tp2 = t.tp2, tp3 = t.tp3;
+  const rr1 = parseFloat(t.rr1), rr2 = parseFloat(t.rr2), rr3 = parseFloat(t.rr3);
+
+  for (const bar of relevantBars) {
+    if (t.direction === 'long') {
+      if (bar.low  <= stop) return { outcome: 'stop', pnlR: -1.0, closedBarTime: bar.time };
+      if (bar.high >= tp3)  return { outcome: 'tp3',  pnlR: rr3,  closedBarTime: bar.time };
+      if (bar.high >= tp2)  return { outcome: 'tp2',  pnlR: rr2,  closedBarTime: bar.time };
+      if (bar.high >= tp1)  return { outcome: 'tp1',  pnlR: rr1,  closedBarTime: bar.time };
+    } else {
+      if (bar.high >= stop) return { outcome: 'stop', pnlR: -1.0, closedBarTime: bar.time };
+      if (bar.low  <= tp3)  return { outcome: 'tp3',  pnlR: rr3,  closedBarTime: bar.time };
+      if (bar.low  <= tp2)  return { outcome: 'tp2',  pnlR: rr2,  closedBarTime: bar.time };
+      if (bar.low  <= tp1)  return { outcome: 'tp1',  pnlR: rr1,  closedBarTime: bar.time };
+    }
+  }
+  return null;
+}
+
 async function updateOutcomes(client) {
   const trades = readTrades();
   let changed = false;
@@ -1892,54 +1915,12 @@ async function updateOutcomes(client) {
     const relevantBars = bars.filter(b => b.time > signalTs);
     if (relevantBars.length === 0) continue;
 
-    const stop = t.stop;
-    const tp1  = t.tp1;
-    const tp2  = t.tp2;
-    const tp3  = t.tp3;
-    const rr1  = parseFloat(t.rr1);
-    const rr2  = parseFloat(t.rr2);
-    const rr3  = parseFloat(t.rr3);
-
-    let outcome = null;
-    let pnlR    = null;
-    let closedBarTime = null;
-
-    for (const bar of relevantBars) {
-      if (t.direction === 'long') {
-        const stopHit = bar.low  <= stop;
-        const tp3Hit  = bar.high >= tp3;
-        const tp2Hit  = bar.high >= tp2;
-        const tp1Hit  = bar.high >= tp1;
-
-        // Same-bar ambiguity: stop wins (conservative). Documented in code
-        // comment above, in commit message of 6a93d0d ("stop wins on ambiguous
-        // same-bar crossings"), in BACKTESTING.md and docs/performance-tracking.md.
-        if (stopHit) {
-          outcome = 'stop'; pnlR = -1.0; closedBarTime = bar.time; break;
-        } else if (tp3Hit) {
-          outcome = 'tp3'; pnlR = rr3; closedBarTime = bar.time; break;
-        } else if (tp2Hit) {
-          outcome = 'tp2'; pnlR = rr2; closedBarTime = bar.time; break;
-        } else if (tp1Hit) {
-          outcome = 'tp1'; pnlR = rr1; closedBarTime = bar.time; break;
-        }
-      } else {
-        const stopHit = bar.high >= stop;
-        const tp3Hit  = bar.low  <= tp3;
-        const tp2Hit  = bar.low  <= tp2;
-        const tp1Hit  = bar.low  <= tp1;
-
-        if (stopHit) {
-          outcome = 'stop'; pnlR = -1.0; closedBarTime = bar.time; break;
-        } else if (tp3Hit) {
-          outcome = 'tp3'; pnlR = rr3; closedBarTime = bar.time; break;
-        } else if (tp2Hit) {
-          outcome = 'tp2'; pnlR = rr2; closedBarTime = bar.time; break;
-        } else if (tp1Hit) {
-          outcome = 'tp1'; pnlR = rr1; closedBarTime = bar.time; break;
-        }
-      }
-    }
+    // Same-bar ambiguity: stop wins (conservative). Documented in commit
+    // 6a93d0d, BACKTESTING.md and docs/performance-tracking.md.
+    const walk = walkBarsForOutcome(t, relevantBars);
+    const outcome       = walk?.outcome ?? null;
+    const pnlR          = walk?.pnlR ?? null;
+    const closedBarTime = walk?.closedBarTime ?? null;
 
     if (outcome !== null) {
       t.outcome  = outcome;
@@ -1977,6 +1958,53 @@ async function updateOutcomes(client) {
         writeState(state);
         log(`Extended cooldown: ${zoneKey} (${t.direction}) locked for 6h after stop`);
       }
+    }
+  }
+
+  // ── Executed-hypothetical track (Phase D attribution fix 2, 2026-07-02) ──
+  //
+  // Autotrade enters at signal-fire, so PLACED signals carry real exchange
+  // exposure even when the 30M confirmation never comes — 2 unconfirmed
+  // Jun-27 shorts were SL'd for −4.2R while invisible to the canonical track.
+  // Walk placed signals from fire-time into SEPARATE fields so the canonical
+  // confirmation-gated pipeline (outcome/pnlR, daily-R kill, weekly cohorts,
+  // win-rate-diff anomaly counters) stays byte-identical. Exchange fills
+  // remain the true P&L; this is the like-for-like chart-hypothetical.
+  // No cooldown side effects — those belong to the strategy track only.
+  // Only meaningful for signals fired after 2026-07-02 (older ones are
+  // outside the 7-day bar window and expire; attribution uses Mongo fills).
+  for (const t of trades) {
+    if (t.executionStatus !== 'placed' || t.executedOutcome) continue;
+
+    const age = Date.now() - new Date(t.firedAt).getTime();
+    if (age > 30 * 24 * 60 * 60 * 1000) {
+      t.executedOutcome  = 'expired';
+      t.executedPnlR     = 0;
+      t.executedClosedAt = new Date().toISOString();
+      changed = true;
+      continue;
+    }
+
+    const signalTs = new Date(t.firedAt).getTime() / 1000;
+    // Bars cover only the trailing 7 days. A trade that fired BEFORE the
+    // window start would be walked from mid-history and mislabeled (verified
+    // live 2026-07-02: 16 stale trades all "resolved" on the window's first
+    // wide bar). Walk only when full history since fire-time is present;
+    // pre-window trades stay null and expire at 30d — the exchange fills in
+    // blofin_orders are their ground truth anyway.
+    if (!bars.length || signalTs < bars[0].time) continue;
+    const relevantBars = bars.filter(b => b.time > signalTs);
+    if (relevantBars.length === 0) continue;
+
+    const walk = walkBarsForOutcome(t, relevantBars);
+    if (walk) {
+      t.executedOutcome  = walk.outcome;
+      t.executedPnlR     = walk.pnlR;
+      t.executedClosedAt = walk.closedBarTime
+        ? new Date(walk.closedBarTime * 1000).toISOString()
+        : new Date().toISOString();
+      changed = true;
+      log(`Trade ${t.id} executed-track: ${walk.outcome} | R: ${walk.pnlR} (canonical outcome: ${t.outcome ?? 'null'})`);
     }
   }
 

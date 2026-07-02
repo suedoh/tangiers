@@ -125,6 +125,56 @@ async function resolveEntry(instId, clientOrderId) {
 
 const LANDED_STATES = new Set(['live', 'filled', 'partially_filled', 'partial_filled']);
 
+// Actual average fill price of the market entry, from orders-history (carries
+// clientOrderId + averagePrice — probed 2026-06-24). Market fills propagate in
+// ~200ms; poll briefly. Null on failure — caller falls back to planned entry,
+// which reproduces pre-2026-07-02 behaviour exactly.
+async function fetchEntryFill(instId, clientOrderId) {
+  const FILLED = new Set(['filled', 'partially_filled', 'partial_filled']);
+  for (let i = 0; i < 5; i++) {
+    try {
+      const hist = (await blofin.getOrderHistory({ instId, clientOrderId, limit: 10 }) || [])
+        .find(o => o.clientOrderId === clientOrderId);
+      const px = Number(hist?.averagePrice);
+      if (hist && FILLED.has(String(hist.state).toLowerCase()) && Number.isFinite(px) && px > 0) {
+        return { price: px, size: Number(hist.filledSize) || null };
+      }
+    } catch (_) { /* keep polling */ }
+    await sleep(400);
+  }
+  return null;
+}
+
+/**
+ * Ladder repricing off the ACTUAL fill (Phase D attribution fix 1).
+ *
+ * TP prices stay structural (HVN/VAL targets are where the liquidity is) —
+ * but a rung the market already ran through fills instantly at ≈$0 profit
+ * (measured: a "+3R" signal realized +0.05R on 2026-06-26). Rungs not at
+ * least `minGap` beyond the fill in the profit direction are BURNED: dropped,
+ * with their size redistributed across surviving rungs so a full TP run
+ * still flattens the position. Zero survivors means the market ran through
+ * the entire target zone before we filled — the caller aborts and flattens.
+ *
+ * Pure function; unit-asserted in the autotrade probe.
+ */
+function repriceLadder({ direction, fill, stopDist, total, tps }) {
+  const minGap = Math.max(fill * 0.0005, stopDist * 0.1);
+  const beyond = ([, px]) => direction === 'long' ? px >= fill + minGap : px <= fill - minGap;
+  const survivors = tps.filter(beyond);
+  const burned    = tps.filter(t => !beyond(t)).map(([kind]) => kind);
+  if (!survivors.length) return { rungs: [], burned, minGap };
+
+  const n     = survivors.length;
+  const share = quantizeSize(total / n);
+  const rungs = survivors.map(([kind, price], i) => ({
+    kind, price,
+    // Last rung absorbs the rounding remainder so Σsizes ≈ total.
+    size: i === n - 1 ? Math.round((total - share * (n - 1)) * 10) / 10 : share,
+  })).filter(r => r.size >= MIN_SIZE);
+  return { rungs, burned, minGap };
+}
+
 /**
  * Resilient market-entry placement (the autotrade-timeout fix).
  *
@@ -213,6 +263,19 @@ async function autotrade({
     if (prior) return { skipped: `signal ${signalId} already on exchange (degraded idempotency, order ${prior.orderId})` };
   }
 
+  // One-direction book guard (Phase D attribution fix 3). Net mode makes
+  // fills fungible: an entry opposite an open position CLOSES it against the
+  // old cost basis instead of opening exposure — 4 of 18 Phase-D signals were
+  // unattributable this way (2026-07-02 analysis). Fail-open on read errors:
+  // blocking the money path on a stalled read is how signals got dropped.
+  try {
+    const positions = await blofin.getPositions(instId);
+    const net = (positions || []).reduce((s, p) => s + Number(p.positions || p.pos || 0), 0);
+    if ((direction === 'long' && net < 0) || (direction === 'short' && net > 0)) {
+      return { skipped: `opposite-direction position open (net ${net}) — one-direction book guard` };
+    }
+  } catch (_) { /* best-effort guard; proceed */ }
+
   const sizing = sizingFor({ entry, stop, setupType });
   if (sizing.error) return { skipped: sizing.error };
 
@@ -220,6 +283,7 @@ async function autotrade({
   const side       = direction === 'long' ? 'buy' : 'sell';
   const closeSide  = direction === 'long' ? 'sell' : 'buy';
   const stopPx     = quantizePrice(stop);
+  const plannedStopDist = Math.abs(entry - stop);
 
   const orders = [];
   let unsynced = false; // any doc that went to the spool instead of Mongo
@@ -243,6 +307,72 @@ async function autotrade({
   orders.push({ kind: 'entry', orderId: entryResult.doc.orderId, adopted: entryResult.adopted });
   if (entryResult.doc?.unsynced) unsynced = true;
 
+  // 1a. ACTUAL FILL — everything downstream (risk, ladder) keys off where the
+  //     market entry really filled, not the planned entry. Fallback to the
+  //     planned entry reproduces the old behaviour (no trim, no burns).
+  let fillPx = null;
+  try {
+    const fillInfo = await fetchEntryFill(instId, clientOrderIdFor(signalId));
+    fillPx = fillInfo?.price ?? null;
+  } catch (_) {}
+  if (fillPx == null) {
+    fillPx = entry;
+    orders.push({ kind: 'fill', price: fillPx, note: 'fill price unavailable — planned-entry fallback' });
+  } else {
+    orders.push({ kind: 'fill', price: fillPx });
+  }
+
+  // 1b. RISK TRIM — sizing assumed |planned entry − stop| per contract; when
+  //     the fill chases toward the stop, per-contract risk grows past the
+  //     budget (measured: a −1R stop realized −2.49R on 2026-06-25, half of
+  //     it from fill drift). If actual fill→stop distance exceeds plan by
+  //     >25%, reduce the position so dollar risk returns to rDollar. The SL
+  //     PRICE stays structural — the zone break is the thesis invalidation;
+  //     tightening the stop toward the fill would just get wicked out.
+  let liveContracts = contracts;
+  const actualStopDist = Math.abs(fillPx - stopPx);
+  if (actualStopDist > plannedStopDist * 1.25) {
+    const target = quantizeSize(rDollar / (actualStopDist * CONTRACT_VALUE_BTC));
+    const trim   = Math.round((liveContracts - target) * 10) / 10;
+    if (trim >= MIN_SIZE && target >= MIN_SIZE) {
+      try {
+        await blofin.placeOrder({
+          instId, side: closeSide, orderType: 'market', size: String(trim),
+          marginMode: 'isolated', positionSide: 'net', reduceOnly: true,
+        });
+        liveContracts = target;
+        orders.push({ kind: 'trim', size: trim,
+          reason: `fill→stop ${(actualStopDist / plannedStopDist).toFixed(2)}× planned risk` });
+      } catch (e) {
+        orders.push({ kind: 'trim', error: e.message }); // SL still covers full size
+      }
+    }
+  }
+
+  // 1c. LADDER REPRICE — drop rungs the fill already ran through. Zero
+  //     survivors = the move consumed the whole target zone before we got
+  //     in; there is nothing left to capture — flatten and abort.
+  const ladder = repriceLadder({
+    direction, fill: fillPx, stopDist: plannedStopDist, total: liveContracts,
+    tps: [['tp1', tp1], ['tp2', tp2], ['tp3', tp3]].filter(([, p]) => p != null)
+      .map(([k, p]) => [k, quantizePrice(p)]),
+  });
+  if (ladder.burned.length) orders.push({ kind: 'burned_rungs', rungs: ladder.burned });
+  if (ladder.rungs.length === 0) {
+    try {
+      await blofin.placeOrder({
+        instId, side: closeSide, orderType: 'market', size: String(liveContracts),
+        marginMode: 'isolated', positionSide: 'net', reduceOnly: true,
+      });
+    } catch (e) {
+      orders.push({ kind: 'flatten_failed', error: e.message });
+    }
+    return {
+      signalId, direction, contracts: liveContracts, rDollar, orders, fill: fillPx,
+      aborted: `all TP rungs inside fill ${fillPx} — market ran through targets, flattened`,
+    };
+  }
+
   // 1b. STANDALONE SL via /order-tpsl. Mark-price trigger resists wicks.
   //     We POST then VERIFY then auto-flatten on verification failure —
   //     this is the post-condition invariant that makes the whole design
@@ -251,7 +381,7 @@ async function autotrade({
   let slTpslId = null;
   try {
     const slRes = await blofin.placeTPSL({
-      instId, side: closeSide, size: contracts,
+      instId, side: closeSide, size: liveContracts,
       marginMode: 'isolated', positionSide: 'net', reduceOnly: 'true',
       slTriggerPrice: stopPx, slOrderPrice: '-1', slTriggerPriceType: 'mark',
     });
@@ -264,7 +394,7 @@ async function autotrade({
     if (slPlaced) {
       const slDoc = await store.persistTPSL({
         tpslId: slTpslId, signalId, instId,
-        side: closeSide, size: contracts,
+        side: closeSide, size: liveContracts,
         slTriggerPrice: stopPx, slTriggerPriceType: 'mark',
       });
       if (slDoc?.unsynced) unsynced = true;
@@ -279,7 +409,7 @@ async function autotrade({
   if (!slPlaced) {
     try {
       await blofin.placeOrder({
-        instId, side: closeSide, orderType: 'market', size: String(contracts),
+        instId, side: closeSide, orderType: 'market', size: String(liveContracts),
         marginMode: 'isolated', positionSide: 'net', reduceOnly: true,
       });
     } catch (e) {
@@ -287,41 +417,42 @@ async function autotrade({
       orders.push({ kind: 'flatten_failed', error: e.message });
     }
     return {
-      signalId, direction, contracts, sizePerTp, rDollar, orders,
+      signalId, direction, contracts: liveContracts, sizePerTp, rDollar, orders, fill: fillPx,
       aborted: 'SL verification failed — entry flattened',
     };
   }
   orders.push({ kind: 'sl', tpslId: slTpslId, trigger: stopPx });
 
-  // 2-4. TP rungs as reduce-only limits at 1/3 size each.
-  for (const [kind, tpPrice] of [['tp1', tp1], ['tp2', tp2], ['tp3', tp3]]) {
-    if (tpPrice == null) continue;
+  // 2-4. Surviving TP rungs as reduce-only limits (sizes from repriceLadder —
+  //      burned-rung size redistributed so a full run still flattens).
+  for (const rung of ladder.rungs) {
     try {
       const tpResult = await store.placeAndPersist({
         instId,
         side:         closeSide,
         orderType:    'limit',
-        size:         String(sizePerTp),
-        price:        String(quantizePrice(tpPrice)),
+        size:         String(rung.size),
+        price:        String(rung.price),
         marginMode:   'isolated',
         positionSide: 'net',
         reduceOnly:   true,
       }, { signalId });
-      orders.push({ kind, orderId: tpResult.doc.orderId });
+      orders.push({ kind: rung.kind, orderId: tpResult.doc.orderId, size: rung.size });
       if (tpResult.unsynced) unsynced = true;
     } catch (e) {
       // Surface but don't unwind — partial ladder is preferable to
       // orphaned entry-SL pair. B.5 will reconcile.
-      orders.push({ kind, error: e.message });
+      orders.push({ kind: rung.kind, error: e.message });
     }
   }
 
-  return { signalId, direction, contracts, sizePerTp, rDollar, orders,
-           unsynced: unsynced || undefined };
+  return { signalId, direction, contracts: liveContracts, sizePerTp, rDollar, orders,
+           fill: fillPx, unsynced: unsynced || undefined };
 }
 
 module.exports = {
   isEnabled,
   sizingFor,
   autotrade,
+  repriceLadder, // exported for probe unit assertions
 };

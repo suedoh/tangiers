@@ -16,10 +16,14 @@ Done. Use `!took <id>` after a signal, `!exit tp1|tp2|tp3|stop|manual <price>` o
 
 **Status:** ✅ ANALYSIS COMPLETE 2026-07-02 — verdict: mean delta −0.71R/signal (3.5× the 0.2R threshold), **Phase D evaluation pivots to exchange fills as ground truth**. Full decomposition in [refactors/2026-07-02-phase-d-attribution.md](refactors/2026-07-02-phase-d-attribution.md). Tool: `scripts/audit/phase-d-attribution.js` (re-run at the D→E gate).
 
-**Three execution decisions now pending (user sign-off, value order):**
-1. Reprice TP ladder + SL off actual entry fill (kills the burned-rung defect — a "+3R" trade realized +0.05R)
-2. Entry-model choice: confirmation-gated autotrade vs bar-walk-all-placed-signals (2 unconfirmed Jun-27 shorts cost −4.2R on trades the strategy never takes)
-3. One-direction book guard (net-mode cross-cancellation poisoned 4 of 18 signals' attribution)
+**Execution decisions — SHIPPED 2026-07-02** (see [refactors/2026-07-02-execution-model-fixes.md](refactors/2026-07-02-execution-model-fixes.md)):
+1. ✅ Ladder repriced off actual fill + risk trim + burn-abort (SL price stays structural; size absorbs slippage)
+2. ✅ Measurement option: `executedOutcome` bar-walk for placed signals (separate fields; canonical pipeline untouched)
+3. ✅ One-direction book guard (fail-open)
+
+**Still open:**
+- **Confirmation-gated autotrade entry** (strategic) — decide after the executed-vs-canonical gap accumulates ~30 days of data. The 2 unconfirmed Jun-27 shorts cost −4.2R on trades the strategy never takes; but confirmation-gating trades later/fewer. Data will arbitrate.
+- **SL slippage baseline** — 56.8pts trigger-to-fill measured on one stop; accumulate over more stops before Phase E sizing assumptions.
 
 **Caveats for the join (2026-07-02):**
 - Filter to `executionStatus === 'placed'`; report `dropped` rows separately (7 timeout-era + 11 Mongo-outage-era — see `refactors/2026-07-02-phase-d-ops-resilience.md`)
