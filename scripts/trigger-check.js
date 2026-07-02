@@ -1770,6 +1770,31 @@ function markExecution(signalId, status, detail) {
   }
 }
 
+// Degraded-mode placement note: orders ARE live on the exchange with a
+// verified SL, but Mongo was down so the docs went to .blofin-spool.ndjson.
+// Recon backfills them automatically once Mongo returns — this note exists
+// so a degraded placement is visible the moment it happens, not at the next
+// recon. Yellow, not red: the money path worked.
+function postAutotradeDegradedNote(signalId, result) {
+  try {
+    const webhook = process.env.BLOFIN_RECON_WEBHOOK;
+    if (!webhook) return;
+    const { postWebhook } = require('./lib/discord');
+    const body = [
+      `⚠️ **AUTOTRADE PLACED IN DEGRADED MODE — MONGO DOWN**`,
+      `Orders are live on the exchange with a verified SL; bookkeeping is spooled, not lost.`,
+      ``,
+      `**Signal** \`${signalId}\` · ${result.orders?.length || 0} orders placed`,
+      `**Spool** \`.blofin-spool.ndjson\` — recon backfills automatically when Mongo returns.`,
+      `**Action** Restore Docker/MongoDB (\`docker compose up -d\`). The watchdog should already be alerting.`,
+    ].join('\n');
+    postWebhook(webhook, 'approaching', body, `Autotrade degraded mode · ${new Date().toUTCString().slice(5, 25)} UTC`)
+      .catch(e => log(`degraded-note post failed: ${e.message}`));
+  } catch (e) {
+    log(`postAutotradeDegradedNote failed for ${signalId}: ${e.message}`);
+  }
+}
+
 // Loud dead-letter: an autotrade that exhausted its retries (or threw) never
 // reached the exchange. Post a red alert to #blofin-recon so a drop is never
 // silent — the user can manually enter if the setup is still live. No auto
@@ -2352,7 +2377,9 @@ async function main() {
             if (r.skipped)      { log(`Autotrade skipped: ${r.skipped}`);              markExecution(signalId, 'skipped', r.skipped); }
             else if (r.dropped) { log(`Autotrade DROPPED: ${r.dropped}`);              markExecution(signalId, 'dropped', r.dropped); postAutotradeDeadLetter(signalId, setup, trigger, r.dropped); }
             else if (r.aborted) { log(`Autotrade aborted: ${r.aborted}`);              markExecution(signalId, 'aborted', r.aborted); }
-            else                { log(`Autotrade placed ${r.orders?.length || 0} orders for ${signalId}`); markExecution(signalId, 'placed', `${r.orders?.length || 0} orders`); }
+            else                { const det = `${r.orders?.length || 0} orders${r.unsynced ? ' (mongo-down, spooled)' : ''}`;
+                                  log(`Autotrade placed ${det} for ${signalId}`); markExecution(signalId, 'placed', det);
+                                  if (r.unsynced) postAutotradeDegradedNote(signalId, r); }
           }).catch(e => { log(`Autotrade error: ${e.message}`); markExecution(signalId, 'dropped', e.message); postAutotradeDeadLetter(signalId, setup, trigger, e.message); });
         }
         triggered = true;

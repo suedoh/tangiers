@@ -22,8 +22,24 @@
 
 const blofin = require('./blofin');
 const db     = require('./db');
+const fs     = require('fs');
+const path   = require('path');
 
 const SCHEMA_VERSION = 1;
+
+// Mongo-outage spool. When Mongo is unreachable, placed-order docs are
+// appended here (NDJSON, one doc per line) instead of being lost — recon
+// backfills them via flushSpool() once Mongo returns. Exists because the
+// 2026-06-27→29 Docker outage turned every fully-qualified signal into a
+// hard drop (+18R missed): the exchange placement was fine, only the
+// bookkeeping needed Mongo. Exchange-side safety holds without Mongo —
+// BloFin rejects duplicate clientOrderIds, and the SL verify step never
+// touched Mongo in the first place.
+const ROOT       = path.resolve(__dirname, '..', '..');
+const SPOOL_FILE = path.join(ROOT, '.blofin-spool.ndjson');
+
+const MONGO_RETRY_BACKOFF_MS = 60_000;
+let _mongoDownUntil = 0;
 
 let _indexesEnsured = false;
 async function ensureIndexes() {
@@ -35,6 +51,88 @@ async function ensureIndexes() {
   await col.createIndex({ signalId: 1 },                                   { name: 'signalId' });
   await col.createIndex({ instId: 1, state: 1 },                           { name: 'instId_state' });
   _indexesEnsured = true;
+}
+
+/**
+ * Non-throwing Mongo availability check with a 60s backoff so a single
+ * autotrade call (entry + SL + 3 TPs) doesn't stack five connect timeouts
+ * during an outage.
+ */
+async function mongoAvailable() {
+  if (Date.now() < _mongoDownUntil) return false;
+  try {
+    await ensureIndexes();
+    return true;
+  } catch (e) {
+    _mongoDownUntil = Date.now() + MONGO_RETRY_BACKOFF_MS;
+    console.error(`[blofin-store] Mongo unavailable (backoff ${MONGO_RETRY_BACKOFF_MS / 1000}s): ${e.message}`);
+    return false;
+  }
+}
+
+function spoolDoc(doc) {
+  try {
+    fs.appendFileSync(SPOOL_FILE, JSON.stringify(doc) + '\n');
+    return true;
+  } catch (e) {
+    // Order is live on the exchange but now unrecorded anywhere — recon's
+    // retroactive pass is the last-resort net for this.
+    console.error(`[blofin-store] SPOOL WRITE FAILED — order ${doc.orderId} placed but unrecorded: ${e.message}`);
+    return false;
+  }
+}
+
+/**
+ * Backfill spooled docs into Mongo. Called at the top of every recon run.
+ * Claim-by-rename before processing so a concurrent autotrade append can
+ * never be lost: appends that land after the rename create a fresh spool
+ * file, picked up next cycle. Crashed flushes leave .processing-* files,
+ * which are recovered here first. Throws if Mongo is still down (nothing
+ * is claimed in that case).
+ */
+async function flushSpool() {
+  const dir  = path.dirname(SPOOL_FILE);
+  const base = path.basename(SPOOL_FILE);
+
+  const hasSpool = fs.existsSync(SPOOL_FILE);
+  const leftovers = fs.readdirSync(dir).filter(f => f.startsWith(base + '.processing-'));
+  if (!hasSpool && leftovers.length === 0) return { flushed: 0, errors: 0 };
+
+  await ensureIndexes(); // Mongo still down → throw before claiming anything
+
+  const claims = leftovers.map(f => path.join(dir, f));
+  if (fs.existsSync(SPOOL_FILE)) {
+    const claimed = SPOOL_FILE + '.processing-' + Date.now();
+    fs.renameSync(SPOOL_FILE, claimed);
+    claims.push(claimed);
+  }
+
+  let flushed = 0, errors = 0;
+  for (const file of claims) {
+    let fileClean = true;
+    const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+    for (const line of lines) {
+      try {
+        const doc = JSON.parse(line);
+        for (const k of ['createdAt', 'updatedAt', 'lastSyncedAt', 'cancelledAt', 'filledAt']) {
+          if (doc[k]) doc[k] = new Date(doc[k]);
+        }
+        doc.lastSyncedAt = new Date();
+        await db.blofinOrders().updateOne(
+          { orderId: doc.orderId, env: doc.env },
+          { $setOnInsert: doc },
+          { upsert: true },
+        );
+        flushed++;
+      } catch (e) {
+        fileClean = false;
+        errors++;
+        console.error(`[blofin-store] spool flush error: ${e.message}`);
+      }
+    }
+    if (fileClean) fs.unlinkSync(file);
+  }
+  return { flushed, errors };
 }
 
 function env() { return blofin.isDemo() ? 'demo' : 'prod'; }
@@ -54,7 +152,11 @@ function now() { return new Date(); }
  * local record retroactively. See reconcileOnce().
  */
 async function placeAndPersist(orderArgs, { signalId } = {}) {
-  await ensureIndexes();
+  // Availability check BEFORE the placement, spool decision AFTER it.
+  // Invariant: once blofin.placeOrder succeeds, this function never throws —
+  // an order that is live on the exchange must always land in Mongo or the
+  // spool, never in an exception.
+  const mongoUp = await mongoAvailable();
   const apiRes = await blofin.placeOrder(orderArgs);
   const orderId = apiRes?.orderId || apiRes?.[0]?.orderId;
   if (!orderId) throw new Error('placeOrder returned no orderId: ' + JSON.stringify(apiRes));
@@ -81,8 +183,18 @@ async function placeAndPersist(orderArgs, { signalId } = {}) {
     cancelledAt:    null,
     filledAt:       null,
   };
-  await db.blofinOrders().insertOne(doc);
-  return { apiRes, doc };
+
+  if (mongoUp) {
+    try {
+      await db.blofinOrders().insertOne(doc);
+      return { apiRes, doc };
+    } catch (e) {
+      console.error(`[blofin-store] Mongo insert failed post-placement — spooling ${orderId}: ${e.message}`);
+    }
+  }
+  doc.unsynced = true;
+  spoolDoc(doc);
+  return { apiRes, doc, unsynced: true };
 }
 
 /**
@@ -93,7 +205,7 @@ async function placeAndPersist(orderArgs, { signalId } = {}) {
  * so it co-exists harmlessly if recon already retro-created the same order.
  */
 async function persistAdoptedEntry(exOrder, signalId) {
-  await ensureIndexes();
+  const mongoUp = await mongoAvailable();
   const doc = {
     orderId:        exOrder.orderId,
     clientOrdId:    exOrder.clientOrderId || null,
@@ -117,11 +229,20 @@ async function persistAdoptedEntry(exOrder, signalId) {
     filledAt:       null,
     adopted:        true,
   };
-  await db.blofinOrders().updateOne(
-    { orderId: doc.orderId, env: env() },
-    { $setOnInsert: doc },
-    { upsert: true },
-  );
+  if (mongoUp) {
+    try {
+      await db.blofinOrders().updateOne(
+        { orderId: doc.orderId, env: env() },
+        { $setOnInsert: doc },
+        { upsert: true },
+      );
+      return doc;
+    } catch (e) {
+      console.error(`[blofin-store] adopted-entry upsert failed — spooling ${doc.orderId}: ${e.message}`);
+    }
+  }
+  doc.unsynced = true;
+  spoolDoc(doc);
   return doc;
 }
 
@@ -245,6 +366,14 @@ async function reconcileOnce({ instId } = {}) {
   const exchangeOrders = await blofin.getActiveOrders({ instId });
   const exchangeById   = new Map((exchangeOrders || []).map(o => [o.orderId, o]));
 
+  // Standalone SL conditionals live in the TPSL namespace, NOT orders-pending.
+  // Diffing them against getActiveOrders (pre-2026-07-02 behaviour) marked
+  // every live SL disappeared→cancelled in Mongo minutes after placement —
+  // harmless for safety (findUnprotectedPositions reads the exchange), but it
+  // corrupted the book the Phase-D attribution join relies on.
+  const pendingTPSL = await blofin.getPendingTPSL({ instId });
+  const tpslById    = new Map((pendingTPSL || []).map(o => [o.tpslId, o]));
+
   const localOpen = await listLocalOpen(instId);
   const localById = new Map(localOpen.map(o => [o.orderId, o]));
 
@@ -252,7 +381,10 @@ async function reconcileOnce({ instId } = {}) {
 
   // Local → exchange
   for (const local of localOpen) {
-    if (exchangeById.has(local.orderId)) {
+    const stillOnExchange = local.kind === 'sl_conditional'
+      ? tpslById.has(local.tpslId || local.orderId)
+      : exchangeById.has(local.orderId);
+    if (stillOnExchange) {
       await db.blofinOrders().updateOne(
         { orderId: local.orderId, env: env() },
         { $set: { lastSyncedAt: now() } },
@@ -273,7 +405,9 @@ async function reconcileOnce({ instId } = {}) {
     try {
       await db.blofinOrders().insertOne({
         orderId:        ex.orderId,
-        clientOrdId:    ex.clientOrdId || null,
+        // BloFin's field is clientOrderId (probed 2026-06-24); clientOrdId is
+        // the docs' vocabulary and is never populated in responses.
+        clientOrdId:    ex.clientOrderId || ex.clientOrdId || null,
         signalId:       null,
         instId:         ex.instId,
         side:           ex.side,
@@ -329,8 +463,8 @@ async function reconcileOnce({ instId } = {}) {
  * with `kind: 'sl_conditional'` so reconcileOnce can find them.
  */
 async function persistTPSL({ tpslId, signalId, instId, side, size, slTriggerPrice, slTriggerPriceType }) {
-  await ensureIndexes();
-  return db.blofinOrders().insertOne({
+  const mongoUp = await mongoAvailable();
+  const doc = {
     orderId:          tpslId,            // reuse the field for indexing
     tpslId,                              // explicit too, for clarity
     kind:             'sl_conditional',
@@ -352,7 +486,18 @@ async function persistTPSL({ tpslId, signalId, instId, side, size, slTriggerPric
     lastSyncedAt:     now(),
     cancelledAt:      null,
     filledAt:         null,
-  });
+  };
+  if (mongoUp) {
+    try {
+      await db.blofinOrders().insertOne(doc);
+      return doc;
+    } catch (e) {
+      console.error(`[blofin-store] TPSL insert failed — spooling ${tpslId}: ${e.message}`);
+    }
+  }
+  doc.unsynced = true;
+  spoolDoc(doc);
+  return doc;
 }
 
 /**
@@ -377,6 +522,8 @@ async function findUnprotectedPositions() {
 
 module.exports = {
   ensureIndexes,
+  mongoAvailable,
+  flushSpool,
   placeAndPersist,
   persistAdoptedEntry,
   cancelAndPersist,
@@ -386,4 +533,5 @@ module.exports = {
   reconcileOnce,
   persistTPSL,
   findUnprotectedPositions,
+  SPOOL_FILE,
 };

@@ -222,10 +222,13 @@ BloFin's `stopLossTriggerPrice` field on entry orders gets **cancelled by the ex
 
 | Cadence | What runs | Where |
 |---|---|---|
-| Every 3 min | `recon-once.js` — heals state, resolves fills, checks protection invariant | `ace-cron` container |
-| Daily 21:00 UTC | `daily-pnl-report.js` — account snapshot + open positions + today's activity → `#blofin-recon` | `ace-cron` container |
+| Every 3 min | `recon-once.js` — flushes degraded-mode spool, heals state, resolves fills, checks protection invariant | **host crontab** (moved from container 2026-07-02 — container egress drew Cloudflare 403s) |
+| Every 5 min | `ops/watchdog.js` — Docker/Mongo/recon-freshness/spool health; auto-restarts Docker; alerts `#blofin-recon` | host crontab |
+| Daily 17:00 ET (≈21:00 UTC) | `daily-pnl-report.js` — account snapshot + open positions + today's activity → `#blofin-recon` | host crontab |
 
-**Protection invariant:** every recon cycle calls `findUnprotectedPositions()` — any open exchange position without an active SL triggers a red 🚨 error post in `#blofin-recon` (same alert palette as recon errors). This is the safety net if Phase B.6 verification ever fails to fire.
+**Protection invariant:** every recon cycle calls `findUnprotectedPositions()` — any open exchange position without an active SL triggers a red 🚨 error post in `#blofin-recon` (same alert palette as recon errors). This is the safety net if Phase B.6 verification ever fails to fire. A recon that *cannot run at all* (Mongo down, API blocked) now also posts a red alert (rate-limited 30 min) instead of failing silently.
+
+**Mongo-outage degradation (2026-07-02):** autotrade no longer hard-drops when Mongo is unreachable. Idempotency falls back to an exchange-side clientOrderId lookup, orders place normally (entry + verified SL + TPs), and the docs spool to `.blofin-spool.ndjson`; the next recon flushes the spool into `blofin_orders`. Signals tag `executionStatus='placed'` with detail `(mongo-down, spooled)`. Born from the 2026-06-27→29 Docker outage: 11 signals hard-dropped (+18R missed). See [refactors/2026-07-02-phase-d-ops-resilience.md](refactors/2026-07-02-phase-d-ops-resilience.md).
 
 ### Key file structure
 
@@ -242,8 +245,10 @@ scripts/blofin/store-probe.js      ← `make blofin-store-probe` — Phase B.3 s
 scripts/blofin/autotrade-probe.js  ← `make blofin-autotrade-probe` — Phase B.4 smoke
 scripts/blofin/resolve-probe.js    ← `make blofin-resolve-probe` — Phase B.5 smoke
 scripts/blofin/sl-probe.js         ← `make blofin-sl-probe` — Phase B.6 smoke
-scripts/blofin/recon-once.js       ← every-3-min reconciliation runner (Docker cron)
-scripts/blofin/daily-pnl-report.js ← daily 21:00 UTC P&L summary (Docker cron)
+scripts/blofin/degraded-probe.js   ← `make blofin-degraded-probe` — Mongo-DOWN autotrade smoke
+scripts/blofin/recon-once.js       ← every-3-min reconciliation runner (host cron)
+scripts/blofin/daily-pnl-report.js ← daily 17:00 ET P&L summary (host cron)
+scripts/ops/watchdog.js            ← `make watchdog` — every-5-min host infra watchdog
 ```
 
 ### Required `.env` keys
@@ -400,6 +405,9 @@ macOS), and **Docker `ace-cron` container** for everything else.
 1,6,11,16,21,26,31,36,41,46,51,56 * * * *    scripts/poly/btc-5/trigger-check.js   — Poly BTC-5 bar scorer
 5   0,4,8,12,16,20 * * *                     scripts/ew/run.js                      — EW analysis 6×/day
 *   * * * *                                  scripts/discord-bot/index.js           — multi-channel bot every minute (CDP-bound handlers)
+*/3 * * * *                                  scripts/blofin/recon-once.js           — BloFin recon (host since 2026-07-02 — container drew 403s)
+*/5 * * * *                                  scripts/ops/watchdog.js                — infra watchdog: Docker/Mongo/recon/spool → #blofin-recon
+0   17 * * *                                 scripts/blofin/daily-pnl-report.js     — BloFin daily P&L (17:00 ET ≈ 21:00 UTC)
 ```
 
 View installed host jobs: `crontab -l`
@@ -414,7 +422,6 @@ View installed host jobs: `crontab -l`
 
 ```
 55  * * * *                                  scripts/migrate/import-trades.js       — Mongo sync hourly :55
-*/3 * * * *                                  scripts/blofin/recon-once.js           — BloFin order recon every 3 min
 0   9 * * 1                                  scripts/weekly-report.js               — BTC Monday 09:00 UTC
 0   14 * * 0                                 scripts/weekly-war-report.js           — BTC Sunday 14:00 UTC
 0   21 * * 0                                 scripts/bz/weekly-report.js            — BZ! Sunday 21:00 UTC
@@ -459,6 +466,9 @@ pm2 restart bz-news-watch
 | `.tradingview-lock` | lib/lock.js | Ephemeral mutex (deleted after each CDP session) |
 | `ew-forecasts.json` | EW pipeline | All EW forecasts — schema-identical to future Mongo `wave_forecasts` collection |
 | `.ew-state.json` | EW pipeline | Last run/backtest/brief timestamps, open forecast IDs, calibration buckets |
+| `.blofin-spool.ndjson` | blofin-store (degraded mode) | Order docs placed while Mongo was down; flushed by next recon (appears only during outages) |
+| `.watchdog-state.json` | ops/watchdog.js | Per-class failure strikes, alerting flags, alert rate-limit timestamps |
+| `.blofin-recon-alert.json` | blofin/recon-once.js | Rate-limit timestamp for recon-failure alerts |
 
 ---
 

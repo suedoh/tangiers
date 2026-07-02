@@ -70,6 +70,27 @@ cron: ## Install host crontab entries (CDP-bound — BTC trigger + Discord bot).
 	  (crontab -l 2>/dev/null; echo ""; echo "# Ace Trading System — Discord bot every 1 minute (CDP-bound handlers — host only)"; echo "$$BOTLINE") | crontab -; \
 	  echo "✓  Discord bot cron installed (every 1 min)"; \
 	fi; \
+	if crontab -l 2>/dev/null | grep -q "scripts/blofin/recon-once.js"; then \
+	  echo "✓  BloFin recon cron already installed — skipping"; \
+	else \
+	  RECONLINE="*/3 * * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/blofin/recon-once.js >> $(TRADING)/logs/blofin-recon.log 2>&1"; \
+	  (crontab -l 2>/dev/null; echo ""; echo "# BloFin recon every 3 min — HOST since 2026-07-02 (container egress drew Cloudflare 403s)"; echo "$$RECONLINE") | crontab -; \
+	  echo "✓  BloFin recon cron installed (every 3 min, host)"; \
+	fi; \
+	if crontab -l 2>/dev/null | grep -q "scripts/blofin/daily-pnl-report.js"; then \
+	  echo "✓  BloFin daily P&L cron already installed — skipping"; \
+	else \
+	  PNLLINE="0 17 * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/blofin/daily-pnl-report.js >> $(TRADING)/logs/blofin-daily-pnl.log 2>&1"; \
+	  (crontab -l 2>/dev/null; echo ""; echo "# BloFin daily P&L — 17:00 ET ≈ 21:00 UTC (EDT; 22:00 UTC in EST) — HOST since 2026-07-02"; echo "$$PNLLINE") | crontab -; \
+	  echo "✓  BloFin daily P&L cron installed (17:00 ET, host)"; \
+	fi; \
+	if crontab -l 2>/dev/null | grep -q "scripts/ops/watchdog.js"; then \
+	  echo "✓  Watchdog cron already installed — skipping"; \
+	else \
+	  WDLINE="*/5 * * * * PATH=$$NODEDIR:/usr/local/bin:/usr/bin:/bin $(NODE) $(TRADING)/scripts/ops/watchdog.js >> $(TRADING)/logs/watchdog.log 2>&1"; \
+	  (crontab -l 2>/dev/null; echo ""; echo "# Host infra watchdog every 5 min — Docker/Mongo/recon/spool health, auto-restarts Docker, alerts #blofin-recon"; echo "$$WDLINE") | crontab -; \
+	  echo "✓  Watchdog cron installed (every 5 min, host)"; \
+	fi; \
 	echo ""; \
 	echo "Docker-side scheduled jobs:    edit scripts/cron/ace.crontab"; \
 	echo "Apply changes:                 docker compose restart ace-cron"; \
@@ -175,5 +196,11 @@ blofin-resolve-probe: ## Phase B.5 health check: market entry → live → disap
 blofin-sl-probe: ## Phase B.6 health check: standalone TPSL conditional placement + verify + cancel + protection invariant
 	@$(NODE) $(TRADING)/scripts/blofin/sl-probe.js
 
-blofin-daily-pnl: ## Run the daily P&L report now (posts to #blofin-recon). Cron runs it at 21:00 UTC.
+blofin-daily-pnl: ## Run the daily P&L report now (posts to #blofin-recon). Cron runs it at 17:00 ET (host).
 	@$(NODE) $(TRADING)/scripts/blofin/daily-pnl-report.js
+
+blofin-degraded-probe: ## Mongo-DOWN autotrade smoke: place + spool + degraded idempotency + cleanup (refuses if Mongo is up; needs BLOFIN_AUTOTRADE=true)
+	@$(NODE) $(TRADING)/scripts/blofin/degraded-probe.js
+
+watchdog: ## Run the host infra watchdog once (Docker/Mongo/recon/spool health check)
+	@$(NODE) $(TRADING)/scripts/ops/watchdog.js

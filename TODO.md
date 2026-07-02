@@ -14,7 +14,12 @@ Done. Use `!took <id>` after a signal, `!exit tp1|tp2|tp3|stop|manual <price>` o
 
 ### Phase D attribution — `trades.json` outcome vs exchange ground truth
 
-**Status:** Tracking. Don't start until ≥15 paired signals accumulate (~mid-July 2026 at current 5/day cadence).
+**Status:** DATA THRESHOLD MET 2026-07-02 — 18 placed signals (14 with resolved outcomes) ≥ the 15-pair gate. Analysis can start any time.
+
+**Caveats for the join (2026-07-02):**
+- Filter to `executionStatus === 'placed'`; report `dropped` rows separately (7 timeout-era + 11 Mongo-outage-era — see `refactors/2026-07-02-phase-d-ops-resilience.md`)
+- `sl_conditional` docs before 2026-07-02 are unreliably marked `cancelled` (recon diffed them against the wrong endpoint — fixed); use `entry`/`tp_limit` fills for P&L
+- Watch for the 2026-06-26 same-zone double-entries (01:10/01:40 and 03:30/03:40 pairs) — correlated, not independent
 
 **Why:** Phase D health check on 2026-06-19 surfaced signal `1781716810783-VAH-65724` (2026-06-17T17:20 UTC short B) marked `outcome=stop` in `trades.json` but on BloFin its TP1 + TP2 buy-limits both filled profitably at $65,454 / $65,310 before any stop trigger. The bar-walk outcome detector in `trigger-check.js` conservatively scores `stop` when a 30M candle wicks above SL *and* below TP1 in the same bar; the exchange knows the atomic fill order. CLAUDE.md flagged this as a known limitation; Phase D is the first time we have paired data to quantify systematic drift.
 

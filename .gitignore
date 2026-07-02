@@ -25,3 +25,9 @@ analysis/
 # Mid-week audit cron outputs (generated; the README and weekly-plan .md files ARE committed)
 notes/audits/*.txt
 notes/audits/cron.log
+
+# BloFin degraded-mode + watchdog state (2026-07-02)
+.blofin-spool.ndjson
+.blofin-spool.ndjson.processing-*
+.watchdog-state.json
+.blofin-recon-alert.json

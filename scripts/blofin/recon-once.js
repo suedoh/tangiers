@@ -33,6 +33,10 @@ function buildSummary(report) {
   const lines = [];
   lines.push(`**Matched (live):** ${report.matched}`);
 
+  if (report.spoolFlushed) {
+    lines.push('', `**Spool backfilled (degraded-mode placements):** ${report.spoolFlushed}`);
+  }
+
   if (report.filled?.length) {
     lines.push('', `**Filled:** ${report.filled.length}`);
     report.filled.slice(0, 10).forEach(f => lines.push(fmtFill(f)));
@@ -78,7 +82,9 @@ function isMaterial(report) {
       || (report.retroactive?.length || 0) > 0
       || (report.resolveErrors?.length || 0) > 0
       || (report.errors?.length || 0) > 0
-      || (report.unprotectedPositions?.length || 0) > 0;
+      || (report.unprotectedPositions?.length || 0) > 0
+      || (report.spoolFlushed || 0) > 0
+      || (report.spoolErrors || 0) > 0;
 }
 
 function fmtUnprotected(p) {
@@ -93,7 +99,16 @@ async function main() {
   console.log('instId: ', instId || '(all)');
   console.log('');
 
+  // Backfill any orders placed while Mongo was down (degraded-mode spool)
+  // BEFORE reconciling, so this same pass resolves their live/filled state.
+  const spool = await store.flushSpool();
+  if (spool.flushed || spool.errors) {
+    console.log(`spool backfill: ${spool.flushed} doc(s) flushed, ${spool.errors} error(s)`);
+  }
+
   const report = await store.reconcileOnce({ instId });
+  report.spoolFlushed = spool.flushed;
+  report.spoolErrors  = spool.errors;
 
   console.log(`matched (still live):    ${report.matched}`);
   console.log(`disappeared (this pass): ${report.disappeared.length}`);
@@ -126,8 +141,43 @@ async function main() {
   await db.disconnect();
 }
 
+// A recon that cannot run at all is itself an incident — the protection
+// invariant is dark. This used to be console-only: 143 consecutive-burst
+// BloFin 403s (Jun 20–27) never reached Discord because the happy-path
+// poster above only fires when reconcileOnce completes. Rate-limited to
+// one alert per 30 min so a sustained outage doesn't flood the channel.
+const RECON_ALERT_COOLDOWN_MS = 30 * 60 * 1000;
+
+async function postReconFailure(err) {
+  const webhook = process.env.BLOFIN_RECON_WEBHOOK;
+  if (!webhook) return;
+  const fs   = require('fs');
+  const path = require('path');
+  const stateFile = path.resolve(__dirname, '..', '..', '.blofin-recon-alert.json');
+  try {
+    const st = (() => { try { return JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { return {}; } })();
+    if (st.lastAlertAt && Date.now() - st.lastAlertAt < RECON_ALERT_COOLDOWN_MS) return;
+    st.lastAlertAt = Date.now();
+    fs.writeFileSync(stateFile, JSON.stringify(st));
+
+    const firstLine = String(err?.message || err).split('\n')[0].slice(0, 300);
+    const body = [
+      `🚨 **RECON FAILED — PROTECTION INVARIANT NOT CHECKED** 🚨`,
+      `The reconciliation pass threw before completing. Open positions are NOT being verified for SL coverage until this recovers.`,
+      ``,
+      `**Error** \`${firstLine}\``,
+      `**Action** Check Mongo (\`docker compose ps\`) and BloFin API reachability. Alerts limited to one per 30 min.`,
+    ].join('\n');
+    await discord.postWebhook(webhook, 'error', body,
+      `BloFin recon failure · ${blofin.isDemo() ? 'demo' : 'PROD'} · ${new Date().toUTCString().slice(5, 25)} UTC`);
+  } catch (postErr) {
+    console.error('recon failure alert failed:', postErr.message);
+  }
+}
+
 main().catch(async e => {
   console.error('unexpected:', e);
+  await postReconFailure(e);
   try { await db.disconnect(); } catch (_) {}
   process.exit(1);
 });

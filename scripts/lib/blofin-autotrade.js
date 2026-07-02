@@ -196,13 +196,22 @@ async function autotrade({
     return { skipped: `daily-R kill active: today's R = ${todayR.toFixed(2)} ≤ floor ${dailyR.DAILY_R_KILL_FLOOR}` };
   }
 
-  // Ensure Mongo connection + indexes before any read (idempotency lookup
-  // hits blofin_orders.signalId).
-  await store.ensureIndexes();
-
-  // Idempotency — bail before any API call.
-  const existing = await db.blofinOrders().findOne({ signalId, env: 'demo' });
-  if (existing) return { skipped: `signal ${signalId} already traded (order ${existing.orderId})` };
+  // Idempotency. Mongo lookup when available; exchange lookup when not.
+  //
+  // A Mongo outage must NOT drop a fully-qualified signal — the 2026-06-27→29
+  // Docker outage hard-dropped 11 signals (+18R missed) purely because this
+  // step threw before any exchange call. Safety holds without Mongo: the
+  // deterministic clientOrderId is rejected by BloFin on reuse (probed
+  // 2026-06-24), the SL verify-or-flatten step never needed Mongo, and every
+  // placement below spools to .blofin-spool.ndjson for recon to backfill.
+  const mongoUp = await store.mongoAvailable();
+  if (mongoUp) {
+    const existing = await db.blofinOrders().findOne({ signalId, env: 'demo' });
+    if (existing) return { skipped: `signal ${signalId} already traded (order ${existing.orderId})` };
+  } else {
+    const prior = await resolveEntry(instId, clientOrderIdFor(signalId));
+    if (prior) return { skipped: `signal ${signalId} already on exchange (degraded idempotency, order ${prior.orderId})` };
+  }
 
   const sizing = sizingFor({ entry, stop, setupType });
   if (sizing.error) return { skipped: sizing.error };
@@ -213,6 +222,7 @@ async function autotrade({
   const stopPx     = quantizePrice(stop);
 
   const orders = [];
+  let unsynced = false; // any doc that went to the spool instead of Mongo
 
   // 1. Market entry (NO attached SL — see Phase B.6 architectural fix). The
   //    attached `stopLossTriggerPrice` field gets cancelled by BloFin in net
@@ -231,6 +241,7 @@ async function autotrade({
     throw e;
   }
   orders.push({ kind: 'entry', orderId: entryResult.doc.orderId, adopted: entryResult.adopted });
+  if (entryResult.doc?.unsynced) unsynced = true;
 
   // 1b. STANDALONE SL via /order-tpsl. Mark-price trigger resists wicks.
   //     We POST then VERIFY then auto-flatten on verification failure —
@@ -251,11 +262,12 @@ async function autotrade({
     slPlaced = (pending || []).some(o => o.tpslId === slTpslId
       && Math.abs(Number(o.slTriggerPrice) - stopPx) < 0.5);
     if (slPlaced) {
-      await store.persistTPSL({
+      const slDoc = await store.persistTPSL({
         tpslId: slTpslId, signalId, instId,
         side: closeSide, size: contracts,
         slTriggerPrice: stopPx, slTriggerPriceType: 'mark',
       });
+      if (slDoc?.unsynced) unsynced = true;
     }
   } catch (e) {
     orders.push({ kind: 'sl', error: e.message });
@@ -296,6 +308,7 @@ async function autotrade({
         reduceOnly:   true,
       }, { signalId });
       orders.push({ kind, orderId: tpResult.doc.orderId });
+      if (tpResult.unsynced) unsynced = true;
     } catch (e) {
       // Surface but don't unwind — partial ladder is preferable to
       // orphaned entry-SL pair. B.5 will reconcile.
@@ -303,7 +316,8 @@ async function autotrade({
     }
   }
 
-  return { signalId, direction, contracts, sizePerTp, rDollar, orders };
+  return { signalId, direction, contracts, sizePerTp, rDollar, orders,
+           unsynced: unsynced || undefined };
 }
 
 module.exports = {
