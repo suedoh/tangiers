@@ -83,4 +83,36 @@ async function getKlines5mRange(startMs, endMs) {
   }));
 }
 
-module.exports = { getKline5m, btcDirection5m, getKlines5mRange };
+/**
+ * Fetch klines for an arbitrary interval with pagination (Binance caps a
+ * single request at 1000/1500 bars). Used by blofin/rewalk-executed.js to
+ * re-walk trades over full 30m history — beyond the 7-day CDP bar window.
+ * Returns normalized objects (same shape as getKline5m), chronological.
+ */
+async function getKlinesRange(startMs, endMs, interval = '30m') {
+  const out = [];
+  let cursor = startMs;
+  while (cursor < endMs) {
+    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=${interval}&startTime=${cursor}&endTime=${endMs}&limit=1000`;
+    const arr = await _get(url);
+    if (!Array.isArray(arr) || arr.length === 0) break;
+    for (const k of arr) {
+      out.push({
+        openTime:  k[0],
+        open:      parseFloat(k[1]),
+        high:      parseFloat(k[2]),
+        low:       parseFloat(k[3]),
+        close:     parseFloat(k[4]),
+        volume:    parseFloat(k[5]),
+        closeTime: k[6],
+      });
+    }
+    const last = arr[arr.length - 1][0];
+    if (last <= cursor) break; // no forward progress — bail rather than loop
+    cursor = last + 1;
+    if (arr.length < 1000) break;
+  }
+  return out;
+}
+
+module.exports = { getKline5m, btcDirection5m, getKlines5mRange, getKlinesRange };

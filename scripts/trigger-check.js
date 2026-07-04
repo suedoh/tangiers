@@ -30,6 +30,7 @@ const https = require('https');
 const { execFileSync } = require('child_process');
 const autotrade = require('./lib/blofin-autotrade');
 const { acquireLock, releaseLock } = require('./lib/lock');
+const { walkExecutedLadder } = require('./lib/executed-walk');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -1840,9 +1841,13 @@ function postAutotradeDeadLetter(signalId, setup, trigger, detail) {
 // Bars since signal: capped at 336 (7 days × 48 × 30M bars) — more than enough
 // for any trade to resolve. Older open trades expire after 30 days as before.
 
-// Shared bar-walk: first bar to cross stop or a TP decides the outcome
-// (stop wins same-bar ambiguity — conservative, documented). Used by the
-// canonical confirmed-track and the executed-hypothetical track below.
+// Canonical bar-walk: first bar to cross stop or a TP decides the outcome
+// (stop wins same-bar ambiguity — conservative, documented). Full position
+// is credited at the first touched level. Canonical confirmed-track ONLY —
+// the executed-hypothetical track uses lib/executed-walk.js (1/3-ladder
+// payoff) since 2026-07-04; crediting the full position at a distant tp3
+// produced phantom +40R records. See
+// refactors/2026-07-04-executed-track-ladder-rewalk.md.
 function walkBarsForOutcome(t, relevantBars) {
   const stop = t.stop, tp1 = t.tp1, tp2 = t.tp2, tp3 = t.tp3;
   const rr1 = parseFloat(t.rr1), rr2 = parseFloat(t.rr2), rr3 = parseFloat(t.rr3);
@@ -1996,7 +2001,7 @@ async function updateOutcomes(client) {
     const relevantBars = bars.filter(b => b.time > signalTs);
     if (relevantBars.length === 0) continue;
 
-    const walk = walkBarsForOutcome(t, relevantBars);
+    const walk = walkExecutedLadder(t, relevantBars);
     if (walk) {
       t.executedOutcome  = walk.outcome;
       t.executedPnlR     = walk.pnlR;
