@@ -199,7 +199,7 @@ async function placeEntryResilient({ instId, side, contracts, signalId }) {
   let lastErr;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const { doc } = await store.placeAndPersist(orderArgs, { signalId });
+      const { doc } = await store.placeAndPersist(orderArgs, { signalId, kind: 'entry' });
       return { doc, adopted: false };
     } catch (e) {
       lastErr = e;
@@ -465,7 +465,7 @@ async function autotrade({
         marginMode:   'isolated',
         positionSide: 'net',
         reduceOnly:   true,
-      }, { signalId });
+      }, { signalId, kind: 'tp_limit' });
       orders.push({ kind: rung.kind, orderId: tpResult.doc.orderId, size: rung.size });
       if (tpResult.unsynced) unsynced = true;
     } catch (e) {

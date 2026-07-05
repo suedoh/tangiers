@@ -99,9 +99,27 @@ async function checkMongo() {
 function checkReconFresh() {
   try {
     const ageMin = (Date.now() - fs.statSync(RECON_LOG).mtimeMs) / 60_000;
-    return ageMin <= RECON_STALE_MIN
-      ? { ok: true }
-      : { ok: false, detail: `blofin-recon.log last written ${ageMin.toFixed(0)} min ago (cadence: 3 min)` };
+    if (ageMin > RECON_STALE_MIN) {
+      return { ok: false, detail: `blofin-recon.log last written ${ageMin.toFixed(0)} min ago (cadence: 3 min)` };
+    }
+    // Freshness alone missed the 2026-07-04 E11000 loop: recon ran every
+    // 3 min but errored on every pass — watchdog said recon=ok throughout.
+    // Scan the last pass (final ~4KB) for error lines so runs-but-fails
+    // strikes the same class as doesn't-run. Two consecutive erroring
+    // passes 5 min apart → strike; the normal 2-strike alert flow applies.
+    const fd  = fs.openSync(RECON_LOG, 'r');
+    const sz  = fs.fstatSync(fd).size;
+    const len = Math.min(4096, sz);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, sz - len);
+    fs.closeSync(fd);
+    const tail     = buf.toString('utf8');
+    const lastPass = tail.slice(tail.lastIndexOf('─── BloFin reconciliation ───'));
+    const errLine  = lastPass.split('\n').find(l => /reconcile errors: [1-9]|resolve errors: [1-9]/.test(l));
+    if (errLine) {
+      return { ok: false, detail: `recon running but erroring — last pass: "${errLine.trim()}"` };
+    }
+    return { ok: true };
   } catch {
     return { ok: false, detail: 'blofin-recon.log missing' };
   }

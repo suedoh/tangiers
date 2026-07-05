@@ -151,7 +151,7 @@ function now() { return new Date(); }
  * this as "exchange has order we don't know about" and create the
  * local record retroactively. See reconcileOnce().
  */
-async function placeAndPersist(orderArgs, { signalId } = {}) {
+async function placeAndPersist(orderArgs, { signalId, kind } = {}) {
   // Availability check BEFORE the placement, spool decision AFTER it.
   // Invariant: once blofin.placeOrder succeeds, this function never throws —
   // an order that is live on the exchange must always land in Mongo or the
@@ -163,6 +163,10 @@ async function placeAndPersist(orderArgs, { signalId } = {}) {
 
   const doc = {
     orderId,
+    // 'entry' | 'tp_limit' — the CLAUDE.md schema always specified kind, but
+    // only sl_conditional docs ever set it (found in the 2026-07-04 audit);
+    // the attribution join needs it to separate entries from rungs.
+    kind:           kind || null,
     clientOrdId:    apiRes?.clientOrdId || apiRes?.[0]?.clientOrdId || null,
     signalId:       signalId || null,
     instId:         orderArgs.instId,
@@ -208,6 +212,7 @@ async function persistAdoptedEntry(exOrder, signalId) {
   const mongoUp = await mongoAvailable();
   const doc = {
     orderId:        exOrder.orderId,
+    kind:           'entry',   // adopted orders are always timed-out entries
     clientOrdId:    exOrder.clientOrderId || null,
     signalId:       signalId || null,
     instId:         exOrder.instId,
