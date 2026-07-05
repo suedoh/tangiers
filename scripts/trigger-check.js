@@ -31,6 +31,7 @@ const { execFileSync } = require('child_process');
 const autotrade = require('./lib/blofin-autotrade');
 const { acquireLock, releaseLock } = require('./lib/lock');
 const { walkExecutedLadder } = require('./lib/executed-walk');
+const { parseStudyNum } = require('./lib/parse-num');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -450,16 +451,24 @@ async function fetchOIBinance(price) {
   try {
     const d = await httpGet('https://fapi.binance.com/fapi/v1/openInterest?symbol=BTCUSDT');
     const oiCoins = parseFloat(d.openInterest);
-    return isNaN(oiCoins) || !price ? null : oiCoins * price / 1e9;
+    // Return raw COINS (BTC) — same unit as the CDP study read now that
+    // parse-num expands the "K" suffix ("106.84K" → 106,840 BTC ≈ Binance
+    // openInterest). The old ×price/1e9 ($B ≈ 6.7) mixed unit systems into
+    // _previousOI whenever the fallback engaged (589 times), producing
+    // phantom rising/falling OI trends. (price param kept for signature
+    // stability; no longer used.)
+    return isNaN(oiCoins) ? null : oiCoins;
   } catch (e) { log(`Binance OI error: ${e.message}`); return null; }
 }
 
 // ─── Indicator Parsers ────────────────────────────────────────────────────────
 
+// 2026-07-05 signal-brain audit fix: the old inline implementation stripped
+// TradingView's Unicode minus (every negative CVD parsed positive — zero
+// negative CDP reads in 7,841 since April) and dropped K/M/B suffixes
+// (cross-magnitude garbage in deltas). See lib/parse-num.js for the proof.
 function parseFloat_(str) {
-  if (str == null) return null;
-  const n = parseFloat(String(str).replace(/[^0-9.\-]/g, ''));
-  return isNaN(n) ? null : n;
+  return parseStudyNum(str);
 }
 
 function computeMACD(closes) {
@@ -522,7 +531,12 @@ function getOITrend(currentOI) {
   writeState(state);
   if (prev === null || currentOI === null) return null;
   const diff = currentOI - prev;
-  if (Math.abs(diff) < 0.05) return 'flat';
+  // Relative flat band (0.05% ≈ the old 0.05-absolute at the historical
+  // ~106.84 suffix-stripped scale) — unit-safe now that OI parses to raw
+  // coins. A >10× scale jump means the reading crossed unit systems (e.g.
+  // stale pre-fix state) — treat as first run rather than a phantom trend.
+  if (prev > 0 && (currentOI / prev > 10 || prev / currentOI > 10)) return null;
+  if (prev > 0 && Math.abs(diff) / prev < 0.0005) return 'flat';
   return diff > 0 ? 'rising' : 'falling';
 }
 
@@ -1268,8 +1282,13 @@ function checkInvalidations(price, indicators) {
       for (const t of trades) {
         if (t.outcome !== null) continue;
         if (Math.abs((t.zone?.mid ?? 0) - levelMid) < 50) {
-          t.outcome = 'invalidated'; t.closedAt = new Date().toISOString(); t.pnlR = -1.0;
-          log(`Trade for level ${key} marked invalidated`);
+          // Unconfirmed = the 30M entry trigger never fired = no position
+          // (BACKTESTING.md rule). Booking those at -1R put 13 phantom
+          // losses into the canonical record and the daily-R kill switch
+          // (2026-07-05 audit F4). Only a confirmed trade loses real R here.
+          t.outcome = 'invalidated'; t.closedAt = new Date().toISOString();
+          t.pnlR = t.confirmed ? -1.0 : 0;
+          log(`Trade for level ${key} marked invalidated (${t.confirmed ? 'confirmed, -1R' : 'unconfirmed, 0R'})`);
         }
       }
       writeTrades(trades);
@@ -1547,7 +1566,7 @@ function checkPendingConfirmation(price, indicators) {
       `Flat OI at initial alert has now confirmed. Institutional flow entered after the signal — this is the real entry.`,
       ``,
       `**CONFIRMATION ORDER FLOW**`,
-      `✅ OI: ${baselineOI?.toFixed(2)}B → ${oi?.toFixed(2)}B (+${oiPct}%) — new ${direction} positions opening`,
+      `✅ OI: ${baselineOI != null ? Math.round(baselineOI).toLocaleString() : '?'} → ${oi != null ? Math.round(oi).toLocaleString() : '?'} BTC (+${oiPct}%) — new ${direction} positions opening`,
       `✅ CVD: ${cvdBase} → ${cvdNow} (Δ ${cvdDeltaStr}) — conviction ${direction === 'long' ? 'surge' : 'drop'} confirmed`,
       ``,
       entryLine,
