@@ -206,8 +206,35 @@ async function cancelOrder(orderId, instId) {
 }
 
 /** List open/pending orders. `state` and `instId` are optional filters. */
-async function getActiveOrders({ instId, orderType } = {}) {
-  return _request('GET', '/api/v1/trade/orders-pending', { query: { instId, orderType } });
+/**
+ * Cursor-paginated: a single orders-pending request returns ONE page
+ * (default 20). With a stacked-ladder book the unpaginated read silently
+ * truncated — live rungs fell off the page and recon falsely cancelled them
+ * (2026-07-04, 4 corrupted docs + E11000 loop). Loops via `after` cursor,
+ * dedupes defensively, and bails on no-progress so an API that ignores the
+ * params degrades to the old single-page behavior instead of spinning.
+ */
+async function getActiveOrders({ instId, orderType, pageSize = 100 } = {}) {
+  const out = [];
+  const seen = new Set();
+  let after;
+  for (let page = 0; page < 10; page++) {
+    const batch = await _request('GET', '/api/v1/trade/orders-pending', {
+      query: { instId, orderType, limit: pageSize, after },
+    });
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    let added = 0;
+    for (const o of batch) {
+      const id = String(o.orderId);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push(o);
+      added++;
+    }
+    if (added === 0 || batch.length < pageSize) break;
+    after = batch[batch.length - 1].orderId;
+  }
+  return out;
 }
 
 /**
@@ -288,9 +315,32 @@ async function placeTPSL({
   return _request('POST', '/api/v1/trade/order-tpsl', { body });
 }
 
-/** Read all pending TP/SL conditional orders. */
-async function getPendingTPSL({ instId } = {}) {
-  return _request('GET', '/api/v1/trade/orders-tpsl-pending', { query: { instId } });
+/**
+ * Read all pending TP/SL conditional orders. Cursor-paginated for the same
+ * reason as getActiveOrders — one page truncates a fat book (latent today
+ * at ~11 SLs, breaks at scale).
+ */
+async function getPendingTPSL({ instId, pageSize = 100 } = {}) {
+  const out = [];
+  const seen = new Set();
+  let after;
+  for (let page = 0; page < 10; page++) {
+    const batch = await _request('GET', '/api/v1/trade/orders-tpsl-pending', {
+      query: { instId, limit: pageSize, after },
+    });
+    if (!Array.isArray(batch) || batch.length === 0) break;
+    let added = 0;
+    for (const o of batch) {
+      const id = String(o.tpslId ?? o.orderId);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push(o);
+      added++;
+    }
+    if (added === 0 || batch.length < pageSize) break;
+    after = batch[batch.length - 1].tpslId ?? batch[batch.length - 1].orderId;
+  }
+  return out;
 }
 
 /**

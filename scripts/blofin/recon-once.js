@@ -54,6 +54,11 @@ function buildSummary(report) {
     report.retroactive.slice(0, 5).forEach(id => lines.push(`• \`${id}\``));
   }
 
+  if (report.resurrected?.length) {
+    lines.push('', `**Resurrected (local state was wrong — exchange shows live):** ${report.resurrected.length}`);
+    report.resurrected.slice(0, 5).forEach(r => lines.push(`• \`${r.orderId}\` was \`${r.priorState}\``));
+  }
+
   if (report.disappeared?.length) {
     // Disappeared THIS pass but resolveDisappeared couldn't classify (e.g.
     // fills API errored). These will get retried next cycle.
@@ -80,6 +85,7 @@ function isMaterial(report) {
   return (report.filled?.length || 0) > 0
       || (report.cancelled?.length || 0) > 0
       || (report.retroactive?.length || 0) > 0
+      || (report.resurrected?.length || 0) > 0
       || (report.resolveErrors?.length || 0) > 0
       || (report.errors?.length || 0) > 0
       || (report.unprotectedPositions?.length || 0) > 0
@@ -91,10 +97,41 @@ function fmtUnprotected(p) {
   return `• ${p.instId}  ${p.side.toUpperCase()}  size=${p.size}  avgPx=${Number(p.avgPrice).toFixed(2)}`;
 }
 
+const ERR_REPEAT_COOLDOWN_MS = 30 * 60 * 1000;
+
+/**
+ * Rate-limit identical error-only reports to one Discord post per 30 min.
+ * Returns true when the post should go out (new error signature, or the
+ * cooldown elapsed) and records it. Shares .blofin-recon-alert.json with
+ * the hard-failure alert under distinct keys. Fails open — better to post
+ * a duplicate than to suppress a new failure.
+ */
+function shouldPostErrorRepeat(report) {
+  const fs   = require('fs');
+  const path = require('path');
+  const stateFile = path.resolve(__dirname, '..', '..', '.blofin-recon-alert.json');
+  const sig = [...(report.resolveErrors || []), ...(report.errors || [])]
+    .map(e => `${e.orderId}:${String(e.error).slice(0, 60)}`)
+    .sort()
+    .join('|');
+  try {
+    const st = (() => { try { return JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { return {}; } })();
+    if (st.lastErrSig === sig && Date.now() - (st.lastErrPostAt || 0) < ERR_REPEAT_COOLDOWN_MS) {
+      return false;
+    }
+    st.lastErrSig    = sig;
+    st.lastErrPostAt = Date.now();
+    fs.writeFileSync(stateFile, JSON.stringify(st));
+    return true;
+  } catch {
+    return true;
+  }
+}
+
 async function main() {
   const instId = process.argv[2] || undefined;
 
-  console.log('─── BloFin reconciliation ───');
+  console.log(`─── BloFin reconciliation ─── ${new Date().toISOString()}`);
   console.log('env:    ', blofin.isDemo() ? 'demo' : 'PROD');
   console.log('instId: ', instId || '(all)');
   console.log('');
@@ -115,6 +152,10 @@ async function main() {
   console.log(`resolved → filled:       ${report.resolvedFilled}`);
   console.log(`resolved → cancelled:    ${report.resolvedCancelled}`);
   console.log(`retroactive (new local): ${report.retroactive.length}`);
+  if (report.resurrected?.length) {
+    console.log(`resurrected → live:      ${report.resurrected.length}`);
+    report.resurrected.forEach(r => console.log('  ', r.orderId, `(was ${r.priorState})`));
+  }
   if (report.resolveErrors?.length) {
     console.log(`resolve errors: ${report.resolveErrors.length}`);
     report.resolveErrors.forEach(e => console.log('  ', e.orderId, '→', e.error));
@@ -129,11 +170,21 @@ async function main() {
   if (webhook && isMaterial(report)) {
     const isUnprotected = (report.unprotectedPositions?.length || 0) > 0;
     const hasErrors     = (report.resolveErrors?.length || 0) + (report.errors?.length || 0) > 0;
-    // Unprotected positions are the loudest alert — error type, takes priority.
-    const type    = (isUnprotected || hasErrors) ? 'error' : 'info';
-    const summary = buildSummary(report);
-    const footer  = `BloFin recon · ${blofin.isDemo() ? 'demo' : 'PROD'} · ${new Date().toUTCString().slice(5, 25)} UTC`;
-    await discord.postWebhook(webhook, type, summary, footer);
+
+    // Error-only repeats are cooled down to one post per 30 min: the
+    // 2026-07-04 E11000 loop posted an identical red error every 3 minutes,
+    // burying real alerts. Any OTHER material activity (fills, resurrections,
+    // unprotected positions) always posts.
+    const otherMaterial = isMaterial({ ...report, errors: [], resolveErrors: [] });
+    if (hasErrors && !otherMaterial && !shouldPostErrorRepeat(report)) {
+      console.log('error-only repeat within cooldown — Discord post suppressed');
+    } else {
+      // Unprotected positions are the loudest alert — error type, takes priority.
+      const type    = (isUnprotected || hasErrors) ? 'error' : 'info';
+      const summary = buildSummary(report);
+      const footer  = `BloFin recon · ${blofin.isDemo() ? 'demo' : 'PROD'} · ${new Date().toUTCString().slice(5, 25)} UTC`;
+      await discord.postWebhook(webhook, type, summary, footer);
+    }
   }
 
   console.log('');

@@ -304,7 +304,7 @@ async function resolveDisappeared({ instId } = {}) {
   if (instId) filter.instId = instId;
   const candidates = await db.blofinOrders().find(filter).toArray();
 
-  const out = { filled: [], cancelled: [], errors: [] };
+  const out = { filled: [], cancelled: [], resurrected: [], errors: [] };
 
   for (const order of candidates) {
     try {
@@ -345,13 +345,73 @@ async function resolveDisappeared({ instId } = {}) {
           fillPrice: avgPrice,
           fillSize:  totalSize,
         });
-      } else {
-        // No fills found — externally cancelled (or expired)
+      } else if (order.kind === 'sl_conditional') {
+        // TPSL ids don't appear in orders-history and a triggered SL
+        // legitimately vanishes from the TPSL namespace — keep the
+        // no-fills→cancelled rule for conditionals.
         await db.blofinOrders().updateOne(
           { orderId: order.orderId, env: env() },
           { $set: { state: 'cancelled', cancelledAt: now(), updatedAt: now() } },
         );
         out.cancelled.push(order.orderId);
+      } else {
+        // No fills — require positive confirmation before cancelling.
+        // 2026-07-04: a page-truncated pending read marked live resting
+        // rungs disappeared, and the same-pass no-fills→cancelled rule
+        // corrupted the book. A genuinely completed order ALWAYS appears
+        // in orders-history; absence means it is still resting.
+        const hist = (await blofin.getOrderHistory({
+          instId: order.instId, orderId: order.orderId, limit: 10,
+        }) || []).find(o => String(o.orderId) === String(order.orderId));
+        const st = String(hist?.state || '').toLowerCase();
+
+        if (hist && st.includes('fill') && !st.includes('cancel')) {
+          // Belt-and-braces: fills-history missed it but order-history says
+          // filled — trust the order record's aggregate fields.
+          await db.blofinOrders().updateOne(
+            { orderId: order.orderId, env: env() },
+            { $set: {
+                state:     'filled',
+                fillPrice: hist.averagePrice != null ? String(hist.averagePrice) : null,
+                fillSize:  hist.filledSize != null ? String(hist.filledSize) : null,
+                filledAt:  now(),
+                updatedAt: now(),
+              } },
+          );
+          out.filled.push({
+            orderId:  order.orderId,
+            instId:   order.instId,
+            side:     order.side,
+            signalId: order.signalId,
+            fillPrice: Number(hist.averagePrice) || null,
+            fillSize:  Number(hist.filledSize) || null,
+          });
+        } else if (hist) {
+          // Positive confirmation: exchange history says cancelled.
+          await db.blofinOrders().updateOne(
+            { orderId: order.orderId, env: env() },
+            { $set: { state: 'cancelled', cancelledAt: now(), updatedAt: now() } },
+          );
+          out.cancelled.push(order.orderId);
+        } else if ((order.reconMisses || 0) >= 2) {
+          // Not pending, no fills, no history, three passes in a row —
+          // give up so a truly-gone order can't ping-pong forever.
+          await db.blofinOrders().updateOne(
+            { orderId: order.orderId, env: env() },
+            { $set: { state: 'cancelled', cancelledAt: now(), updatedAt: now() } },
+          );
+          out.cancelled.push(order.orderId);
+        } else {
+          // Still resting — the pending read that missed it was truncated
+          // or flaky. Exchange truth wins: back to live; the next paginated
+          // pending read should match it.
+          await db.blofinOrders().updateOne(
+            { orderId: order.orderId, env: env() },
+            { $set: { state: 'live', updatedAt: now(), lastSyncedAt: now() },
+              $inc: { reconMisses: 1 } },
+          );
+          out.resurrected.push(order.orderId);
+        }
       }
     } catch (e) {
       out.errors.push({ orderId: order.orderId, error: e.message });
@@ -377,7 +437,7 @@ async function reconcileOnce({ instId } = {}) {
   const localOpen = await listLocalOpen(instId);
   const localById = new Map(localOpen.map(o => [o.orderId, o]));
 
-  const report = { matched: 0, disappeared: [], retroactive: [], errors: [] };
+  const report = { matched: 0, disappeared: [], retroactive: [], resurrected: [], errors: [] };
 
   // Local → exchange
   for (const local of localOpen) {
@@ -387,7 +447,7 @@ async function reconcileOnce({ instId } = {}) {
     if (stillOnExchange) {
       await db.blofinOrders().updateOne(
         { orderId: local.orderId, env: env() },
-        { $set: { lastSyncedAt: now() } },
+        { $set: { lastSyncedAt: now(), reconMisses: 0 } },
       );
       report.matched++;
     } else {
@@ -403,6 +463,21 @@ async function reconcileOnce({ instId } = {}) {
   for (const ex of exchangeOrders || []) {
     if (localById.has(ex.orderId)) continue;
     try {
+      // A doc may exist in a non-live state while the exchange still shows
+      // the order resting — the 2026-07-04 page-truncation incident falsely
+      // cancelled live rungs, then insertOne E11000-looped every pass when
+      // they re-entered the page. Exchange truth wins: resurrect.
+      const existing = await getLocalByOrderId(ex.orderId);
+      if (existing) {
+        if (existing.state !== 'live') {
+          await db.blofinOrders().updateOne(
+            { orderId: ex.orderId, env: env() },
+            { $set: { state: 'live', updatedAt: now(), lastSyncedAt: now() } },
+          );
+          report.resurrected.push({ orderId: ex.orderId, priorState: existing.state });
+        }
+        continue;
+      }
       await db.blofinOrders().insertOne({
         orderId:        ex.orderId,
         // BloFin's field is clientOrderId (probed 2026-06-24); clientOrdId is
@@ -437,6 +512,9 @@ async function reconcileOnce({ instId } = {}) {
   // Resolve any orders that landed in 'disappeared' (either this pass or
   // a prior one) so the local state catches up to fill/cancel truth.
   const resolved = await resolveDisappeared({ instId });
+  report.resurrected.push(
+    ...(resolved.resurrected || []).map(orderId => ({ orderId, priorState: 'disappeared' })),
+  );
   report.filled            = resolved.filled;        // full fill detail objects
   report.cancelled         = resolved.cancelled;     // orderId list
   report.resolvedFilled    = resolved.filled.length;
