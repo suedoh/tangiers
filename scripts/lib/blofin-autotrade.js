@@ -37,6 +37,7 @@ const dailyR = require('./daily-r');
 const CONTRACT_VALUE_BTC = 0.001;
 const LOT_SIZE           = 0.1;
 const MIN_SIZE           = 0.1;
+const LEVERAGE           = Number(process.env.BLOFIN_LEVERAGE || 10); // set-leverage 10× iso (Phase A setup)
 
 const TIER_MULT = { A: 1.0, B: 0.7, C: 0.3 };
 
@@ -279,7 +280,35 @@ async function autotrade({
   const sizing = sizingFor({ entry, stop, setupType });
   if (sizing.error) return { skipped: sizing.error };
 
-  const { contracts, sizePerTp, rDollar } = sizing;
+  let { contracts, sizePerTp, rDollar } = sizing;
+  let marginTrim = null;
+
+  // Pre-flight margin check (2026-07-04 root cause: two entries dropped as
+  // opaque "error 1: All operations failed" — stacked same-direction ladders
+  // had frozen the margin and BloFin rejected the new entry; one drop was a
+  // +3R winner). Trim the stake to what available margin funds — R geometry
+  // is unchanged (same entry/stop/TPs, smaller size, rDollar scaled) — and
+  // skip cleanly below a floor. Fail-open: a balance-read error must never
+  // block the money path (that's how the Jun-27 outage dropped 11 signals).
+  try {
+    const bal   = await blofin.getBalance();
+    const usdt  = (bal || []).find(b => b.currency === 'USDT');
+    const avail = Number(usdt?.available);
+    if (Number.isFinite(avail)) {
+      const marginFor = c => (c * CONTRACT_VALUE_BTC * entry) / LEVERAGE;
+      const budget    = avail * 0.90;   // headroom for taker fee + mark-price drift
+      if (marginFor(contracts) > budget) {
+        const fit = quantizeSize((budget * LEVERAGE) / (CONTRACT_VALUE_BTC * entry));
+        if (fit < MIN_SIZE || fit < contracts * 0.2) {
+          return { skipped: `insufficient margin: entry needs ~$${marginFor(contracts).toFixed(0)} at ${LEVERAGE}x, available $${avail.toFixed(0)} — fit ${fit} contracts below floor` };
+        }
+        marginTrim = `${contracts}→${fit} contracts (available $${avail.toFixed(0)})`;
+        rDollar    = rDollar * (fit / contracts);
+        contracts  = fit;
+        sizePerTp  = quantizeSize(fit / 3);
+      }
+    }
+  } catch (_) { /* fail-open — never block the money path on a balance read */ }
   const side       = direction === 'long' ? 'buy' : 'sell';
   const closeSide  = direction === 'long' ? 'sell' : 'buy';
   const stopPx     = quantizePrice(stop);
@@ -447,7 +476,7 @@ async function autotrade({
   }
 
   return { signalId, direction, contracts: liveContracts, sizePerTp, rDollar, orders,
-           fill: fillPx, unsynced: unsynced || undefined };
+           fill: fillPx, unsynced: unsynced || undefined, marginTrim: marginTrim || undefined };
 }
 
 module.exports = {

@@ -94,7 +94,18 @@ function _request(method, path, { query, body, signed = true, timeoutMs = 10000 
         let parsed;
         try { parsed = JSON.parse(data); } catch (e) { return reject(new Error(`blofin invalid JSON: ${data.slice(0,200)}`)); }
         if (parsed.code !== '0' && parsed.code !== 0) {
-          return reject(new Error(`blofin api error ${parsed.code}: ${parsed.msg || 'unknown'}`));
+          // Batch endpoints (order placement) wrap the real rejection in
+          // parsed.data[].code/msg — e.g. code 1 "All operations failed"
+          // hides 102047 insufficient-margin underneath. Surfacing it is
+          // the difference between a diagnosable drop and a mystery
+          // (2026-07-04: two entry drops logged only the wrapper).
+          const nested = Array.isArray(parsed.data)
+            ? parsed.data
+                .filter(d => d && (d.code !== undefined || d.msg))
+                .map(d => ` [${d.code}: ${d.msg || ''}]`)
+                .join('')
+            : '';
+          return reject(new Error(`blofin api error ${parsed.code}: ${parsed.msg || 'unknown'}${nested.slice(0, 300)}`));
         }
         resolve(parsed.data);
       });

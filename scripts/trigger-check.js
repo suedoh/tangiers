@@ -2410,7 +2410,7 @@ async function main() {
             if (r.skipped)      { log(`Autotrade skipped: ${r.skipped}`);              markExecution(signalId, 'skipped', r.skipped); }
             else if (r.dropped) { log(`Autotrade DROPPED: ${r.dropped}`);              markExecution(signalId, 'dropped', r.dropped); postAutotradeDeadLetter(signalId, setup, trigger, r.dropped); }
             else if (r.aborted) { log(`Autotrade aborted: ${r.aborted}`);              markExecution(signalId, 'aborted', r.aborted); }
-            else                { const det = `${r.orders?.length || 0} orders${r.unsynced ? ' (mongo-down, spooled)' : ''}`;
+            else                { const det = `${r.orders?.length || 0} orders${r.unsynced ? ' (mongo-down, spooled)' : ''}${r.marginTrim ? ` (margin-trimmed ${r.marginTrim})` : ''}`;
                                   log(`Autotrade placed ${det} for ${signalId}`); markExecution(signalId, 'placed', det);
                                   if (r.unsynced) postAutotradeDegradedNote(signalId, r); }
           }).catch(e => { log(`Autotrade error: ${e.message}`); markExecution(signalId, 'dropped', e.message); postAutotradeDeadLetter(signalId, setup, trigger, e.message); });
