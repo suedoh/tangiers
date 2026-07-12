@@ -21,7 +21,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { cdpConnect, cdpEval, getQuote } = require('../lib/cdp');
+const { cdpConnect, cdpEval, getQuote, getTimeframe, setTimeframe } = require('../lib/cdp');
 const { acquireLock, releaseLock } = require('../lib/lock');
 const { fetchKlines, buildVolumeProfile } = require('../lib/market-data');
 
@@ -82,23 +82,46 @@ const VISIBLE_RANGE_EXPR = `
   } catch(e) { return { error: e.message }; }
 })()`;
 
+// Reads the chart in the SAME state trigger-check.js uses for its canonical
+// VRVP read: TF 30. The visible range (and therefore the VRVP histogram)
+// differs per timeframe — calibrating against any other TF measures the
+// wrong baseline (first calibration attempt did exactly that: 60-TF POC was
+// 63957, production 30M-TF POC was 60101).
 async function readChart() {
   const lock = await acquireLock(30_000, 'zone-calibrate');
   if (!lock) throw new Error('Could not acquire TradingView lock');
-  let client;
+  let client, originalTF;
   try {
     client = await cdpConnect('BTCUSDT');
-    const [range, vrvp, quote] = [
-      await cdpEval(client, VISIBLE_RANGE_EXPR),
-      await cdpEval(client, VRVP_EXPR),
-      await getQuote(client),
-    ];
+    originalTF = await getTimeframe(client);
+    if (originalTF !== '30') {
+      log(`Switching chart TF ${originalTF} → 30 (production read state)...`);
+      await setTimeframe(client, '30');
+    }
+
+    // Poll until the VRVP histogram is populated and stable across two reads
+    let vrvp = null, prevCount = -1;
+    for (let i = 0; i < 10; i++) {
+      await new Promise(r => setTimeout(r, 1200));
+      const v = await cdpEval(client, VRVP_EXPR);
+      if (v && !v.error && v.rows?.length >= 20) {
+        if (v.rows.length === prevCount) { vrvp = v; break; }
+        prevCount = v.rows.length;
+        vrvp = v;
+      }
+    }
+    if (!vrvp) throw new Error('VRVP rows never stabilised on 30M');
+
+    const range = await cdpEval(client, VISIBLE_RANGE_EXPR);
+    const quote = await getQuote(client);
     if (!range || range.error) throw new Error(`visible range: ${range?.error || 'null'}`);
-    if (!vrvp || vrvp.error || !vrvp.rows?.length) throw new Error(`VRVP: ${vrvp?.error || 'no rows'}`);
     if (!quote?.last) throw new Error('no price');
     return { range, vrvp, price: quote.last };
   } finally {
-    if (client) { try { await client.close(); } catch {} }
+    if (client) {
+      try { if (originalTF && originalTF !== '30') await setTimeframe(client, originalTF); } catch {}
+      try { await client.close(); } catch {}
+    }
     releaseLock(lock);
   }
 }
@@ -115,8 +138,19 @@ async function main() {
   const heights = vrvp.rows.map(r => r.hi - r.lo).sort((a, b) => a - b);
   const rowSize = heights[Math.floor(heights.length / 2)];
 
+  // TV exposes TWO POCs and they can disagree: the histogram's max-tv row
+  // (what computeVRVPLevels — the signal brain — uses) and the study
+  // _data-store developing POC. 2026-07-12 calibration found the ROWS can be
+  // STALE (matched a 21d window while the data store + visible bars matched
+  // 14.3d — 30m-bar smear test confirmed). We calibrate against the fresh,
+  // internally-consistent data-store triple; the stale max-row is reported
+  // for context and both variants are logged by the P2 parity sidecar.
+  const tvPocRow = vrvp.rows.reduce((b, r) => r.tv > b.tv ? r : b, vrvp.rows[0]);
+  const tvPocMaxRow = Math.round((tvPocRow.lo + tvPocRow.hi) / 2);
+  const tvPoc = vrvp.poc; // data-store (fresh)
+
   log(`Visible range: ${new Date(fromMs).toISOString()} → ${new Date(toMs).toISOString()} (${visibleDays.toFixed(1)}d)`);
-  log(`TV: rows=${vrvp.rows.length} rowSize≈${rowSize.toFixed(1)} POC=${vrvp.poc} VAH=${vrvp.vah} VAL=${vrvp.val} price=${price}`);
+  log(`TV: rows=${vrvp.rows.length} rowSize≈${rowSize.toFixed(1)} POC=${Math.round(tvPoc)} (max-row ${tvPocMaxRow} — may be stale) VAH=${Math.round(vrvp.vah)} VAL=${Math.round(vrvp.val)} price=${price}`);
 
   // Candidates: exact visible span + clean windows near it
   const cleanDays = [7, 14, 21, 30, 45, 60, 90].filter(d => d <= visibleDays * 1.5);
@@ -132,7 +166,7 @@ async function main() {
     const bars = await fetchKlines({ symbol: 'BTCUSDT', interval: '5m', startTime, endTime: now });
     const p = buildVolumeProfile(bars, { rowSize });
     if (!p) { log(`${cand.name}: no profile`); continue; }
-    const dPoc = pct(p.poc, vrvp.poc, price);
+    const dPoc = pct(p.poc, tvPoc, price);
     const dVah = pct(p.vah, vrvp.vah, price);
     const dVal = pct(p.val, vrvp.val, price);
     results.push({ ...cand, bars: bars.length, poc: p.poc, vah: p.vah, val: p.val,
@@ -154,14 +188,14 @@ async function main() {
     instrument: 'BTCUSDT',
     interval: '5m',
     windowDays: winner.days,
-    rowSize,
+    rowSize: +rowSize.toFixed(1),
     valueAreaPct: 0.7,
     calibration: {
       at: new Date().toISOString(),
       chartVisibleDays: +visibleDays.toFixed(2),
       tvRows: vrvp.rows.length,
-      tv: { poc: vrvp.poc, vah: vrvp.vah, val: vrvp.val, price },
-      winner: { poc: winner.poc, vah: winner.vah, val: winner.val, worstDeltaPct: +winner.worst.toFixed(4) },
+      tv: { poc: tvPoc, pocMaxRowStale: tvPocMaxRow, vah: vrvp.vah, val: vrvp.val, price },
+      winner: { poc: winner.poc, vah: +winner.vah.toFixed(1), val: +winner.val.toFixed(1), worstDeltaPct: +winner.worst.toFixed(4) },
     },
   };
 

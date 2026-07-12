@@ -32,3 +32,5 @@ notes/audits/cron.log
 .watchdog-state.json
 .blofin-recon-alert.json
 trades.json.bak-executedtrack-fix
+.market-data-cache/
+logs/zone-parity.jsonl

@@ -1,24 +1,25 @@
 {
   "instrument": "BTCUSDT",
   "interval": "5m",
-  "windowDays": 30,
-  "rowSize": 47.5,
+  "windowDays": 14,
+  "rowSize": 34.7,
   "valueAreaPct": 0.7,
   "calibration": {
-    "at": "2026-07-12T11:09:41.750Z",
-    "chartVisibleDays": 41.21,
-    "tvRows": 97,
+    "at": "2026-07-12T11:21:05.110Z",
+    "chartVisibleDays": 20.6,
+    "tvRows": 77,
     "tv": {
-      "poc": 63957.350000000006,
-      "vah": 64693.600000000006,
-      "val": 59801.100000000006,
-      "price": 63881.5
+      "poc": 62668.65,
+      "pocMaxRowStale": 60101,
+      "vah": 64490.4,
+      "val": 60222.3,
+      "price": 63857.2
     },
     "winner": {
-      "poc": 63959,
-      "vah": 64695,
-      "val": 59802.5,
-      "worstDeltaPct": 0.0026
+      "poc": 62790,
+      "vah": 64472.6,
+      "val": 60204.5,
+      "worstDeltaPct": 0.19
     }
   }
 }

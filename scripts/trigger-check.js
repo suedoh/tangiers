@@ -2035,6 +2035,51 @@ async function updateOutcomes(client) {
   if (changed) writeTrades(trades);
 }
 
+// ─── Zone parity sidecar ──────────────────────────────────────────────────────
+// P2 of refactors/2026-07-12-btc-exchange-native-migration-plan.md.
+// Shadow-computes the exchange-native volume profile (lib/market-data.js,
+// frozen config/btc-zones.json) each cycle and appends both zone sets +
+// trigger decisions to logs/zone-parity.jsonl. Runs through the SAME
+// computeVRVPLevels/checkVRVPProximity as the TV data — only the histogram
+// source differs. Read-only: errors are logged and swallowed; the signal
+// path is never affected. Gate evaluation: scripts/audit/zone-parity-report.js.
+// Disable with ZONE_PARITY=false.
+async function zoneParitySidecar(price, indicators, tvTrigger) {
+  if (process.env.ZONE_PARITY === 'false') return;
+  try {
+    const { loadKlinesCached, buildVolumeProfile, computeCVD } = require('./lib/market-data');
+    const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config', 'btc-zones.json'), 'utf8'));
+    const bars = await loadKlinesCached({
+      symbol: cfg.instrument, interval: cfg.interval,
+      windowMs: cfg.windowDays * 86_400_000,
+      cacheFile: path.join(ROOT, '.market-data-cache', `btc-${cfg.interval}.json`),
+    });
+    const profile = buildVolumeProfile(bars, { rowSize: cfg.rowSize });
+    const mktLevels = computeVRVPLevels(profile);
+    const mktTrigger = mktLevels ? checkVRVPProximity(price, mktLevels) : null;
+    const oiMkt = await fetchOIBinance(price);
+
+    const slim = t => t ? { type: t.type, direction: t.direction, mid: t.mid } : null;
+    const tvLvls = indicators.vrvpLevels;
+    const entry = {
+      ts: new Date().toISOString(), price,
+      tv:  { poc: tvLvls?.poc ?? null, pocFresh: indicators._vrvpPocFresh ?? null,
+             vah: tvLvls?.vah ?? null, val: tvLvls?.val ?? null, trigger: slim(tvTrigger) },
+      mkt: { poc: mktLevels?.poc ?? null, vah: mktLevels?.vah ?? null, val: mktLevels?.val ?? null, trigger: slim(mktTrigger) },
+      cvdTv: indicators.cvd ?? null,
+      cvdMkt: bars.length >= 12 ? Math.round(computeCVD(bars.slice(-12))) : null,
+      oiTv: indicators.oi ?? null,
+      oiMkt,
+      bars: bars.length,
+    };
+    fs.mkdirSync(path.join(ROOT, 'logs'), { recursive: true });
+    fs.appendFileSync(path.join(ROOT, 'logs', 'zone-parity.jsonl'), JSON.stringify(entry) + '\n');
+    log(`zone-parity: ΔPOC ${tvLvls?.poc != null && mktLevels?.poc != null ? Math.abs(tvLvls.poc - mktLevels.poc) : '—'} | trigger tv=${entry.tv.trigger?.type ?? '∅'} mkt=${entry.mkt.trigger?.type ?? '∅'}`);
+  } catch (e) {
+    log(`zone-parity sidecar error (non-fatal): ${e.message}`);
+  }
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
@@ -2222,6 +2267,10 @@ async function main() {
   indicators.weeklyTrend = studies._weeklyTrend ?? null;
   indicators.volumes     = studies._volumes    ?? [];
   indicators.vrvpLevels  = computeVRVPLevels(studies._vrvpRaw);
+  // Fresh data-store POC for the parity sidecar — the histogram rows (and
+  // therefore vrvpLevels.poc) can lag the study's developing lines; see
+  // refactors/2026-07-12-btc-exchange-native-migration-plan.md (P2 notes).
+  indicators._vrvpPocFresh = studies._vrvpRaw?.poc ?? null;
 
   // CVD and OI are not in the BTC TradingView layout — fetch from Binance as fallback
   if (indicators.cvd == null || indicators.oi == null) {
@@ -2458,6 +2507,10 @@ async function main() {
     }
     log(`No trigger. Price $${Math.round(price).toLocaleString()}. ${nearestStr}`);
   }
+
+  // Zone parity sidecar (P2, exchange-native migration) — runs AFTER all
+  // signal work so its Binance fetches can never delay an alert.
+  await zoneParitySidecar(price, indicators, trigger);
 
   // Restore the user's chart TF before releasing the lock so manual analysis
   // continues on whatever TF they were using.
