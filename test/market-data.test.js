@@ -204,3 +204,18 @@ test('loadKlinesCached fetches full window once, then only the tail', async () =
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('buildVolumeProfile spreads a wide bar across rows by H–L overlap', () => {
+  // Single bar spanning [100,120), v=10, tb=6 → half in each 10-pt bucket
+  const p = buildVolumeProfile([{ t: 0, o: 110, h: 120, l: 100, c: 110, v: 10, tb: 6 }], { rowSize: 10 });
+  assert.equal(p.rows.length, 2);
+  assert.deepEqual(p.rows.map(r => r.tv), [5, 5]);
+  assert.deepEqual(p.rows.map(r => r.uv), [3, 3]);
+  assert.deepEqual(p.rows.map(r => r.dv), [2, 2]);
+});
+
+test('buildVolumeProfile spreads proportionally on partial overlaps', () => {
+  // Bar [105,125), v=20 → overlaps: [100,110)=5/20, [110,120)=10/20, [120,130)=5/20
+  const p = buildVolumeProfile([{ t: 0, o: 115, h: 125, l: 105, c: 115, v: 20, tb: 20 }], { rowSize: 10 });
+  assert.deepEqual(p.rows.map(r => r.tv), [5, 10, 5]);
+});

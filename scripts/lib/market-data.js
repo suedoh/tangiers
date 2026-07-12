@@ -10,10 +10,9 @@
  *   - Pure functions over bar arrays — no hidden I/O, unit-testable
  *     (test/market-data.test.js, known-answer fixtures).
  *   - Network is injectable (`fetcher`) so tests never touch Binance.
- *   - Profile buckets are gridded over hlc3 values (where volume is
- *     assigned), not the full H–L span. P1 calibration diffs this against
- *     the live TV histogram; if TV's edge rows matter for HVN thresholds,
- *     the grid rule gets revisited there — not here.
+ *   - Profile volume is spread across each bar's H–L span proportional to
+ *     row overlap (TV's method — validated by P1 calibration against the
+ *     live chart histogram).
  *   - Value area: 70%, greedy single-row expansion from POC (larger
  *     neighbor first). TV's exact expansion variant is validated in P1.
  */
@@ -85,26 +84,48 @@ function computeSessionVP(bars) {
 // ─── Volume profile ───────────────────────────────────────────────────────────
 
 // Builds a VRVP_EXPR-compatible histogram: { poc, vah, val, rows } where
-// rows = [{lo, hi, uv, dv, tv}] ascending. Each bar's full volume is bucketed
-// at its hlc3; up = takerBuy, down = remainder.
+// rows = [{lo, hi, uv, dv, tv}] ascending. Each bar's volume is spread across
+// the rows its H–L range overlaps, proportional to overlap — TV's method
+// (P1 calibration falsified point-bucketing at hlc3: POC off 1.9% on the
+// exact visible window while VAL matched to 0.002%). up = takerBuy share,
+// down = remainder.
 function buildVolumeProfile(bars, { rowSize }) {
   if (!bars || bars.length === 0 || !rowSize) return null;
 
-  const hlc3 = b => (b.h + b.l + b.c) / 3;
-  let min = Infinity, max = -Infinity;
-  for (const b of bars) { const p = hlc3(b); if (p < min) min = p; if (p > max) max = p; }
+  let minL = Infinity;
+  for (const b of bars) if (b.l < minL) minL = b.l;
+  const gridLo = Math.floor(minL / rowSize) * rowSize;
 
-  const gridLo = Math.floor(min / rowSize) * rowSize;
-  const nRows = Math.floor((max - gridLo) / rowSize) + 1;
+  // Top row: highest bucket any bar actually touches (a wide bar whose high
+  // sits exactly on a grid line does NOT need the bucket above it; a
+  // zero-range bar on a grid line does).
+  const topIdx = b => b.h > b.l
+    ? Math.ceil((b.h - gridLo) / rowSize) - 1
+    : Math.floor((b.h - gridLo) / rowSize);
+  let nRows = 0;
+  for (const b of bars) nRows = Math.max(nRows, topIdx(b) + 1);
+
   const rows = Array.from({ length: nRows }, (_, i) => ({
     lo: gridLo + i * rowSize, hi: gridLo + (i + 1) * rowSize, uv: 0, dv: 0, tv: 0,
   }));
 
   for (const b of bars) {
-    const idx = Math.min(Math.floor((hlc3(b) - gridLo) / rowSize), nRows - 1);
-    rows[idx].uv += b.tb;
-    rows[idx].dv += b.v - b.tb;
-    rows[idx].tv += b.v;
+    const iLo = Math.floor((b.l - gridLo) / rowSize);
+    const iHi = topIdx(b);
+    if (iHi === iLo || b.h <= b.l) {
+      const r = rows[Math.min(iLo, nRows - 1)];
+      r.uv += b.tb; r.dv += b.v - b.tb; r.tv += b.v;
+      continue;
+    }
+    const span = b.h - b.l;
+    for (let i = iLo; i <= iHi; i++) {
+      const overlap = Math.min(b.h, rows[i].hi) - Math.max(b.l, rows[i].lo);
+      if (overlap <= 0) continue;
+      const frac = overlap / span;
+      rows[i].uv += b.tb * frac;
+      rows[i].dv += (b.v - b.tb) * frac;
+      rows[i].tv += b.v * frac;
+    }
   }
 
   const totalVol = rows.reduce((s, r) => s + r.tv, 0);
