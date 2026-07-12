@@ -44,6 +44,7 @@ if (!WEBHOOK_URL) {
 }
 
 const CDP_PORT = 9222;
+const DRY_RUN  = process.argv.includes('--dry-run');
 
 function log(msg) { console.log(`[${new Date().toISOString()}] ${msg}`); }
 
@@ -538,6 +539,10 @@ function computeBiasScore({ weeklyTrend, cvd, fundingRate, price, vwap, weeklyRS
 }
 
 function buildScenarios(price, lwHigh, lwLow, lwOpen, monthlyHigh, quarterOpen, vrvp, biasTotal) {
+  // Without price + last-week candle there is nothing to anchor triggers to —
+  // return null so the formatter renders an explicit warning instead of "$0"s.
+  if (price == null || lwHigh == null || lwLow == null || lwOpen == null) return null;
+
   const isBull = biasTotal >= 0;
 
   // Build nearest VRVP support / resistance from POC, VAH, VAL, HVNs
@@ -562,7 +567,9 @@ function buildScenarios(price, lwHigh, lwLow, lwOpen, monthlyHigh, quarterOpen, 
 
   const qStr = quarterOpen ? `$${Math.round(quarterOpen).toLocaleString()} (Q open)` : null;
   const aboveLWH = price > lwHigh;
-  const firstRes = vrvp && resLevel !== `$${Math.round(lwHigh).toLocaleString()}` ? resLevel : `MH $${Math.round(monthlyHigh).toLocaleString()}`;
+  const firstRes = vrvp && resLevel !== `$${Math.round(lwHigh).toLocaleString()}` ? resLevel
+    : monthlyHigh != null ? `MH $${Math.round(monthlyHigh).toLocaleString()}`
+    : resLevel;
 
   const bull = {
     label:        'BULL CASE',
@@ -611,6 +618,23 @@ async function fetchMonthlyBarsFromBinance(count = 12) {
     // Binance kline format: [openTime, o, h, l, c, volume, closeTime, ...]
     return raw.map(k => ({ t: Math.floor(k[0] / 1000), o: parseFloat(k[1]), h: parseFloat(k[2]), l: parseFloat(k[3]), c: parseFloat(k[4]) }));
   } catch (e) { log(`Binance monthly klines error: ${e.message}`); return []; }
+}
+
+async function fetchWeeklyBarsFromBinance(count = 20) {
+  try {
+    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1w&limit=${count}`;
+    const raw = await httpGet(url);
+    if (!Array.isArray(raw)) { log('Binance weekly klines: unexpected response'); return []; }
+    return raw.map(k => ({ t: Math.floor(k[0] / 1000), o: parseFloat(k[1]), h: parseFloat(k[2]), l: parseFloat(k[3]), c: parseFloat(k[4]) }));
+  } catch (e) { log(`Binance weekly klines error: ${e.message}`); return []; }
+}
+
+async function fetchPriceFromBinance() {
+  try {
+    const d = await httpGet('https://fapi.binance.com/fapi/v1/ticker/price?symbol=BTCUSDT');
+    const p = parseFloat(d.price);
+    return isNaN(p) ? null : p;
+  } catch (e) { log(`Binance price error: ${e.message}`); return null; }
 }
 
 async function fetchCVD() {
@@ -796,8 +820,9 @@ function buildSummaryParagraph(d) {
     return ` The key macro risk this week is ${top.title} on ${top.date} — be cautious of entering new positions in the hours immediately surrounding this release.`;
   })();
 
-  const scenDirection = d.scenarios.primary.label === 'BULL CASE' ? 'bullish' : 'bearish';
-  const scenNote = `The primary thesis is ${scenDirection} (${d.scenarios.primary.prob}): ${d.scenarios.primary.play}, targeting ${d.scenarios.primary.targets}. Invalidation: ${d.scenarios.primary.invalidation}.`;
+  const scenNote = d.scenarios
+    ? `The primary thesis is ${d.scenarios.primary.label === 'BULL CASE' ? 'bullish' : 'bearish'} (${d.scenarios.primary.prob}): ${d.scenarios.primary.play}, targeting ${d.scenarios.primary.targets}. Invalidation: ${d.scenarios.primary.invalidation}.`
+    : `Scenario planning is unavailable this week — weekly candle data could not be retrieved.`;
 
   const vaNote = (() => {
     if (!vrvp4h?.vah || !vrvp4h?.val) return '';
@@ -808,7 +833,7 @@ function buildSummaryParagraph(d) {
     return ` Volume analysis shows price at ${$n(price)} has dropped below the high-volume zone (floor: ${$n(vrvp4h.val)}), meaning sellers have pushed into discount territory. Reclaiming ${$n(vrvp4h.val)} on a daily close is the first signal that buyers are back in control.`;
   })();
 
-  return `BTC enters the week in an ${structureWord} on the weekly timeframe, with the overall bias reading ${biasWord} at ${bias.total >= 0 ? '+' : ''}${bias.total}/${bias.maxPossible}.${vwapWord ? ` Price is currently ${vwapWord} the VWAP at ${$n(vwap)}, which ${vwapWord === 'above' ? 'supports the bullish read and suggests institutional positioning is net positive' : 'argues caution — institutions are underwater and selling into strength is the likely behaviour'}.` : ''}${fundingNote}${fgNote} Last week's range was ${$n(lwLow)}–${$n(lwHigh)} and both the LWH and LWL are live liquidity pools — price will seek to sweep at least one of them before the week closes.${optNote}${macroNote}${vaNote} ${scenNote}`;
+  return `BTC enters the week in an ${structureWord} on the weekly timeframe, with the overall bias reading ${biasWord} at ${bias.total >= 0 ? '+' : ''}${bias.total}/${bias.maxPossible}.${vwapWord ? ` Price is currently ${vwapWord} the VWAP at ${$n(vwap)}, which ${vwapWord === 'above' ? 'supports the bullish read and suggests institutional positioning is net positive' : 'argues caution — institutions are underwater and selling into strength is the likely behaviour'}.` : ''}${fundingNote}${fgNote}${lwLow != null && lwHigh != null ? ` Last week's range was ${$n(lwLow)}–${$n(lwHigh)} and both the LWH and LWL are live liquidity pools — price will seek to sweep at least one of them before the week closes.` : ''}${optNote}${macroNote}${vaNote} ${scenNote}`;
 }
 
 function formatReport(d) {
@@ -881,9 +906,9 @@ function formatReport(d) {
   })();
   const allLevels = [
     ...vrvpLevels,
-    { price: d.lwHigh,          label: 'Last Week High — liquidity pool',              stars: '★★',  side: d.lwHigh  > p ? 'R' : 'S' },
-    { price: d.lwLow,           label: 'Last Week Low — liquidity pool',               stars: '★★',  side: d.lwLow   > p ? 'R' : 'S' },
-    { price: d.lwOpen,          label: 'Last Week Open — structural pivot',            stars: '★★',  side: d.lwOpen  > p ? 'R' : 'S' },
+    d.lwHigh != null ? { price: d.lwHigh, label: 'Last Week High — liquidity pool',   stars: '★★',  side: d.lwHigh  > p ? 'R' : 'S' } : null,
+    d.lwLow  != null ? { price: d.lwLow,  label: 'Last Week Low — liquidity pool',    stars: '★★',  side: d.lwLow   > p ? 'R' : 'S' } : null,
+    d.lwOpen != null ? { price: d.lwOpen, label: 'Last Week Open — structural pivot', stars: '★★',  side: d.lwOpen  > p ? 'R' : 'S' } : null,
     d.monthlyHigh != null ? { price: d.monthlyHigh, label: 'Monthly High', stars: '★★★', side: d.monthlyHigh > p ? 'R' : 'S' } : null,
     d.monthlyLow  != null ? { price: d.monthlyLow,  label: 'Monthly Low',  stars: '★★★', side: d.monthlyLow  > p ? 'R' : 'S' } : null,
     d.quarterOpen
@@ -927,8 +952,7 @@ function formatReport(d) {
   const totalStr = `${d.bias.total >= 0 ? '+' : ''}${d.bias.total} / ${d.bias.maxPossible}`;
 
   // ── Scenarios ──
-  const { primary, secondary } = d.scenarios;
-  const scenLines = [
+  const scenLines = d.scenarios ? (({ primary, secondary }) => [
     `  ${primary.label} — ${primary.prob} probability`,
     `  Trigger      ${primary.trigger}`,
     `  Play         ${primary.play}`,
@@ -940,7 +964,8 @@ function formatReport(d) {
     `  Play         ${secondary.play}`,
     `  Targets      ${secondary.targets}`,
     `  ✗ Invalid    ${secondary.invalidation}`,
-  ].join('\n');
+  ].join('\n'))(d.scenarios)
+    : '  ⚠️ Unavailable — price / weekly candle data could not be retrieved';
 
   // ── Summary paragraph ──
   const summary = buildSummaryParagraph(d);
@@ -1063,6 +1088,27 @@ async function main() {
     if (client) { try { await client.close(); } catch {} }
   }
 
+  // ── 1b. Binance fallbacks for CDP-sourced data ─────────────────────────────
+  // CDP is unreachable from the Docker ace-cron container (localhost:9222 is
+  // host-only), so price + weekly candles must come from Binance REST whenever
+  // the TradingView read fails. VWAP/VRVP stay null — the report degrades
+  // gracefully without them.
+  if (price == null) {
+    price = await fetchPriceFromBinance();
+    log(`Price (Binance fallback): ${price}`);
+  }
+  if (lwHigh == null) {
+    const weeklyBars = await fetchWeeklyBarsFromBinance(20);
+    log(`Weekly bars (Binance fallback): ${weeklyBars.length}`);
+    if (weeklyBars.length >= 2) {
+      const lw = weeklyBars[weeklyBars.length - 2]; // last complete week
+      lwHigh  = lw.h; lwLow = lw.l; lwOpen = lw.o; lwClose = lw.c;
+      weeklyCandle = analyseWeeklyCandle(lw);
+      weeklyTrend  = analyseWeeklyTrend(weeklyBars);
+      weeklyRSI    = computeRSI(weeklyBars.map(b => b.c), 14);
+    }
+  }
+
   // ── 2. External APIs (parallel) ────────────────────────────────────────────
   log('Fetching external data...');
   const [fundingRate, fearGreed, options, calendar, monthlyBars, cvdFromBinance, oiFromBinance] = await Promise.all([
@@ -1119,6 +1165,11 @@ async function main() {
     footer: { text: `Ace • BINANCE:BTCUSDT.P • Weekly War Report${part ? ` (${part})` : ''}` },
     timestamp: new Date().toISOString(),
   });
+
+  if (DRY_RUN) {
+    log('Dry run — skipping Discord post');
+    return;
+  }
 
   if (report.length <= MAX) {
     await postToDiscord({ embeds: [makeEmbed(report, null)] });
