@@ -29,14 +29,14 @@ gate capital.
 | # | Spec | Depends on | Type | Status |
 |---|---|---|---|---|
 | 01 | [Live book decision](01-live-book-decision.md) | — | operator gate | ✅ 2026-07-26 flattened |
-| 02 | [Book governance + margin alerting](02-book-governance.md) | 01 | risk containment | ☐ |
-| 03 | [Ledger rewrite — design-intent accounting](03-ledger-rewrite.md) | — | measurement | ☐ |
-| 04 | [Single source of P&L truth](04-single-source-pnl.md) | 03 | measurement | ☐ |
-| 05 | [Dedup by price-time cell](05-dedup-price-time.md) | 03 | measurement/risk | ☐ |
-| 06 | [Exchange-native data cutover](06-exchange-native-data.md) | — (parallel OK) | data integrity | ☐ |
-| 07 | [Signal research & falsification harness](07-signal-research.md) | 03, 04, 05, 06 | edge | ☐ |
-| 08 | [Execution layer changes](08-execution-layer.md) | 02; live-fire gated on 07 | execution | ☐ |
-| 09 | [Acceptance gates → Phase E](09-acceptance-gates.md) | all | capital gate | ☐ |
+| 02 | [Book governance + margin alerting](02-book-governance.md) | 01 | risk containment | ✅ code+tests (live probes pending) |
+| 03 | [Ledger rewrite — design-intent accounting](03-ledger-rewrite.md) | — | measurement | ✅ code+tests (recompute pending operator) |
+| 04 | [Single source of P&L truth](04-single-source-pnl.md) | 03 | measurement | ✅ |
+| 05 | [Dedup by price-time cell](05-dedup-price-time.md) | 03 | measurement/risk | ✅ |
+| 06 | [Exchange-native data cutover](06-exchange-native-data.md) | — (parallel OK) | data integrity | 🟡 patch ready, cutover pending operator |
+| 07 | [Signal research & falsification harness](07-signal-research.md) | 03, 04, 05, 06 | edge | 🟡 harness built; research not started |
+| 08 | [Execution layer changes](08-execution-layer.md) | 02; live-fire gated on 07 | execution | ✅ code+tests (live probes pending) |
+| 09 | [Acceptance gates → Phase E](09-acceptance-gates.md) | all | capital gate | 🟡 gate+reporting live; Phase E frozen |
 
 `00-context.md` is background reading — start there.
 
@@ -49,9 +49,13 @@ gate capital.
    script gets a new probe script under `scripts/blofin/` before any code relies on it.
 3. **No parameter tuning before spec 07's sample bar is met** (≥150 post-fix signals, ≥60 days,
    ≥2 regimes). Tuning on the current single-regime in-sample data is curve-fitting.
-4. **Correctness fixes are expected to make numbers worse.** The corrected ledger will show
-   ≈ −78R where +965R was claimed. That is success, not regression. Never "fix the fix" to
-   restore old numbers.
+4. **Correctness fixes are expected to make numbers worse.** **MEASURED 2026-07-26:** the
+   recompute lands at **−131.4R net (−0.208R/trade over 633 resolved)** where +965R was
+   claimed — a −1,096R correction. (The spec's pre-build projection was ≈−78R, taken from the
+   prior addendum's point estimate; the measured −0.208R/trade falls *inside* that addendum's
+   own design-intent CI of [−0.250, +0.070], on its pessimistic side.) Gross is −15.6R, fees
+   115.8R — i.e. **the strategy is roughly break-even before costs and loses to fees alone.**
+   That is success, not regression. Never "fix the fix" to restore old numbers.
 5. **Recompute, don't diff.** Historical baselines (win-rate-diff snapshots) measure the old
    artifact. After the ledger rewrite, historical stats are recomputed from scratch.
 6. Read-only analysis tools live in [tools/](tools/README.md) — the audit's independent
