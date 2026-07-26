@@ -28,7 +28,7 @@ gate capital.
 
 | # | Spec | Depends on | Type | Status |
 |---|---|---|---|---|
-| 01 | [Live book decision](01-live-book-decision.md) | — | operator gate | ☐ |
+| 01 | [Live book decision](01-live-book-decision.md) | — | operator gate | ✅ 2026-07-26 flattened |
 | 02 | [Book governance + margin alerting](02-book-governance.md) | 01 | risk containment | ☐ |
 | 03 | [Ledger rewrite — design-intent accounting](03-ledger-rewrite.md) | — | measurement | ☐ |
 | 04 | [Single source of P&L truth](04-single-source-pnl.md) | 03 | measurement | ☐ |
