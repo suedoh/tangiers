@@ -26,7 +26,9 @@ const BINANCE_FAPI = 'https://fapi.binance.com';
 
 const INTERVAL_MS = {
   '1m': 60_000, '3m': 180_000, '5m': 300_000, '15m': 900_000, '30m': 1_800_000,
-  '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000, '1d': 86_400_000, '1w': 604_800_000,
+  '1h': 3_600_000, '2h': 7_200_000, '4h': 14_400_000, '6h': 21_600_000,
+  '8h': 28_800_000, '12h': 43_200_000, '1d': 86_400_000, '3d': 259_200_000,
+  '1w': 604_800_000,
 };
 
 // ─── HTTP (default fetcher) ───────────────────────────────────────────────────
@@ -79,6 +81,39 @@ function computeSessionVP(bars) {
   let up = 0, down = 0;
   for (const b of bars) { if (b.c >= b.o) up += b.v; else down += b.v; }
   return { up, down, total: up + down };
+}
+
+// Average True Range — simple mean of the last `period` true ranges (same
+// method as lib/cdp.js calcATR, over exchange bar objects). Null if <2 bars.
+function computeATR(bars, period = 14) {
+  if (!bars || bars.length < 2) return null;
+  const trs = [];
+  for (let i = 1; i < bars.length; i++) {
+    const c = bars[i], p = bars[i - 1];
+    trs.push(Math.max(c.h - c.l, Math.abs(c.h - p.c), Math.abs(c.l - p.c)));
+  }
+  const slice = trs.slice(-period);
+  return slice.reduce((a, b) => a + b, 0) / slice.length;
+}
+
+// ─── Bar slicing ──────────────────────────────────────────────────────────────
+
+// Completed bars only: drops any bar whose interval has not fully elapsed.
+// Binance returns the in-progress kline as the last element; confirming or
+// walking outcomes on it recreates audit defect D4 (confirmation on prices
+// that never closed). Pure — `now` injectable for tests.
+function completedBars(bars, interval, now = Date.now()) {
+  const stepMs = INTERVAL_MS[interval];
+  if (!stepMs) throw new Error(`Unknown interval: ${interval}`);
+  return (bars || []).filter(b => b.t + stepMs <= now);
+}
+
+// Current UTC-day slice (Binance session boundary = 00:00 UTC). Feed the
+// result to computeVWAP / computeSessionVP for session-anchored values —
+// matches TV's default Session anchor on the crypto perp chart.
+function sessionBars(bars, now = Date.now()) {
+  const dayStart = Math.floor(now / 86_400_000) * 86_400_000;
+  return (bars || []).filter(b => b.t >= dayStart);
 }
 
 // ─── Volume profile ───────────────────────────────────────────────────────────
@@ -169,6 +204,25 @@ async function fetchKlines({ symbol, interval, startTime, endTime, limit = 1500,
   return bars;
 }
 
+// ─── Point-in-time fetches ────────────────────────────────────────────────────
+
+// Last traded price — /fapi/v1/ticker/price. Null on malformed response;
+// network errors propagate (never signal off missing data).
+async function fetchLastPrice({ symbol, fetcher = httpGet }) {
+  const d = await fetcher(`${BINANCE_FAPI}/fapi/v1/ticker/price?symbol=${symbol}`);
+  const p = parseFloat(d && d.price);
+  return isNaN(p) ? null : p;
+}
+
+// Current open interest in COINS — /fapi/v1/openInterest. Same unit as the
+// parse-num-expanded CDP study read (see trigger-check.js fetchOIBinance
+// history: mixing units into _previousOI produced phantom OI trends).
+async function fetchOpenInterest({ symbol, fetcher = httpGet }) {
+  const d = await fetcher(`${BINANCE_FAPI}/fapi/v1/openInterest?symbol=${symbol}`);
+  const oi = parseFloat(d && d.openInterest);
+  return isNaN(oi) ? null : oi;
+}
+
 // ─── Incremental klines cache ─────────────────────────────────────────────────
 
 // Keeps a rolling window of bars in a JSON cache file. First call fetches the
@@ -206,8 +260,13 @@ module.exports = {
   computeCVD,
   computeVWAP,
   computeSessionVP,
+  computeATR,
+  completedBars,
+  sessionBars,
   buildVolumeProfile,
   fetchKlines,
+  fetchLastPrice,
+  fetchOpenInterest,
   loadKlinesCached,
   httpGet,
   INTERVAL_MS,
