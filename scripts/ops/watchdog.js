@@ -26,6 +26,9 @@
  *   bookRecorder — the spec-07 order-book corpus recorder is still writing.
  *             Its data cannot be backfilled, so silent death is permanent loss.
  *             Skipped when the recorder was never installed on this machine.
+ *   discordBot — the bot has actually REACHED Discord recently, not merely run.
+ *             Inbound traffic failing is invisible: outbound alerts use curl and
+ *             kept working through a multi-week bot outage.
  *   marginLow — available BloFin margin < 2× the initial margin a next entry
  *             at current sizing would need (spec 02.3). The early warning
  *             BEFORE autotrade starts skipping on margin — the 2026-07-26
@@ -67,6 +70,8 @@ const RECON_STALE_MIN    = 20;              // recon cadence is 3 min
 const SPOOL_STALE_MIN    = 15;
 const BOOK_STATE         = path.join(ROOT, '.book-recorder-state.json');
 const BOOK_STALE_MIN     = 15;              // recorder writes one row per minute
+const BOT_HEALTH         = path.join(ROOT, '.discord-bot-health.json');
+const BOT_STALE_MIN      = 20;              // bot polls every minute
 
 // Per-class cooldown overrides (spec 02.3: margin alerts rate-limit at 30 min,
 // tighter than the 2h infra cadence — margin pressure is actionable *now*).
@@ -249,6 +254,31 @@ function checkBookRecorder() {
   }
 }
 
+// discordBot: the command interface (!analyze, !took, reactions) is read-only
+// traffic TO Discord, so its failure is invisible — alerts keep flowing out via
+// curl while nothing comes back in. It failed this way for weeks (23,772
+// getaddrinfo errors) with every other class green. Checks that the bot has had
+// at least one successful Discord request recently, not merely that it ran.
+function checkDiscordBot() {
+  if (!fs.existsSync(BOT_HEALTH)) return { ok: true };   // pre-heartbeat install
+  try {
+    const h = JSON.parse(fs.readFileSync(BOT_HEALTH, 'utf8'));
+    if (!h.lastSuccessAt) {
+      return { ok: false, detail: `Discord bot has never completed a request (last error: ${h.lastError || 'unknown'})` };
+    }
+    const ageMin = (Date.now() - h.lastSuccessAt) / 60_000;
+    if (ageMin > BOT_STALE_MIN) {
+      return { ok: false,
+        detail: `Discord bot last reached the API ${ageMin.toFixed(0)} min ago `
+              + `(${h.consecutiveFailedRuns} failed run(s); last error: ${h.lastError || 'unknown'}) `
+              + `— commands and reactions are dead` };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, detail: `Discord bot health unreadable: ${e.message}` };
+  }
+}
+
 // margin-low (spec 02.3): available margin < 2× next-entry initial margin at
 // current sizing. Next-entry margin uses the same sizing the autotrade layer
 // uses — equity = min(live balance, ACCOUNT_EQUITY_USD cap), rDollar =
@@ -306,6 +336,7 @@ async function main() {
     spool:     checkSpool(),
     zombieProcs: checkZombieProcs(),
     bookRecorder: checkBookRecorder(),
+    discordBot: checkDiscordBot(),
     marginLow: await checkMarginLow(),
   };
 

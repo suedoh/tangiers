@@ -45,3 +45,4 @@ rebuild/tools/klines-*.json
 # Inventory + retention: notes/backups.md
 data/orderbook/
 .book-recorder-state.json
+.discord-bot-health.json

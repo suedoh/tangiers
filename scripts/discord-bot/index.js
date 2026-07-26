@@ -36,6 +36,12 @@ const REACT_EMOJI    = '📊';
 const REACT_ENC      = encodeURIComponent(REACT_EMOJI);
 const MSG_MAX_AGE    = 24 * 60 * 60 * 1000; // 24h — expire old signal tracking
 const STATE_FILE     = path.join(ROOT, '.discord-bot-state.json');  // { [channelId]: { lastMessageId } }
+const HEALTH_FILE    = path.join(ROOT, '.discord-bot-health.json');
+
+// Timestamped from here on. The log had no timestamps, which is why a two-week
+// outage could not be dated from it — 23,772 error lines with no way to tell
+// whether they were from this minute or last month (2026-07-26).
+const log = (...a) => console.log(`[${new Date().toISOString()}] [discord-bot]`, ...a);
 
 // State files per instrument prefix — must match what trigger-check / analyze scripts write
 const SIGNAL_STATE = {
@@ -73,7 +79,19 @@ function writeSignalState(prefix, s) {
 
 // ─── Discord REST ─────────────────────────────────────────────────────────────
 
-function discordRequest(method, urlPath, body) {
+// Transient network faults that are worth another attempt rather than losing
+// the whole poll cycle. DNS resolution on this host fails intermittently —
+// 23,772 `getaddrinfo ENOTFOUND discord.com` errors accumulated silently while
+// curl-based alerts on the same cron kept working (2026-07-26). A single blip
+// used to cost the entire minute's commands and reaction checks.
+const TRANSIENT = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ETIMEDOUT',
+                           'ECONNREFUSED', 'EPIPE', 'ENETUNREACH', 'ETIMEOUT']);
+const REQ_TIMEOUT_MS = 12_000;
+const RETRY_DELAYS   = [400, 1500];   // two retries, then give up for this cycle
+
+let netFailures = 0, netSuccesses = 0, lastNetError = null;
+
+function discordRequestOnce(method, urlPath, body) {
   return new Promise((resolve, reject) => {
     const payload = body ? JSON.stringify(body) : null;
     const req = https.request({
@@ -94,10 +112,34 @@ function discordRequest(method, urlPath, body) {
         try { resolve(JSON.parse(data)); } catch(e) { reject(new Error(`Bad JSON (${res.statusCode}): ${data.slice(0,200)}`)); }
       });
     });
+    // Without an explicit timeout a stalled connect hangs until the OS gives
+    // up, which is far longer than the one-minute cron cadence.
+    req.setTimeout(REQ_TIMEOUT_MS, () => {
+      req.destroy(Object.assign(new Error('request timeout'), { code: 'ETIMEOUT' }));
+    });
     req.on('error', reject);
     if (payload) req.write(payload);
     req.end();
   });
+}
+
+async function discordRequest(method, urlPath, body) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const r = await discordRequestOnce(method, urlPath, body);
+      netSuccesses++;
+      return r;
+    } catch (e) {
+      const transient = TRANSIENT.has(e.code);
+      if (!transient || attempt >= RETRY_DELAYS.length) {
+        netFailures++;
+        lastNetError = `${e.code || 'ERR'}: ${e.message}`;
+        throw e;
+      }
+      log(`transient ${e.code} on ${method} ${urlPath} — retry ${attempt + 1}/${RETRY_DELAYS.length} in ${RETRY_DELAYS[attempt]}ms`);
+      await new Promise(r => setTimeout(r, RETRY_DELAYS[attempt]));
+    }
+  }
 }
 
 // Build an api object scoped to a specific channel — passed to every handler
@@ -226,6 +268,23 @@ async function main() {
     ...channels.map(ch => pollChannel(ch).catch(e => console.error(`[discord-bot] pollChannel error [${ch.prefix}]:`, e.message))),
     ...channels.map(ch => checkReactions(ch).catch(e => console.error(`[discord-bot] checkReactions error [${ch.prefix}]:`, e.message))),
   ]);
+
+  // Health heartbeat. A bot that cannot reach Discord produces error lines and
+  // nothing else — which is indistinguishable from a quiet channel unless
+  // somebody reads the log. This file is what the watchdog checks, so a
+  // sustained outage alarms instead of hiding for two weeks.
+  try {
+    const prev = (() => { try { return JSON.parse(fs.readFileSync(HEALTH_FILE, 'utf8')); } catch { return {}; } })();
+    const ok = netSuccesses > 0;
+    fs.writeFileSync(HEALTH_FILE, JSON.stringify({
+      lastRunAt: Date.now(),
+      lastSuccessAt: ok ? Date.now() : (prev.lastSuccessAt ?? null),
+      requests: netSuccesses, failures: netFailures,
+      lastError: lastNetError ?? prev.lastError ?? null,
+      consecutiveFailedRuns: ok ? 0 : (prev.consecutiveFailedRuns ?? 0) + 1,
+    }, null, 2));
+    if (!ok) log(`WARNING: zero successful Discord requests this run (${netFailures} failures) — last: ${lastNetError}`);
+  } catch (e) { log(`health write failed: ${e.message}`); }
 }
 
 // Explicit exit: keep-alive sockets to discord.com kept finished runs alive
