@@ -37,7 +37,6 @@ const https = require('https');
 const { execFileSync } = require('child_process');
 const autotrade = require('./lib/blofin-autotrade');
 const { acquireLock, releaseLock } = require('./lib/lock');
-const { walkExecutedLadder } = require('./lib/executed-walk');
 const { parseStudyNum } = require('./lib/parse-num');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -1640,13 +1639,13 @@ function checkPendingConfirmation(price, indicators) {
 // i.e. the trade had already closed when "confirmation" landed.
 const CONFIRM_MAX_AGE_SEC = 60 * 60; // 1 hour
 
-// Daily-R kill switch threshold. If today's realized R (sum of pnlR over
-// trades closed since 00:00 UTC) drops below this floor, new signals are
-// suppressed for the rest of the UTC day. Baseline saw 11 consecutive stops;
-// without a circuit breaker, a bad streak can compound. Re-evaluate after
-// 60 days of post-fix data.
-// Daily-R kill switch is shared with blofin-autotrade.js — see scripts/lib/daily-r.js
-const { DAILY_R_KILL_FLOOR, todayUtcR } = require('./lib/daily-r');
+// Daily-R kill switch. If today's realized R drops below the floor, new
+// signals are suppressed for the rest of the UTC day. Re-anchored to
+// EXCHANGE orders-history (spec 04.3, audit D7 — the old ledger sum was
+// fiction and could never trip); falls back to the corrected ledger with a
+// yellow alert when the API is unreachable. Shared with blofin-autotrade.js
+// — see scripts/lib/daily-r.js.
+const { DAILY_R_KILL_FLOOR, isKillActive } = require('./lib/daily-r');
 
 // 30M bar duration in seconds — the canonical confirmation/outcome timeframe.
 const BAR_30M_SEC = 30 * 60;
@@ -2136,52 +2135,13 @@ async function updateOutcomes(client) {
     }
   }
 
-  // ── Executed-hypothetical track (Phase D attribution fix 2, 2026-07-02) ──
-  //
-  // Autotrade enters at signal-fire, so PLACED signals carry real exchange
-  // exposure even when the 30M confirmation never comes — 2 unconfirmed
-  // Jun-27 shorts were SL'd for −4.2R while invisible to the canonical track.
-  // Walk placed signals from fire-time into SEPARATE fields so the canonical
-  // confirmation-gated pipeline (outcome/pnlR, daily-R kill, weekly cohorts,
-  // win-rate-diff anomaly counters) stays byte-identical. Exchange fills
-  // remain the true P&L; this is the like-for-like chart-hypothetical.
-  // No cooldown side effects — those belong to the strategy track only.
-  // Only meaningful for signals fired after 2026-07-02 (older ones are
-  // outside the 7-day bar window and expire; attribution uses Mongo fills).
-  for (const t of trades) {
-    if (t.executionStatus !== 'placed' || t.executedOutcome) continue;
-
-    const age = Date.now() - new Date(t.firedAt).getTime();
-    if (age > 30 * 24 * 60 * 60 * 1000) {
-      t.executedOutcome  = 'expired';
-      t.executedPnlR     = 0;
-      t.executedClosedAt = new Date().toISOString();
-      changed = true;
-      continue;
-    }
-
-    const signalTs = new Date(t.firedAt).getTime() / 1000;
-    // Bars cover only the trailing 7 days. A trade that fired BEFORE the
-    // window start would be walked from mid-history and mislabeled (verified
-    // live 2026-07-02: 16 stale trades all "resolved" on the window's first
-    // wide bar). Walk only when full history since fire-time is present;
-    // pre-window trades stay null and expire at 30d — the exchange fills in
-    // blofin_orders are their ground truth anyway.
-    if (!bars.length || signalTs < bars[0].time) continue;
-    const relevantBars = bars.filter(b => b.time > signalTs);
-    if (relevantBars.length === 0) continue;
-
-    const walk = walkExecutedLadder(t, relevantBars);
-    if (walk) {
-      t.executedOutcome  = walk.outcome;
-      t.executedPnlR     = walk.pnlR;
-      t.executedClosedAt = walk.closedBarTime
-        ? new Date(walk.closedBarTime * 1000).toISOString()
-        : new Date().toISOString();
-      changed = true;
-      log(`Trade ${t.id} executed-track: ${walk.outcome} | R: ${walk.pnlR} (canonical outcome: ${t.outcome ?? 'null'})`);
-    }
-  }
+  // Executed-hypothetical track RETIRED (rebuild spec 04.1, audit D6). It
+  // priced rungs off the planned entry, walked from fire-time, and charged no
+  // fees — 2.3× overstated vs exchange truth. The exchange already records
+  // what it tries to estimate; scripts/blofin/attribution.js persists
+  // per-signal exchange net R onto trade records daily. Existing
+  // executedOutcome/executedPnlR/executedClosedAt values are FROZEN in place
+  // (historical forensics only) — nothing writes them anymore.
 
   if (changed) writeTrades(trades);
 }
@@ -2554,12 +2514,12 @@ async function main() {
           && setup.setupType.startsWith('C')
           && trigger.type === 'VAH';
 
-        // Daily-R kill switch: if today's realized R has dropped below the
-        // floor, suppress new signals until UTC midnight. Stop hunts and bad
-        // streaks compound otherwise.
-        const todayR = todayUtcR();
-        if (todayR <= DAILY_R_KILL_FLOOR) {
-          log(`Daily-R kill: today's R = ${todayR.toFixed(2)} ≤ ${DAILY_R_KILL_FLOOR} — suppressing ${levelKey}`);
+        // Daily-R kill switch: exchange-realized net R today (fallback:
+        // corrected ledger + yellow alert). If below the floor, suppress
+        // new signals until UTC midnight.
+        const kill = await isKillActive();
+        if (kill.active) {
+          log(`Daily-R kill: today's R = ${kill.todayR.toFixed(2)} ≤ ${DAILY_R_KILL_FLOOR} (source: ${kill.source}) — suppressing ${levelKey}`);
           const levelStr = `$${Math.round(trigger.lo).toLocaleString()}–$${Math.round(trigger.hi).toLocaleString()}`;
           notify('info', [
             `📊 ${trigger.type} APPROACHED — DAILY-R KILL ACTIVE | BTCUSDT.P`,
@@ -2567,7 +2527,7 @@ async function main() {
             `**Price** $${Math.round(price).toLocaleString()} | **${trigger.type}** ${levelStr}`,
             ``,
             `**SIGNAL SUPPRESSED — DAILY DRAWDOWN CAP HIT**`,
-            `Today's realized R = ${todayR.toFixed(2)}R (floor: ${DAILY_R_KILL_FLOOR}R). New signals paused until 00:00 UTC.`,
+            `Today's realized R = ${kill.todayR.toFixed(2)}R (floor: ${DAILY_R_KILL_FLOOR}R, source: ${kill.source === 'exchange' ? 'exchange fills' : 'ledger fallback'}). New signals paused until 00:00 UTC.`,
             ``,
             `**RESUMES**  Tomorrow's UTC day automatically`,
             `━━━━━━━━━━━━━━━━━━━━━━━━━━`,

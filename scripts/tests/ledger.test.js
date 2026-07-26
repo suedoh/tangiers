@@ -156,4 +156,74 @@ ok('walker refuses a trade with no fill (unconfirmed can never be walked)', () =
   assert.strictEqual(tc.walkBarsForOutcome(mkLong(), [bar(t0 + 900 + H, 131, 94, 96)]), null);
 });
 
-console.log(`\nledger.test.js: all ${passed} assertions passed`);
+// ─── spec 04: kill switch reads exchange truth, falls back with alert ────────
+
+const dailyR = require(path.resolve(__dirname, '..', 'lib', 'daily-r.js'));
+const os = require('os');
+
+async function spec04() {
+  console.log('── spec 04: daily-R kill switch (exchange primary, ledger fallback) ──');
+
+  assert.strictEqual(dailyR.DAILY_R_KILL_FLOOR, -3.0); // unchanged per spec 04.3
+
+  // Mock: one signal, entry filled today (30 contracts = 0.03 BTC at
+  // riskPerUnit $500 ⇒ $15 risk), exit realized −$44 with $4 fee ⇒ −$48 net
+  // ⇒ −3.2R — must trip the −3.0 floor.
+  const nowMs = Date.UTC(2026, 6, 26, 15, 0, 0);
+  const midnight = Date.UTC(2026, 6, 26, 0, 0, 0);
+  const trade = { id: 'sigA-1', riskPerUnit: 500, entry: 100000, stop: 99500 };
+  const cid = 'sigA1';
+  const orders = [
+    { orderId: '1', clientOrderId: cid, state: 'filled', createTime: midnight + 1000,
+      updateTime: midnight + 1000, filledSize: '30', pnl: '0', fee: '0' },
+    { orderId: '2', state: 'filled', createTime: midnight + 2000,
+      updateTime: midnight + 2000, filledSize: '30', pnl: '-44', fee: '4' },
+  ];
+  const deps = {
+    getOrderHistory: async () => orders,
+    readTrades: () => [trade],
+    lookupSignalIds: async () => new Map([['2', 'sigA-1']]),
+    now: () => nowMs,
+  };
+
+  {
+    const r = await dailyR.todayExchangeR(deps);
+    assert.ok(Math.abs(r - (-3.2)) < 1e-9, `expected −3.2R, got ${r}`);
+    const k = await dailyR.isKillActive(deps);
+    assert.strictEqual(k.active, true);
+    assert.strictEqual(k.source, 'exchange');
+    passed++; console.log('  ✓ −3.2R of exchange fills today ⇒ isKillActive true (exchange source)');
+  }
+
+  {
+    // −2.9R must NOT trip.
+    const okOrders = orders.map(o => o.orderId === '2' ? { ...o, pnl: '-39.5' } : o);
+    const k = await dailyR.isKillActive({ ...deps, getOrderHistory: async () => okOrders });
+    assert.strictEqual(k.active, false);
+    assert.strictEqual(k.source, 'exchange');
+    passed++; console.log('  ✓ −2.9R does not trip the floor');
+  }
+
+  {
+    // API error ⇒ ledger fallback + yellow alert fires (rate-limited state
+    // in a temp file so re-runs stay clean).
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'daily-r-test-'));
+    let alerted = null;
+    const k = await dailyR.isKillActive({
+      ...deps,
+      getOrderHistory: async () => { throw new Error('http 403 cloudflare'); },
+      alertFile: path.join(tmpDir, 'alert.json'),
+      postAlert: body => { alerted = body; },
+    });
+    assert.strictEqual(k.source, 'ledger-fallback');
+    assert.ok(alerted && alerted.includes('FALLBACK'), 'yellow fallback alert must fire');
+    passed++; console.log('  ✓ API error ⇒ ledger fallback + yellow alert fires');
+  }
+}
+
+// ─── run async sections, then report ─────────────────────────────────────────
+
+(async () => {
+  await spec04();
+  console.log(`\nledger.test.js: all ${passed} assertions passed`);
+})().catch(e => { console.error(`\nFAIL: ${e.message}`); process.exit(1); });
