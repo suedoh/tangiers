@@ -2643,7 +2643,11 @@ async function main() {
 // ─── Entry Point ──────────────────────────────────────────────────────────────
 
 if (require.main === module) {
-  main().catch(err => {
+  const { finishCron } = require('./lib/cron-exit');
+  // Explicit exit: the autotrade/daily-R path opens a Mongo pool whose idle
+  // sockets keep libuv alive after main() resolves. Without this the process
+  // finishes its cycle and then hangs forever (158 leaked 2026-07-26).
+  main().then(() => finishCron(0)).catch(err => {
     log(`FATAL: ${err.message || err}`);
     try {
       notify('error', [
@@ -2655,7 +2659,7 @@ if (require.main === module) {
     } catch {}
     // Best-effort release on crash (no-op if we never acquired)
     try { releaseLock('btc-trigger'); } catch {}
-    process.exit(1);
+    finishCron(1);
   });
 }
 

@@ -31,7 +31,9 @@ notes/audits/cron.log
 .blofin-spool.ndjson.processing-*
 .watchdog-state.json
 .blofin-recon-alert.json
-trades.json.bak-executedtrack-fix
+# Migration snapshots of gitignored data files. Indexed in notes/backups.md —
+# every new .bak-* gets a row there in the same commit as its migration.
+*.bak-*
 .market-data-cache/
 logs/zone-parity.jsonl
 .falsification-state.json

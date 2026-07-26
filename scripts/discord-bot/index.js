@@ -228,4 +228,9 @@ async function main() {
   ]);
 }
 
-main().catch(e => { console.error('[discord-bot] Fatal:', e.message); process.exit(1); });
+// Explicit exit: keep-alive sockets to discord.com kept finished runs alive
+// (5 processes leaked, oldest 7d14h, found 2026-07-26). See lib/cron-exit.js.
+const { finishCron } = require('../lib/cron-exit');
+main()
+  .then(() => finishCron(0))
+  .catch(e => { console.error('[discord-bot] Fatal:', e.message); finishCron(1); });

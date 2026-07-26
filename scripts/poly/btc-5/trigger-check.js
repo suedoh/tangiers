@@ -575,4 +575,8 @@ async function main() {
   }
 }
 
-main().catch(e => { console.error('[poly-btc-5] Fatal:', e.message); process.exit(1); });
+// Explicit exit — see lib/cron-exit.js (cron scripts must not outlive their work).
+const { finishCron } = require('../../lib/cron-exit');
+main()
+  .then(() => finishCron(0))
+  .catch(e => { console.error('[poly-btc-5] Fatal:', e.message); finishCron(1); });

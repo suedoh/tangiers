@@ -19,6 +19,10 @@
  *             be a sleep/wake artifact.
  *   spool   — .blofin-spool.ndjson older than SPOOL_STALE_MIN means orders
  *             were placed in degraded mode and Mongo still isn't back.
+ *   zombieProcs — any cron script still alive >30 min. Cron scripts finish in
+ *             ~90s; a survivor has completed its work and hung on an open
+ *             libuv handle. 158 trigger-check + 5 discord-bot processes leaked
+ *             for two weeks (2026-07-26) with every other class green.
  *   marginLow — available BloFin margin < 2× the initial margin a next entry
  *             at current sizing would need (spec 02.3). The early warning
  *             BEFORE autotrade starts skipping on margin — the 2026-07-26
@@ -71,7 +75,31 @@ const cooldownFor        = name => CLASS_COOLDOWN_MS[name] ?? ALERT_COOLDOWN_MS;
 // validates a different stop geometry.
 const REF_STOP_PCT       = 0.00216;
 
+// zombieProcs: cron scripts are short-lived by construction — the longest
+// legitimate run (BTC trigger, full CDP sweep) is ~90s. Anything from this set
+// still alive after 30 min has finished its work and hung on an open libuv
+// handle (see lib/cron-exit.js). Threshold is deliberately far above any real
+// run so a slow cycle can never strike. pm2 processes (bz/news-watch.js) are
+// persistent by design and are not in this list.
+const CRON_SCRIPT_PATHS = [
+  'scripts/trigger-check.js',
+  'scripts/bz/trigger-check.js',
+  'scripts/poly/btc-5/trigger-check.js',
+  'scripts/discord-bot/index.js',
+  'scripts/blofin/recon-once.js',
+  'scripts/ew/run.js',
+];
+const PROC_MAX_AGE_MIN = 30;
+
 function log(msg) { console.log(`[${new Date().toISOString()}] [watchdog] ${msg}`); }
+
+// ps etime → minutes.  Formats: mm:ss | hh:mm:ss | dd-hh:mm:ss
+function etimeToMin(etime) {
+  const m = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(String(etime).trim());
+  if (!m) return null;
+  const [, d, h, mm, ss] = m;
+  return (Number(d || 0) * 1440) + (Number(h || 0) * 60) + Number(mm) + (Number(ss) / 60);
+}
 
 function readState()   { try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch { return {}; } }
 function writeState(s) { try { fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2)); } catch (e) { log(`state write failed: ${e.message}`); } }
@@ -155,6 +183,45 @@ function checkSpool() {
   }
 }
 
+// zombieProcs: hung cron processes. The 2026-07-26 leak (158 trigger-check +
+// 5 discord-bot, oldest 13d21h, ~316 idle Mongo conns) ran for two weeks with
+// every other class green — the watchdog watched services, not the crons
+// themselves. Reports the worst offender; fail-open if ps is unreadable.
+function checkZombieProcs() {
+  let out;
+  try {
+    out = execFileSync('/bin/ps', ['-eo', 'etime=,args='], { encoding: 'utf8', timeout: 10_000 });
+  } catch (e) {
+    log(`zombieProcs unreadable (fail-open): ${e.message}`);
+    return { ok: true };
+  }
+  const offenders = [];
+  for (const script of CRON_SCRIPT_PATHS) {
+    const ages = out.split('\n')
+      .map(l => {
+        const t = l.trim();
+        const i = t.indexOf(' ');
+        if (i < 1) return null;
+        const args = t.slice(i + 1).trim();
+        // cron wraps each job in `/bin/sh -c PATH=... node <script>`; that
+        // wrapper line names the same script and would double-count it.
+        if (/^\S*sh\s+-c\s/.test(args) || !args.includes(script)) return null;
+        return etimeToMin(t.slice(0, i));
+      })
+      .filter(a => a != null && a > PROC_MAX_AGE_MIN);
+    if (ages.length) {
+      offenders.push({ script, n: ages.length, oldest: Math.max(...ages) });
+    }
+  }
+  if (!offenders.length) return { ok: true };
+  offenders.sort((a, b) => b.oldest - a.oldest);
+  const worst = offenders[0];
+  const rest  = offenders.length > 1 ? ` (+${offenders.length - 1} other script(s))` : '';
+  return { ok: false,
+    detail: `${worst.n} hung ${worst.script} process(es), oldest ${(worst.oldest / 60).toFixed(1)}h `
+          + `— finished work holding an open handle; see lib/cron-exit.js${rest}` };
+}
+
 // margin-low (spec 02.3): available margin < 2× next-entry initial margin at
 // current sizing. Next-entry margin uses the same sizing the autotrade layer
 // uses — equity = min(live balance, ACCOUNT_EQUITY_USD cap), rDollar =
@@ -210,6 +277,7 @@ async function main() {
     mongo:     await checkMongo(),
     recon:     checkReconFresh(),
     spool:     checkSpool(),
+    zombieProcs: checkZombieProcs(),
     marginLow: await checkMarginLow(),
   };
 
