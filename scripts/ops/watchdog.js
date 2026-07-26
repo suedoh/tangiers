@@ -23,6 +23,9 @@
  *             ~90s; a survivor has completed its work and hung on an open
  *             libuv handle. 158 trigger-check + 5 discord-bot processes leaked
  *             for two weeks (2026-07-26) with every other class green.
+ *   bookRecorder — the spec-07 order-book corpus recorder is still writing.
+ *             Its data cannot be backfilled, so silent death is permanent loss.
+ *             Skipped when the recorder was never installed on this machine.
  *   marginLow — available BloFin margin < 2× the initial margin a next entry
  *             at current sizing would need (spec 02.3). The early warning
  *             BEFORE autotrade starts skipping on margin — the 2026-07-26
@@ -62,6 +65,8 @@ const STRIKES_TO_ALERT   = 2;               // 2 × 5-min cron = 10 min of confi
 const ALERT_COOLDOWN_MS  = 2 * 60 * 60 * 1000;
 const RECON_STALE_MIN    = 20;              // recon cadence is 3 min
 const SPOOL_STALE_MIN    = 15;
+const BOOK_STATE         = path.join(ROOT, '.book-recorder-state.json');
+const BOOK_STALE_MIN     = 15;              // recorder writes one row per minute
 
 // Per-class cooldown overrides (spec 02.3: margin alerts rate-limit at 30 min,
 // tighter than the 2h infra cadence — margin pressure is actionable *now*).
@@ -222,6 +227,28 @@ function checkZombieProcs() {
           + `— finished work holding an open handle; see lib/cron-exit.js${rest}` };
 }
 
+// bookRecorder: the spec-07 round-2 corpus is accumulating live and cannot be
+// backfilled — Binance serves no order-book history. A recorder that dies
+// silently costs days of irreplaceable data, which is the same failure shape as
+// the 158 hung crons and the 24h margin lock: nobody was watching. Skips
+// entirely when the recorder was never installed (no state file).
+function checkBookRecorder() {
+  if (!fs.existsSync(BOOK_STATE)) return { ok: true };   // not installed here
+  try {
+    const s = JSON.parse(fs.readFileSync(BOOK_STATE, 'utf8'));
+    const ageMin = (Date.now() - s.lastRowAt) / 60_000;
+    if (ageMin > BOOK_STALE_MIN) {
+      return { ok: false,
+        detail: `order-book recorder last wrote ${ageMin.toFixed(0)} min ago `
+              + `(writes every minute; ${s.rowsWritten} rows, ${s.reconnects} reconnects) `
+              + `— pm2 restart book-recorder` };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, detail: `book recorder state unreadable: ${e.message}` };
+  }
+}
+
 // margin-low (spec 02.3): available margin < 2× next-entry initial margin at
 // current sizing. Next-entry margin uses the same sizing the autotrade layer
 // uses — equity = min(live balance, ACCOUNT_EQUITY_USD cap), rDollar =
@@ -278,6 +305,7 @@ async function main() {
     recon:     checkReconFresh(),
     spool:     checkSpool(),
     zombieProcs: checkZombieProcs(),
+    bookRecorder: checkBookRecorder(),
     marginLow: await checkMarginLow(),
   };
 

@@ -40,3 +40,8 @@ logs/zone-parity.pre-cutover.jsonl
 .falsification-state.json
 .autotrade-disabled.json
 rebuild/tools/klines-*.json
+
+# Order-book research corpus (spec 07 round 2) — grows ~1MB/day, never committed.
+# Inventory + retention: notes/backups.md
+data/orderbook/
+.book-recorder-state.json

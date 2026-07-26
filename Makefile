@@ -114,6 +114,12 @@ bot: ## Run discord-bot/index.js once (polls for !analyze commands and processes
 bot-logs: ## Tail the Discord bot log (Ctrl+C to stop)
 	@tail -f logs/discord-bot.log
 
+book-status: ## Order-book recorder: freshness, coverage, liq-stream check
+	@$(NODE) $(TRADING)/scripts/research/book-recorder.js --status
+
+book-logs: ## Tail the order-book recorder log (Ctrl+C to stop)
+	@pm2 logs book-recorder --lines 50
+
 report: ## Run the weekly performance report now and post to #btc-backtest
 	@$(NODE) $(TRADING)/scripts/weekly-report.js
 
