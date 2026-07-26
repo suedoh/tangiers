@@ -30,6 +30,7 @@ const GATE = {
   triggerAgreementPct: 95,
   cvdSignAgreementPct: 99,
   oiTrendAgreementPct: 99,
+  nativeBlindMax: 0, // spec 06 gate: 0 blind cycles on the exchange-native path
 };
 
 function quantile(sorted, q) {
@@ -98,6 +99,15 @@ function evaluateGate(lines) {
   if (metrics.triggerAgreementPct < GATE.triggerAgreementPct)
     failures.push(`trigger agreement ${metrics.triggerAgreementPct.toFixed(1)}% < ${GATE.triggerAgreementPct}%`);
 
+  // Blind cycles. The exchange-native side must NEVER be blind — spec 06
+  // gate item (rebuild/06-exchange-native-data.md): 0 blind cycles on the
+  // native path. TV blindness is informational only (it is the defect class
+  // being retired — 14.9% of cycles per audit D10).
+  metrics.nativeBlindCycles = lines.filter(l => l.mkt?.poc == null && l.mkt?.vah == null).length;
+  metrics.tvBlindCycles     = lines.filter(l => l.tv?.poc == null && l.tv?.vah == null).length;
+  if (metrics.nativeBlindCycles > GATE.nativeBlindMax)
+    failures.push(`native blind cycles ${metrics.nativeBlindCycles} > ${GATE.nativeBlindMax}`);
+
   // CVD / OI: sign of change between consecutive samples must match
   const cvd = signAgreement(lines, 'cvdTv', 'cvdMkt');
   metrics.cvdSignAgreementPct = cvd.pct;
@@ -129,6 +139,7 @@ function main() {
   if (g.metrics.pocFresh?.n)
     console.log(`  POC(fresh) median ${g.metrics.pocFresh.median?.toFixed(4)}%  p95 ${g.metrics.pocFresh.p95?.toFixed(4)}%  (n=${g.metrics.pocFresh.n}, informational)`);
   console.log(`  Trigger agreement  ${g.metrics.triggerAgreementPct?.toFixed(1)}% (gate ≥${GATE.triggerAgreementPct}%)`);
+  console.log(`  Blind cycles       native ${g.metrics.nativeBlindCycles} (gate ≤${GATE.nativeBlindMax}) · tv ${g.metrics.tvBlindCycles} (informational)`);
   console.log(`  CVD sign agreement ${g.metrics.cvdSignAgreementPct?.toFixed(1) ?? '—'}% (gate ≥${GATE.cvdSignAgreementPct}%)`);
   console.log(`  OI trend agreement ${g.metrics.oiTrendAgreementPct?.toFixed(1) ?? '—'}% (gate ≥${GATE.oiTrendAgreementPct}%)`);
   console.log(`\nVerdict: ${g.verdict}`);
