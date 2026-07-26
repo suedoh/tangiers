@@ -7,6 +7,7 @@
  *
  * Usage: node scripts/weekly-report.js
  *        node scripts/weekly-report.js --days 30   (custom lookback)
+ *        node scripts/weekly-report.js --dry-run   (console render only, no Discord)
  */
 
 'use strict';
@@ -32,8 +33,10 @@ if (fs.existsSync(ENV_FILE)) {
     });
 }
 
+const DRY_RUN = process.argv.includes('--dry-run');
+
 const WEBHOOK_URL = process.env.DISCORD_BTC_BACKTEST_WEBHOOK_URL;
-if (!WEBHOOK_URL) {
+if (!WEBHOOK_URL && !DRY_RUN) {
   console.error('ERROR: DISCORD_BTC_BACKTEST_WEBHOOK_URL not set in .env');
   process.exit(1);
 }
@@ -183,6 +186,24 @@ function analyse(trades, days) {
   const avgWinHours  = winTimes.length  ? winTimes.reduce((a,b)=>a+b,0)  / winTimes.length  : null;
   const avgLossHours = lossTimes.length ? lossTimes.reduce((a,b)=>a+b,0) / lossTimes.length : null;
 
+  // ── Spec 09.2 — reporting honesty ──────────────────────────────────────────
+  // Corrected-ledger fields (rebuild spec 03: fillPrice/grossR/feeR, net pnlR)
+  // and exchange attribution fields (spec 04: exchangeNetR/exchangeFeeUsd) are
+  // read defensively: every figure renders n/a until the ledger rewrite lands.
+  const isCorrected = closed.some(t => t.grossR != null || t.feeR != null || t.fillPrice != null);
+  const netOfFeeR   = isCorrected ? closed.reduce((s, t) => s + (t.pnlR ?? 0), 0) : null;
+  const feeRTotal   = isCorrected ? closed.reduce((s, t) => s + (t.feeR ?? 0), 0) : null;
+  const feeUsdRows  = closed.filter(t => t.exchangeFeeUsd != null);
+  const feeUsdTotal = feeUsdRows.length ? feeUsdRows.reduce((s, t) => s + t.exchangeFeeUsd, 0) : null;
+  const paired      = closed.filter(t => t.exchangeNetR != null && t.pnlR != null);
+  const exchangeNetRTotal = paired.length ? paired.reduce((s, t) => s + t.exchangeNetR, 0) : null;
+  const pairedMeanAbsDelta = paired.length
+    ? paired.reduce((s, t) => s + Math.abs((t.pnlR ?? 0) - t.exchangeNetR), 0) / paired.length
+    : null;
+  let falsification = null;
+  try { falsification = JSON.parse(fs.readFileSync(path.join(ROOT, '.falsification-state.json'), 'utf8')); } catch {}
+  const autotradeTripped = fs.existsSync(path.join(ROOT, '.autotrade-disabled.json'));
+
   // ── Phase 2: your execution track ──────────────────────────────────────────
   // Reads my-trades.json (BTC entries only). Activated 2026-05-15.
   const MY_TRADES_FILE = path.join(ROOT, 'my-trades.json');
@@ -205,6 +226,9 @@ function analyse(trades, days) {
     streak, streakType,
     avgHoursToClose, avgWinHours, avgLossHours,
     myTrack, selectivity, myOpen: myWindow.length - myClosed.length,
+    isCorrected, netOfFeeR, feeRTotal, feeUsdTotal,
+    paired: paired.length, exchangeNetRTotal, pairedMeanAbsDelta,
+    falsification, autotradeTripped,
   };
 }
 
@@ -220,17 +244,38 @@ function formatReport(s) {
   const { allTrack: all, confirmedTrack: conf, unconfirmedTrack: unconf } = s;
   const confirmRate = s.allWindow > 0 ? `${Math.round(s.confirmedTotal / s.allWindow * 100)}%` : '—';
 
+  // ── Measurement honesty (rebuild spec 09.2) — every number labeled ──
+  const honestyLines = [
+    s.isCorrected
+      ? `Net-of-fee R (corrected ledger): **${fmt(s.netOfFeeR)}** (in-sample)`
+      : `Net-of-fee R (corrected ledger): **n/a** — pre-spec-03 ledger; R totals below use the legacy planned-entry accounting, known to overstate (audit D1)`,
+    `Fees: ${s.feeRTotal != null ? fmt(s.feeRTotal).replace('+', '') : 'n/a'} (R) · ${s.feeUsdTotal != null ? '$' + s.feeUsdTotal.toFixed(2) : 'n/a'} (USD)`,
+    s.exchangeNetRTotal != null
+      ? `Exchange cumulative net: **${fmt(s.exchangeNetRTotal)}** over ${s.paired} attributed signals (out-of-sample vs ledger)`
+      : `Exchange cumulative net: n/a — attribution fields not yet on ledger (spec 04)`,
+    s.pairedMeanAbsDelta != null
+      ? `Ledger↔exchange paired mean |Δ|: **${s.pairedMeanAbsDelta.toFixed(2)}R** over ${s.paired} pairs (trust bar: ≤0.10R over ≥30 pairs)`
+      : `Ledger↔exchange paired mean |Δ|: n/a (0 paired signals; trust bar: ≤0.10R over ≥30 pairs)`,
+    (() => {
+      const f = s.falsification;
+      const base = f && f.lastResult
+        ? `Falsification gate: **${f.lastResult}** (${(f.lastRunAt || '').slice(0, 10)}${f.consecutiveFails ? ` · ${f.consecutiveFails} consecutive fail${f.consecutiveFails > 1 ? 's' : ''}` : ''})`
+        : `Falsification gate: n/a — no recorded run yet (scripts/audit/falsification.js)`;
+      return s.autotradeTripped ? `${base} · 🚨 **AUTOTRADE TRIPPED** (.autotrade-disabled.json present — manual re-enable only)` : base;
+    })(),
+  ].join('\n');
+
   // ── Signal funnel ──
   const funnelLines = [
     `Signals fired:   ${s.allWindow} (${s.open} still open | ${s.expired} expired)`,
     `Confirmed entry: ${s.confirmedTotal} of ${s.allWindow} (${confirmRate}) — 30M close beyond entry with CVD`,
     ``,
-    `**ALL SIGNALS** (bar-accurate)`,
+    `**ALL SIGNALS** (in-sample${s.isCorrected ? '' : ' — legacy accounting'})`,
     `Closed: ${all.count} | Wins: ${all.wins} | Losses: ${all.losses} | Win Rate: **${all.winRate != null ? Math.round(all.winRate*100)+'%' : '—'}**`,
     `Total R: **${fmt(all.totalR)}** | Avg R: ${fmt(all.avgR)}`,
     `TP distribution: TP1 ${all.tp1hits} · TP2 ${all.tp2hits} · TP3 ${all.tp3hits}`,
     ``,
-    `**CONFIRMED SIGNALS ONLY** ← *real win rate*`,
+    `**CONFIRMED SIGNALS ONLY** (confirmation-gated, in-sample)`,
     `Closed: ${conf.count} | Wins: ${conf.wins} | Losses: ${conf.losses} | Win Rate: **${conf.winRate != null ? Math.round(conf.winRate*100)+'%' : '—'}**`,
     `Total R: **${fmt(conf.totalR)}** | Avg R: ${fmt(conf.avgR)}`,
     `TP distribution: TP1 ${conf.tp1hits} · TP2 ${conf.tp2hits} · TP3 ${conf.tp3hits}`,
@@ -327,6 +372,9 @@ function formatReport(s) {
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
     `**Period**  ${dateRange} (${s.days} days)`,
     ``,
+    `**MEASUREMENT HONESTY** (spec 09.2)`,
+    honestyLines,
+    ``,
     `**SIGNAL FUNNEL**`,
     funnelLines,
     ...(filterNote ? [``, filterNote] : []),
@@ -353,6 +401,7 @@ function formatReport(s) {
     `**YOUR EXECUTION** (Phase 2)`,
     executionLines,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+    `*All performance figures are in-sample unless explicitly labeled out-of-sample. No out-of-sample estimate is quoted until one exists (spec 09.2).*`,
     noDataNote,
   ].filter(l => l !== undefined).join('\n');
 }
@@ -362,6 +411,10 @@ function formatReport(s) {
 function formatSummary(s) {
   const { confirmedTrack: conf, unconfirmedTrack: unconf } = s;
   const lines = [];
+
+  if (!s.isCorrected) {
+    lines.push(`⚠️ **Accounting caveat:** every figure below is computed on the legacy planned-entry ledger, which the 2026-07-26 audit proved overstates results (fictional fills, no fees — audit D1/D3). Treat the interpretation as descriptive of the *recorded* numbers, not of tradeable performance, until the spec-03 ledger rewrite lands.`);
+  }
 
   if (conf.count === 0) {
     return [
@@ -459,6 +512,11 @@ async function main() {
   console.log('');
   console.log(summary);
   console.log('');
+
+  if (DRY_RUN) {
+    console.log(`[dry-run] skipping Discord post (${stats.allTrack.count} closed trades analysed)`);
+    return;
+  }
 
   const summaryColor = (() => {
     const conf = stats.confirmedTrack;
