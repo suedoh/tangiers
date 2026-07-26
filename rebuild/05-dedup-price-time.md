@@ -29,9 +29,16 @@ Replace level-identity cooldown keys with **price-time-direction cells**:
 
 ## Acceptance checks
 
-1. **Incident replay:** run the trigger evaluation over 2026-07-26T00:00–12:00Z bars/zones
-   (audit scratch data or refetch): the cell dedup must yield **1 fire + 47 suppressed** where
-   production fired 48.
+1. **Incident replay:** replay the real burst through the cell logic.
+   **CORRECTED 2026-07-26 (evidence over spec):** this spec originally stated "1 fire + 47
+   suppressed where production fired 48", assuming a single-day burst. The ledger shows
+   otherwise — **40 long signals (34 placed, 6 skipped) spanning 47.7 hours**. With a 24h cell
+   the correct expectation is **one fire per 24h cell period**: the replay yields **2 fires,
+   24.5h apart**, the second only after the first cell legitimately expired, plus 38 suppressed
+   (95%). Demanding 1 would demand a cell that never re-arms — not the design. The enforced
+   invariants are now: (a) consecutive fires ≥24h apart (every fire after the first is a
+   post-expiry re-arm, never a refire), (b) fires ≤ ceil(span/24h), (c) suppression ≥90%.
+   The audit's "48 signals" was itself approximate; 40/34 is the ledger-verified count.
 2. **History replay (measurement, not gate):** count distinct cells over the full signal
    history; expect the same order of magnitude as the audit's ~317 distinct setups. Report it.
 3. Unit tests: same cell within 24h ⇒ suppressed; adjacent band ⇒ fires; same band opposite

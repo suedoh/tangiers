@@ -221,9 +221,122 @@ async function spec04() {
   }
 }
 
+// ─── spec 05: price-time cell dedup ──────────────────────────────────────────
+
+function spec05() {
+  console.log('── spec 05: price-time cell dedup ──');
+
+  const DAY = tc.CELL_EXPIRY_MS;
+  const now = 1_785_000_000_000;
+  const P   = 64_000;                    // reference price; band = $192 at 0.3%
+  const fresh = () => ({});
+
+  ok('same direction, same band, within 24h ⇒ suppressed', () => {
+    const st = fresh();
+    tc.markCellFired(st, 'long', 64_000, P, now);
+    // $100 away — inside the $192 band
+    assert.ok(tc.findBlockingCell(st, 'long', 64_100, now + 3 * 3600e3),
+      'a same-idea refire inside the band must be blocked');
+  });
+
+  ok('adjacent band (outside band width) ⇒ fires', () => {
+    const st = fresh();
+    tc.markCellFired(st, 'long', 64_000, P, now);
+    assert.strictEqual(tc.findBlockingCell(st, 'long', 64_000 + 250, now + 3600e3), null,
+      'a genuinely different price level must not be suppressed');
+  });
+
+  ok('same band, opposite direction ⇒ fires (failed-breakout flips survive)', () => {
+    const st = fresh();
+    tc.markCellFired(st, 'long', 64_000, P, now);
+    assert.strictEqual(tc.findBlockingCell(st, 'short', 64_010, now + 3600e3), null,
+      'cells are direction-keyed — the flip trade must still be allowed');
+  });
+
+  ok('cell expiry ⇒ fires again after 24h', () => {
+    const st = fresh();
+    tc.markCellFired(st, 'long', 64_000, P, now);
+    assert.ok(tc.findBlockingCell(st, 'long', 64_010, now + DAY - 60e3), 'blocked at 23h59m');
+    assert.strictEqual(tc.findBlockingCell(st, 'long', 64_010, now + DAY + 1), null,
+      'must fire once the cell expires');
+  });
+
+  ok('pruneCells drops only expired cells', () => {
+    const st = fresh();
+    tc.markCellFired(st, 'long',  64_000, P, now - DAY - 1);  // expired
+    tc.markCellFired(st, 'short', 64_000, P, now);            // live
+    tc.pruneCells(st, now);
+    assert.strictEqual(st[tc.FIRED_CELLS_KEY].length, 1);
+    assert.strictEqual(st[tc.FIRED_CELLS_KEY][0].direction, 'short');
+  });
+
+  ok('state survives a JSON write/reload round-trip', () => {
+    const st = fresh();
+    tc.markCellFired(st, 'long', 64_000, P, now);
+    const reloaded = JSON.parse(JSON.stringify(st));   // exactly what writeState/readState do
+    assert.ok(tc.findBlockingCell(reloaded, 'long', 64_050, now + 3600e3),
+      'cells must still block after a restart');
+  });
+
+  // ── Incident replay (spec 05 acceptance 1) ────────────────────────────────
+  // Replays the real signal burst that stacked the 238.3-contract position.
+  // Requires TRADES_COPY pointing at a *snapshot* of trades.json.
+  //
+  // SPEC CORRECTION (verified 2026-07-26): spec 05 stated the acceptance as
+  // "1 fire + 47 suppressed", assuming a single-day burst. The ledger shows
+  // the burst is 40 long signals (34 placed, 6 skipped) spanning 47.7 HOURS,
+  // not one day. With a 24h cell, the correct expectation is ONE fire per
+  // 24h cell period — 2 fires, 24.5h apart, the second only after the first
+  // cell legitimately expired. Asserting 1 here would demand a cell that
+  // never re-arms, which is not the design. The invariant actually worth
+  // enforcing: no fire ever lands while a same-direction cell is live.
+  const copy = process.env.TRADES_COPY;
+  if (!copy || !fs.existsSync(copy)) {
+    console.log('  ⚠ incident replay SKIPPED (set TRADES_COPY to a trades.json snapshot)');
+    return;
+  }
+
+  ok('incident replay: 47.7h burst collapses to one fire per 24h cell', () => {
+    const all = JSON.parse(fs.readFileSync(copy, 'utf8'));
+    const burst = all
+      .filter(t => t.firedAt >= '2026-07-24' && t.firedAt < '2026-07-27' && t.direction === 'long')
+      .sort((a, b) => a.firedAt.localeCompare(b.firedAt));
+    assert.ok(burst.length >= 35, `expected the ~40-signal burst, found ${burst.length}`);
+
+    const st = {};
+    const fires = [];
+    let suppressed = 0;
+    for (const t of burst) {
+      const ts = Date.parse(t.firedAt);
+      const zonePrice = t.zone?.mid ?? t.entry;
+      tc.pruneCells(st, ts);
+      if (tc.findBlockingCell(st, t.direction, zonePrice, ts)) { suppressed++; continue; }
+      tc.markCellFired(st, t.direction, zonePrice, t.entry, ts);
+      fires.push(ts);
+    }
+    const spanH = (Date.parse(burst[burst.length - 1].firedAt) - Date.parse(burst[0].firedAt)) / 3600e3;
+    console.log(`      replay: ${burst.length} signals over ${spanH.toFixed(1)}h → ${fires.length} fired, ${suppressed} suppressed`);
+
+    // Hard invariant: consecutive fires must be ≥24h apart (i.e. every fire
+    // after the first is a legitimate post-expiry re-arm, never a refire).
+    for (let i = 1; i < fires.length; i++) {
+      assert.ok(fires[i] - fires[i - 1] >= tc.CELL_EXPIRY_MS,
+        `fire ${i} came ${((fires[i] - fires[i - 1]) / 3600e3).toFixed(1)}h after the previous — a live cell was not honoured`);
+    }
+    // Ceiling: at most one fire per 24h period the burst spans.
+    const maxFires = Math.ceil(spanH / 24);
+    assert.ok(fires.length <= maxFires,
+      `${fires.length} fires exceeds the ${maxFires} the burst's ${spanH.toFixed(1)}h span allows`);
+    // Containment: production placed 34 orders here; dedup must cut ≥90%.
+    assert.ok(suppressed / burst.length >= 0.90,
+      `suppression ${(100 * suppressed / burst.length).toFixed(0)}% — expected ≥90%`);
+  });
+}
+
 // ─── run async sections, then report ─────────────────────────────────────────
 
 (async () => {
   await spec04();
+  spec05();
   console.log(`\nledger.test.js: all ${passed} assertions passed`);
 })().catch(e => { console.error(`\nFAIL: ${e.message}`); process.exit(1); });

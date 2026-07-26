@@ -48,7 +48,7 @@ const STATE_FILE  = path.join(ROOT, '.trigger-state.json');
 const TRADES_FILE = path.join(ROOT, 'trades.json');
 
 const CDP_PORT         = 9222;
-const COOLDOWN_MS      = 1 * 60 * 60 * 1000; // 1 hour between alerts per zone
+// (COOLDOWN_MS removed — fire gating is the price-time cell dedup, spec 05)
 const PENDING_TTL_MS   = 90 * 60 * 1000;     // 90-min window to catch confirmation after flat-OI alert
 const OI_CONFIRM_PCT   = 0.005;              // OI must rise ≥ 0.5% from baseline to confirm
 const CVD_CONFIRM_MULT = 1.5;               // CVD must grow ≥ 1.5× from baseline to confirm
@@ -1145,37 +1145,51 @@ function lookupCVDAt(state, targetTs) {
   ).cvd;
 }
 
-function isCoolingDown(zoneKey, incomingDir, cvd) {
-  try {
-    const entry = readState()[zoneKey];
-    if (!entry) return false;
-    const ts = typeof entry === 'number' ? entry : entry.ts; // handle legacy format
+// ─── Price-time cell dedup (rebuild spec 05, audit D8/D11) ────────────────────
+//
+// Replaces the VRVP level-identity cooldown (`isCoolingDown`, removed).
+// Level keys re-mint as the TV viewport drifts — 48 near-identical longs
+// refired on 2026-07-24→26 and stacked 238 contracts (D8); across history,
+// 801 nominal signals collapse to ~317 distinct setups (D11). A fired signal
+// now claims a (direction × 0.3%-price-band) CELL for 24h; nothing in that
+// cell fires again until it expires.
+//
+// CONTAINMENT parameters, not tuned edge parameters — the audit's stated
+// starting cell (§8b). Re-tuning awaits spec 07's sample bar (≥150 post-fix
+// signals, ≥2 regimes).
+const CELL_BAND_PCT   = 0.003;                    // 0.3%-wide price band
+const CELL_EXPIRY_MS  = 24 * 60 * 60 * 1000;      // 24h per cell
+const FIRED_CELLS_KEY = '_firedCells';
 
-    // Extended cooldown after a stop on this zone: 6h same-direction lock.
-    // Counter-direction trades fall through to the normal cooldown + bypass
-    // rules below (failed-breakout flips are still permitted).
-    if (typeof entry === 'object' && entry.stopUntil && Date.now() < entry.stopUntil) {
-      if (!incomingDir || !entry.stopDirection || incomingDir === entry.stopDirection) {
-        const remainH = ((entry.stopUntil - Date.now()) / 3600000).toFixed(1);
-        log(`Extended cooldown active: ${zoneKey} (${entry.stopDirection}) — ${remainH}h remaining`);
-        return true;
-      }
-    }
+function cellBandUsd(price) { return price * CELL_BAND_PCT; }
 
-    if ((Date.now() - ts) >= COOLDOWN_MS) return false;
+// Suppression = any unexpired same-direction fire whose zone price is within
+// one band width. DOCUMENTED DEVIATION from the spec's key sketch
+// `floor(zonePrice / (price × 0.003))`: verified on the 2026-07-24→26
+// incident data that the price-dependent divisor jitters the quantized index
+// across 330/331/332 for the SAME ~63.7k zone — the incident would still
+// have fired 3+, violating the spec's own acceptance (1 fire + 47
+// suppressed). Band-distance suppression implements the stated behavior
+// ("0.3%-wide price band × 24h × direction") without boundary jitter.
+function findBlockingCell(state, direction, zonePrice, nowMs) {
+  const cells = state[FIRED_CELLS_KEY];
+  if (!Array.isArray(cells)) return null;
+  for (const c of cells) {
+    if (c.direction !== direction) continue;
+    if (nowMs - c.ts >= CELL_EXPIRY_MS) continue;
+    if (Math.abs(zonePrice - c.zonePrice) < c.band) return c;
+  }
+  return null;
+}
 
-    // Direction-aware bypass: if the cooldown was set for a long and the new
-    // trigger is a short with negative CVD, the level has likely failed as
-    // support and flipped to resistance — allow the short to fire.
-    if (incomingDir && entry.direction && incomingDir !== entry.direction) {
-      if (incomingDir === 'short' && cvd != null && cvd < 0) {
-        log(`Cooldown bypass: ${zoneKey} was locked as long, short re-entry with CVD ${Math.round(cvd)} — failed-breakout pattern`);
-        return false;
-      }
-    }
+function markCellFired(state, direction, zonePrice, price, nowMs) {
+  if (!Array.isArray(state[FIRED_CELLS_KEY])) state[FIRED_CELLS_KEY] = [];
+  state[FIRED_CELLS_KEY].push({ ts: nowMs, direction, zonePrice, band: cellBandUsd(price) });
+}
 
-    return true;
-  } catch { return false; }
+function pruneCells(state, nowMs) {
+  if (!Array.isArray(state[FIRED_CELLS_KEY])) return;
+  state[FIRED_CELLS_KEY] = state[FIRED_CELLS_KEY].filter(c => nowMs - c.ts < CELL_EXPIRY_MS);
 }
 
 // Deduplicate near-adjacent same-type levels in state. VRVP levels shift
@@ -1331,8 +1345,10 @@ function checkInvalidations(price, indicators) {
       const watchKey = `_watch_${key}`;
       state[watchKey] = { ts: Date.now(), direction, levelType, levelMid, levelLo, levelHi, expires: Date.now() + 4 * 60 * 60 * 1000 };
       dedupeNearbyLevels(state, key, levelType, levelMid);
-      state[key] = { ts: Date.now() - (COOLDOWN_MS - 30 * 60 * 1000), direction, levelType, levelMid, levelLo, levelHi, stopHuntFiredAt: Date.now() };
-      log(`Level ${key} → stop hunt | re-entry alert fired | cooldown reset to 30m | re-fire guard armed (4h)`);
+      // Level entry retained for invalidation/reclaim tracking only — fire
+      // gating is the price-time cell (spec 05), not this timestamp.
+      state[key] = { ts: Date.now(), direction, levelType, levelMid, levelLo, levelHi, stopHuntFiredAt: Date.now() };
+      log(`Level ${key} → stop hunt | re-entry alert fired | re-fire guard armed (4h)`);
     }
   }
 
@@ -2105,33 +2121,11 @@ async function updateOutcomes(client) {
       changed = true;
       log(`Trade ${t.id} closed: ${outcome} | gross ${walk.grossR}R − fees ${walk.feeR}R = net ${walk.pnlR}R | rungs ${walk.rungsBanked} | bar: ${t.closedAt}`);
 
-      // Extended cooldown on stop: 3 same-zone shorts stopped within 2h on
-      // 2026-04-13 because the uniform 1h cooldown re-opened too soon. After
-      // a stop on a level, lock that level for 6h (or until natural cooldown
-      // would have lifted — whichever is longer). Same-direction only.
-      if (outcome === 'stop' && t.zone?.type && t.zone?.mid != null) {
-        const zoneKey = `${t.zone.type.toLowerCase()}-${Math.round(t.zone.mid)}`;
-        const state = readState();
-        const existing = state[zoneKey];
-        const stopUntil = Date.now() + 6 * 60 * 60 * 1000;
-        if (existing && typeof existing === 'object') {
-          existing.stopUntil = stopUntil;
-          existing.stopDirection = t.direction;
-        } else {
-          state[zoneKey] = {
-            ts: Date.now(),
-            direction: t.direction,
-            levelType: t.zone.type,
-            levelMid:  t.zone.mid,
-            levelLo:   t.zone.low,
-            levelHi:   t.zone.high,
-            stopUntil,
-            stopDirection: t.direction,
-          };
-        }
-        writeState(state);
-        log(`Extended cooldown: ${zoneKey} (${t.direction}) locked for 6h after stop`);
-      }
+      // Post-stop lockout: the fired cell already blocks the same
+      // direction × 0.3% band for 24h (spec 05) — strictly stronger than
+      // the old 6h stopUntil extended cooldown, which is removed with
+      // isCoolingDown(). Opposite-direction re-entries (failed-breakout
+      // flips) remain allowed because cells are direction-keyed.
     }
   }
 
@@ -2434,9 +2428,25 @@ async function main() {
   if (trigger) {
     const levelKey = `${trigger.type.toLowerCase()}-${Math.round(trigger.mid)}`;
 
-    if (isCoolingDown(levelKey, trigger.direction, indicators.cvd)) {
-      log(`Level ${levelKey} triggered but cooling down — skipping`);
+    // Cell dedup (spec 05): one alert per direction × 0.3% price band × 24h.
+    // Any alerting branch below (signal, regime filter, gates, kill notice)
+    // claims the cell — the level-identity cooldown that let the same idea
+    // refire 48 times is gone.
+    const cellNow   = Date.now();
+    const cellState = readState();
+    pruneCells(cellState, cellNow);
+    const blockingCell = findBlockingCell(cellState, trigger.direction, trigger.mid, cellNow);
+    writeState(cellState);
+
+    if (blockingCell) {
+      const agoH = ((cellNow - blockingCell.ts) / 3600000).toFixed(1);
+      log(`Cell dedup: ${trigger.direction} ${trigger.type} @$${Math.round(trigger.mid)} suppressed — cell fired ${agoH}h ago @$${Math.round(blockingCell.zonePrice)} (band $${Math.round(blockingCell.band)}, expires 24h)`);
     } else {
+      {
+        const st = readState();
+        markCellFired(st, trigger.direction, trigger.mid, price, cellNow);
+        writeState(st);
+      }
       log(`TRIGGER: ${trigger.type} $${Math.round(trigger.lo).toLocaleString()}–$${Math.round(trigger.hi).toLocaleString()} | direction: ${trigger.direction} | dist $${Math.round(trigger.dist).toLocaleString()}`);
 
       const setup = evaluateSetup(price, trigger, indicators, indicators.vrvpLevels);
@@ -2662,4 +2672,12 @@ module.exports = {
   unconfirmedExpiry,
   walkBarsForOutcome,
   evaluateSetup,
+  // Price-time cell dedup (spec 05) — pure, operate on a passed-in state object.
+  CELL_BAND_PCT,
+  CELL_EXPIRY_MS,
+  FIRED_CELLS_KEY,
+  cellBandUsd,
+  findBlockingCell,
+  markCellFired,
+  pruneCells,
 };
