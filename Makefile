@@ -120,6 +120,12 @@ book-status: ## Order-book recorder: freshness, coverage, liq-stream check
 book-logs: ## Tail the order-book recorder log (Ctrl+C to stop)
 	@pm2 logs book-recorder --lines 50
 
+book-report: ## Post the order-book corpus weekly report to Discord now
+	@$(NODE) $(TRADING)/scripts/research/book-report.js
+
+book-report-dry: ## Preview the weekly corpus report without posting
+	@$(NODE) $(TRADING)/scripts/research/book-report.js --dry-run
+
 report: ## Run the weekly performance report now and post to #btc-backtest
 	@$(NODE) $(TRADING)/scripts/weekly-report.js
 

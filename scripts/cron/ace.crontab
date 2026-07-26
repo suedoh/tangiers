@@ -67,4 +67,10 @@
 # skips entries while it exists; re-enable = operator deletes the file).
 30 8 * * 1 node /app/scripts/audit/falsification.js --days 90 --record >> /app/logs/falsification.log 2>&1
 
+# Order-book corpus weekly report — Monday 08:00 UTC, ahead of the falsification
+# gate. Coverage/quality/anomaly digest for the spec-07 round-2 recorder, which
+# runs on the HOST under pm2; this only reads its output through the bind mount.
+# Target: BOOK_STATUS_WEBHOOK, else BLOFIN_RECON_WEBHOOK.
+0 8 * * 1 node /app/scripts/research/book-report.js >> /app/logs/book-report.log 2>&1
+
 # busybox crond requires a trailing newline below
