@@ -36,3 +36,4 @@ trades.json.bak-executedtrack-fix
 logs/zone-parity.jsonl
 .falsification-state.json
 .autotrade-disabled.json
+rebuild/tools/klines-*.json
