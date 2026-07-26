@@ -19,6 +19,12 @@
  *             be a sleep/wake artifact.
  *   spool   — .blofin-spool.ndjson older than SPOOL_STALE_MIN means orders
  *             were placed in degraded mode and Mongo still isn't back.
+ *   marginLow — available BloFin margin < 2× the initial margin a next entry
+ *             at current sizing would need (spec 02.3). The early warning
+ *             BEFORE autotrade starts skipping on margin — the 2026-07-26
+ *             238-contract stack margin-locked the account for 24h+ with no
+ *             alert anywhere. Rate-limited to 30 min (tighter than the infra
+ *             classes) and posted as its own dedicated red alert.
  *
  * Alerting: 2 consecutive strikes → one red post to #blofin-recon listing
  * every failing class; re-alerts at most every ALERT_COOLDOWN_MS while the
@@ -52,6 +58,18 @@ const STRIKES_TO_ALERT   = 2;               // 2 × 5-min cron = 10 min of confi
 const ALERT_COOLDOWN_MS  = 2 * 60 * 60 * 1000;
 const RECON_STALE_MIN    = 20;              // recon cadence is 3 min
 const SPOOL_STALE_MIN    = 15;
+
+// Per-class cooldown overrides (spec 02.3: margin alerts rate-limit at 30 min,
+// tighter than the 2h infra cadence — margin pressure is actionable *now*).
+const CLASS_COOLDOWN_MS  = { marginLow: 30 * 60 * 1000 };
+const cooldownFor        = name => CLASS_COOLDOWN_MS[name] ?? ALERT_COOLDOWN_MS;
+
+// Reference stop width for the next-entry margin estimate: measured median
+// stop 0.216% of price (2026-07-26 audit, prior-audit A3 — "0.216% stops sit
+// inside a single bar 82% of the time"). Initial margin per entry =
+// rDollar / (stopFrac × leverage) — price cancels out. Re-derive when spec 07
+// validates a different stop geometry.
+const REF_STOP_PCT       = 0.00216;
 
 function log(msg) { console.log(`[${new Date().toISOString()}] [watchdog] ${msg}`); }
 
@@ -137,6 +155,43 @@ function checkSpool() {
   }
 }
 
+// margin-low (spec 02.3): available margin < 2× next-entry initial margin at
+// current sizing. Next-entry margin uses the same sizing the autotrade layer
+// uses — equity = min(live balance, ACCOUNT_EQUITY_USD cap), rDollar =
+// equity × RISK_PER_TRADE_PCT — at the measured median stop width
+// (REF_STOP_PCT): margin = rDollar / (stopFrac × leverage); price cancels.
+// Fail-open on read errors: an unreachable BloFin API is an infra problem the
+// recon class already covers, not a margin condition.
+async function checkMarginLow() {
+  if (process.env.BLOFIN_AUTOTRADE !== 'true') return { ok: true }; // no next entry to fund
+  try {
+    const blofin = require('../lib/blofin');
+    const bal    = await blofin.getBalance();
+    const usdt   = (bal || []).find(b => b.currency === 'USDT');
+    const cash   = Number(usdt?.balance);
+    const frozen = Number(usdt?.frozen);
+    const avail  = Number(usdt?.available);
+    if (!Number.isFinite(avail) || !Number.isFinite(cash)) return { ok: true };
+
+    const cap     = Number(process.env.ACCOUNT_EQUITY_USD);
+    const live    = cash + (Number.isFinite(frozen) ? frozen : 0);
+    const equity  = Number.isFinite(cap) && cap > 0 ? Math.min(live, cap) : live;
+    const riskPct = Number(process.env.RISK_PER_TRADE_PCT || 1);
+    const lev     = Number(process.env.BLOFIN_LEVERAGE || 10);
+    const rDollar = equity * (riskPct / 100);
+    const nextEntryMargin = rDollar / (REF_STOP_PCT * lev);
+    if (avail < 2 * nextEntryMargin) {
+      return { ok: false,
+        detail: `available margin $${avail.toFixed(0)} < 2× next-entry initial margin $${nextEntryMargin.toFixed(0)} `
+              + `(equity $${equity.toFixed(0)} · risk ${riskPct}%/trade · ${lev}x · ref stop ${(REF_STOP_PCT * 100).toFixed(3)}%)` };
+    }
+    return { ok: true };
+  } catch (e) {
+    log(`marginLow check unreadable (fail-open): ${String(e.message).split('\n')[0]}`);
+    return { ok: true };
+  }
+}
+
 // ─── Discord ─────────────────────────────────────────────────────────────────
 
 async function post(type, body) {
@@ -151,10 +206,11 @@ async function post(type, body) {
 
 async function main() {
   const results = {
-    docker: checkDocker(),
-    mongo:  await checkMongo(),
-    recon:  checkReconFresh(),
-    spool:  checkSpool(),
+    docker:    checkDocker(),
+    mongo:     await checkMongo(),
+    recon:     checkReconFresh(),
+    spool:     checkSpool(),
+    marginLow: await checkMarginLow(),
   };
 
   const state = readState();
@@ -179,23 +235,42 @@ async function main() {
 
   const dueForAlert = failing.filter(f =>
     !state.alerting[f.name]
-    || Date.now() - (state.lastAlertAt[f.name] || 0) >= ALERT_COOLDOWN_MS);
+    || Date.now() - (state.lastAlertAt[f.name] || 0) >= cooldownFor(f.name));
 
-  if (dueForAlert.length > 0) {
+  // margin-low gets its own dedicated post (it is a book condition, not an
+  // infra outage — the INFRA DOWN framing and 2h cadence don't fit it).
+  const infraDue     = dueForAlert.filter(f => f.name !== 'marginLow');
+  const marginDue    = dueForAlert.find(f => f.name === 'marginLow');
+  const infraFailing = failing.filter(f => f.name !== 'marginLow');
+
+  if (infraDue.length > 0) {
     const body = [
       `🚨 **INFRA DOWN — HOST IS AWAKE BUT EXECUTION INFRA IS NOT** 🚨`,
       `Signals that fire now will place in degraded mode (spooled) or not at all. Confirmed over ${STRIKES_TO_ALERT} checks.`,
       ``,
-      ...failing.map(f => `❌ **${f.name}** — ${f.detail}`),
+      ...infraFailing.map(f => `❌ **${f.name}** — ${f.detail}`),
       ``,
       `**Action** \`docker compose up -d\` from ~/trading if the auto-restart hasn't recovered it. Re-alerts every ${ALERT_COOLDOWN_MS / 3600000}h while broken.`,
     ].join('\n');
     await post('error', body);
-    for (const f of failing) {
+    for (const f of infraFailing) {
       state.alerting[f.name]    = true;
       state.lastAlertAt[f.name] = Date.now();
     }
-    log(`alert posted: ${failing.map(f => f.name).join(', ')}`);
+    log(`alert posted: ${infraFailing.map(f => f.name).join(', ')}`);
+  }
+
+  if (marginDue) {
+    await post('error', [
+      `🚨 **MARGIN LOW — NEXT ENTRY AT RISK OF SKIPPING** 🚨`,
+      marginDue.detail,
+      ``,
+      `Autotrade skips (book cap / margin cap / preflight) alert separately at skip time — this is the early warning before they start.`,
+      `**Action** Review open BloFin positions (margin may be locked by the book) or top up demo margin (\`make blofin-fund\`). Re-alerts every ${cooldownFor('marginLow') / 60000} min while low.`,
+    ].join('\n'));
+    state.alerting.marginLow    = true;
+    state.lastAlertAt.marginLow = Date.now();
+    log('alert posted: marginLow');
   }
 
   if (recovered.length > 0 && failing.length === 0) {
