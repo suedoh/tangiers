@@ -2,7 +2,8 @@
 'use strict';
 
 /**
- * Rebuild spec 02 (book governance) unit + integration asserts.
+ * Rebuild specs 02 (book governance) + 08 (execution layer) unit +
+ * integration asserts.
  * Run: node scripts/tests/governance.test.js
  *
  * No exchange, no Mongo, no Discord — blofin/store/daily-r/discord are
@@ -150,6 +151,92 @@ const SIGNAL = {
   fs.rmSync(at.SKIP_ALERT_STATE, { force: true });
   await at.autotrade({ ...SIGNAL, signalId: 'gov-test-3', direction: 'long' });
   assert.strictEqual(alerts.length, 2, 'alert fires again once the rate-limit window is cleared');
+
+  // ═══ Spec 08 — execution layer ═══════════════════════════════════════════
+
+  // ── Pure: sizingFor is flat — no tier multipliers anywhere ────────────────
+  const src = fs.readFileSync(require.resolve('../lib/blofin-autotrade'), 'utf8');
+  assert.ok(!/tierMult|TIER_MULT/i.test(src), 'tierMult absent from the code (spec 08 acceptance 2)');
+
+  let s = at.sizingFor({ entry: 100000, stop: 99500, equity: 1500 });
+  assert.strictEqual(s.rDollar, 15, 'rDollar = equity × riskPct, no multiplier');
+  assert.strictEqual(s.contracts, 30, '15 / (500 × 0.001) = 30 contracts');
+  s = at.sizingFor({ entry: 100000, stop: 99500, equity: 750 });
+  assert.strictEqual(s.contracts, 15, 'sizing scales linearly with equity — no tier steps');
+  assert.ok(at.sizingFor({ entry: 100000, stop: 100000, equity: 1500 }).error, 'stop=entry errors');
+  assert.ok(at.sizingFor({ entry: 100000, stop: 99500, equity: 0 }).error, 'no equity errors');
+
+  // ── Pure: resolveEquity = min(live, cap) ──────────────────────────────────
+  let e = at.resolveEquity(800, 1500);
+  assert.strictEqual(e.equity, 800, 'live below cap → live');
+  assert.strictEqual(e.source, 'live balance');
+  e = at.resolveEquity(5000, 1500);
+  assert.strictEqual(e.equity, 1500, 'live above cap → cap (demo top-up cannot double risk)');
+  assert.strictEqual(e.source, 'env cap');
+  e = at.resolveEquity(NaN, 1500);
+  assert.strictEqual(e.equity, 1500, 'failed balance read falls open to the cap');
+  assert.ok(at.resolveEquity(800, NaN).error, 'missing ACCOUNT_EQUITY_USD errors');
+
+  // ── Pure: computeFeeR — measured schedule, legs weighted by rung size ─────
+  const fee = at.computeFeeR({
+    fill: 100000, stop: 99500, entryContracts: 30, liveContracts: 30, rDollar: 15,
+    rungs: [{ price: 100500, size: 10 }, { price: 101000, size: 10 }, { price: 102000, size: 10 }],
+  });
+  assert.strictEqual(fee.entryUsd, 1.8,    'entry: $3,000 notional × 6bp taker');
+  assert.strictEqual(fee.tpExitUsd, 0.607, 'TP legs: Σ(rung notional × 2bp maker)');
+  assert.strictEqual(fee.stopExitUsd, 1.791, 'stop: $2,985 notional × 6bp taker');
+  assert.strictEqual(fee.tpPathR, 0.16,    '(1.8+0.607)/15 R on the full-TP path');
+  assert.strictEqual(fee.stopPathR, 0.239, '(1.8+1.791)/15 R on the stop path');
+  // Uneven rungs weight correctly: one fat rung ≠ three thin ones at different prices.
+  const feeW = at.computeFeeR({
+    fill: 100000, stop: 99500, entryContracts: 30, liveContracts: 30, rDollar: 15,
+    rungs: [{ price: 102000, size: 30 }],
+  });
+  assert.strictEqual(feeW.tpExitUsd, 0.612, 'single 30-lot rung at 102000 = 3060 × 2bp');
+
+  // ── Integration: confirmedPrice is the sizing basis (Agent-A contract) ────
+  armMocks({ positions: [] });
+  r = await at.autotrade({ ...SIGNAL, signalId: 'gov-test-basis', direction: 'long',
+    entry: 100000, stop: 99000, confirmedPrice: 101000 });
+  assert.ok(r.dropped, 'reached money path (write-stubbed)');
+  assert.strictEqual(placements[0].size, '7.5',
+    'sized off |confirmedPrice − stop| = 2000 → 15/2 = 7.5 contracts');
+
+  armMocks({ positions: [] });
+  r = await at.autotrade({ ...SIGNAL, signalId: 'gov-test-nobasis', direction: 'long',
+    entry: 100000, stop: 99000 });
+  assert.strictEqual(placements[0].size, '15',
+    'no confirmedPrice → plan-entry fallback: |100000−99000| → 15 contracts');
+
+  // ── Integration: equity marked to live balance, min()'d with the cap ──────
+  armMocks({ positions: [],
+    balance: [{ currency: 'USDT', balance: '750', available: '750', frozen: '50' }] });
+  r = await at.autotrade({ ...SIGNAL, signalId: 'gov-test-liveeq', direction: 'long' });
+  assert.strictEqual(placements[0].size, '16',
+    'live equity 800 < cap 1500 → rDollar 8 → 16 contracts');
+
+  armMocks({ positions: [],
+    balance: [{ currency: 'USDT', balance: '4900', available: '4900', frozen: '100' }] });
+  r = await at.autotrade({ ...SIGNAL, signalId: 'gov-test-capeq', direction: 'long' });
+  assert.strictEqual(placements[0].size, '30',
+    'live equity 5000 > cap 1500 → capped rDollar 15 → 30 contracts');
+
+  // ── Integration: kill-file ⇒ skip "falsification gate tripped" + red alert ─
+  armMocks({ positions: [] });
+  fs.writeFileSync(at.KILL_FILE, JSON.stringify({ reason: 'test', weeks: 2 }));
+  try {
+    r = await at.autotrade({ ...SIGNAL, signalId: 'gov-test-kill', direction: 'long' });
+    assert.strictEqual(r.skipped, 'falsification gate tripped', 'kill-file skip detail per contract');
+    assert.strictEqual(placements.length, 0, 'no placement while gate is tripped');
+    assert.strictEqual(alerts.length, 1, 'kill-file skip alerts');
+    assert.strictEqual(alerts[0].type, 'error', 'kill-file alert is red');
+    assert.ok(alerts[0].body.includes('.autotrade-disabled.json'), 'alert names the kill file');
+  } finally {
+    fs.rmSync(at.KILL_FILE, { force: true });
+  }
+  armMocks({ positions: [] });
+  r = await at.autotrade({ ...SIGNAL, signalId: 'gov-test-rearm', direction: 'long' });
+  assert.ok(r.dropped, 'deleting the kill file re-arms the money path');
 
   try { fs.rmSync(at.SKIP_ALERT_STATE, { force: true }); } catch (_) {}
   console.log('governance.test.js: all assertions passed');

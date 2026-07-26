@@ -205,5 +205,8 @@ blofin-degraded-probe: ## Mongo-DOWN autotrade smoke: place + spool + degraded i
 blofin-governance-probe: ## Spec 02 governance smoke: same-direction cap, fail-safe read, margin cap, skip alerts (mocked; --live-reads / --live via node directly)
 	@$(NODE) $(TRADING)/scripts/blofin/governance-probe.js
 
+blofin-postonly-probe: ## Spec 08.3 post_only probe: rest/cross/cancel behavior (PLACES DEMO ORDERS — gated; run `node scripts/blofin/postonly-probe.js --confirm`)
+	@$(NODE) $(TRADING)/scripts/blofin/postonly-probe.js
+
 watchdog: ## Run the host infra watchdog once (Docker/Mongo/recon/spool health check)
 	@$(NODE) $(TRADING)/scripts/ops/watchdog.js

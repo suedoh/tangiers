@@ -136,6 +136,19 @@ async function mockedScenarios() {
   ok(alerts.length === 1, 'margin-cap skip alerted');
   delete process.env.MARGIN_CAP_PCT;
 
+  console.log('[5] falsification kill-file → skip + red alert (spec 08 / Agent-C contract)');
+  resetRateLimit(); alerts = [];
+  stubReads({ positions: [] });
+  fs.writeFileSync(at.KILL_FILE, JSON.stringify({ reason: 'probe', weeks: 2 }));
+  try {
+    r = await at.autotrade({ ...SIGNAL, signalId: 'gov-probe-5', direction: 'long' });
+    ok(r.skipped === 'falsification gate tripped', `skip detail: "${r.skipped}"`);
+    ok(placements.length === 0, 'no order placement attempted');
+    ok(alerts.length === 1 && alerts[0].type === 'error', 'red falsification-gate alert posted');
+  } finally {
+    fs.rmSync(at.KILL_FILE, { force: true });
+  }
+
   resetRateLimit();
   console.log(`mocked scenarios: ${pass} assertions passed`);
 }
