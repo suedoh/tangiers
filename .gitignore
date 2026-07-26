@@ -34,3 +34,5 @@ notes/audits/cron.log
 trades.json.bak-executedtrack-fix
 .market-data-cache/
 logs/zone-parity.jsonl
+.falsification-state.json
+.autotrade-disabled.json
