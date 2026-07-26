@@ -63,9 +63,24 @@ if (fs.existsSync(ENV_FILE)) {
     .filter(l => l.trim() && !l.startsWith('#'))
     .forEach(l => {
       const idx = l.indexOf('=');
-      if (idx > 0) process.env[l.slice(0, idx).trim()] = l.slice(idx + 1).trim();
+      if (idx < 1) return;
+      const key = l.slice(0, idx).trim();
+      // Never clobber the caller's environment — `BLOFIN_AUTOTRADE=false node
+      // scripts/trigger-check.js` must actually BE a dry run. The old
+      // unconditional assignment made .env win over the shell, and a native-path
+      // smoke test on 2026-07-26 placed 7 real demo orders despite the override.
+      // This matches lib/env.js semantics, which the rest of the codebase uses.
+      if (process.env[key] === undefined) process.env[key] = l.slice(idx + 1).trim();
     });
 }
+
+// ─── Data source (spec 06 cutover flag) ──────────────────────────────────────
+// 'tv' (default) = legacy CDP path, byte-identical behaviour. 'native' =
+// Binance-computed via lib/market-data.js + the FROZEN calibration in
+// config/btc-zones.json. Unsetting the flag is the rollback lever (keep ≥2wk).
+// Must be read AFTER the env block above — .env is where the flag lives.
+const DATA_SOURCE = process.env.BTC_DATA_SOURCE === 'native' ? 'native' : 'tv';
+const mkt = require('./lib/market-data');
 
 // ─── Guard: exit silently on machines without TradingView Desktop ─────────────
 // Set TRADINGVIEW_ENABLED=false in .env on any machine that does not run
@@ -475,6 +490,70 @@ async function fetchOIBinance(price) {
 }
 
 // ─── Indicator Parsers ────────────────────────────────────────────────────────
+
+// ─── Native market snapshot (BTC_DATA_SOURCE=native) ─────────────────────────
+// Everything main() otherwise reads via CDP, computed from Binance Futures
+// REST. Zones use the FROZEN calibration (calibrate-then-freeze — no
+// recalibration without operator sign-off). Any fetch error throws → cycle
+// skipped with an error alert; never signal off stale or partial data.
+async function readNativeSnapshot() {
+  const now = Date.now();
+  const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config', 'btc-zones.json'), 'utf8'));
+
+  const [price, oi, bars5m, bars30raw] = await Promise.all([
+    mkt.fetchLastPrice({ symbol: 'BTCUSDT' }),
+    mkt.fetchOpenInterest({ symbol: 'BTCUSDT' }),
+    mkt.loadKlinesCached({
+      symbol: cfg.instrument, interval: cfg.interval,
+      windowMs: cfg.windowDays * 86_400_000,
+      cacheFile: path.join(ROOT, '.market-data-cache', `btc-${cfg.interval}.json`),
+    }),
+    mkt.fetchKlines({ symbol: 'BTCUSDT', interval: '30m',
+                      startTime: now - 337 * 1_800_000, endTime: now }),
+  ]);
+  if (price == null) throw new Error('native: ticker price unavailable');
+
+  const profile = mkt.buildVolumeProfile(bars5m, { rowSize: cfg.rowSize });
+  if (!profile) throw new Error('native: volume profile empty');
+
+  const done5m = mkt.completedBars(bars5m, '5m', now);
+  const sess   = mkt.sessionBars(done5m, now);
+  const svp    = mkt.computeSessionVP(sess);
+
+  return {
+    price,
+    vrvpRaw: profile,                                    // {poc,vah,val,rows} — VRVP_EXPR shape
+    cvd: Math.round(mkt.computeCVD(done5m.slice(-12))),  // 1h rolling, fetchCVDBinance definition
+    oi,                                                  // coins — same unit as the CDP read since 4f175b3
+    sessionVP: { up: Math.round(svp.up), down: Math.round(svp.down) },
+    vwap: mkt.computeVWAP(sess),
+    volumes: mkt.completedBars(bars30raw, '30m', now).slice(-12).map(b => b.v),
+  };
+}
+
+// HTF closes for MACD/RSI/weekly — native replacement for fetchHTFCloses.
+// Keeps the forming bar, matching what the TV chart series showed, so the
+// momentum criteria stay comparable across the flip.
+async function fetchNativeHTFCloses(interval, count) {
+  const now = Date.now();
+  const bars = await mkt.fetchKlines({
+    symbol: 'BTCUSDT', interval,
+    startTime: now - (count + 1) * mkt.INTERVAL_MS[interval], endTime: now,
+  });
+  return bars.slice(-count).map(b => b.c);
+}
+
+// 30M OHLCV for confirmation + outcome walking. COMPLETED bars only (audit D4
+// — TV's series includes the forming bar; spec 03 requires completed-only).
+// TV bar shape preserved: time in SECONDS + open/high/low/close, so the
+// existing walkers consume it unchanged.
+async function fetchNative30mOHLCV(count) {
+  const now = Date.now();
+  const raw = await mkt.fetchKlines({ symbol: 'BTCUSDT', interval: '30m',
+    startTime: now - (count + 1) * 1_800_000, endTime: now });
+  return mkt.completedBars(raw, '30m', now).slice(-count)
+    .map(b => ({ time: b.t / 1000, open: b.o, high: b.h, low: b.l, close: b.c }));
+}
 
 // 2026-07-05 signal-brain audit fix: the old inline implementation stripped
 // TradingView's Unicode minus (every negative CVD parsed positive — zero
@@ -1137,6 +1216,33 @@ function appendCVDReading(state, cvd) {
     state[CVD_HISTORY_KEY] = state[CVD_HISTORY_KEY].slice(-CVD_HISTORY_MAX);
 }
 
+// CVD is not one series. The TradingView study is an ANCHORED CUMULATIVE sum
+// (values in the thousands); the native definition is a 1h ROLLING sum (values
+// near zero). Mixing them makes lookupCVDAt() return a number from the other
+// definition and manufactures an enormous delta — caught at the 2026-07-26
+// cutover smoke test: pending baseline -19 (native) vs looked-up 2190 (TV
+// residue) → delta 2209 → spurious "CVD confirmed". So any change of data
+// source invalidates the whole history and every pending CVD baseline.
+// Idempotent and symmetric: it fires on rollback (native→tv) too.
+const CVD_SOURCE_KEY = '_cvdSource';
+
+function resetCVDStateOnSourceChange(state, source) {
+  if (state[CVD_SOURCE_KEY] === source) return null;
+  const prev = state[CVD_SOURCE_KEY] ?? 'tv';
+  const dropped = Array.isArray(state[CVD_HISTORY_KEY]) ? state[CVD_HISTORY_KEY].length : 0;
+  delete state[CVD_HISTORY_KEY];
+  let cleared = 0;
+  for (const [k, v] of Object.entries(state)) {
+    // null (not 0) — a null baseline makes cvdDelta null, which fails the CVD
+    // confirmation closed rather than confirming on a cross-definition delta.
+    if (k.startsWith('_pending_') && v && typeof v === 'object' && v.baselineCVD != null) {
+      v.baselineCVD = null; cleared++;
+    }
+  }
+  state[CVD_SOURCE_KEY] = source;
+  return { prev, dropped, cleared };
+}
+
 function lookupCVDAt(state, targetTs) {
   const history = state[CVD_HISTORY_KEY];
   if (!Array.isArray(history) || history.length === 0) return null;
@@ -1723,12 +1829,17 @@ async function checkConfirmation(client, indicators) {
 
   // Switch to 30M explicitly; checkConfirmation runs before updateOutcomes so we can't
   // assume the chart TF — save and restore so updateOutcomes sees the real original TF.
-  const confirmTF = await cdpEval(client, GET_TF_EXPR).catch(() => '30');
-  await cdpEval(client, buildSetTFExpr('30')).catch(() => {});
-  await new Promise(r => setTimeout(r, 800));
-  const bars = await cdpEval(client, buildOHLCVExpr(96)).catch(() => []); // 48h of 30M bars
-  if (confirmTF && confirmTF !== '30') {
-    await cdpEval(client, buildSetTFExpr(confirmTF)).catch(() => {});
+  let bars;
+  if (DATA_SOURCE === 'native') {
+    bars = await fetchNative30mOHLCV(96).catch(() => []); // 48h of completed 30M bars
+  } else {
+    const confirmTF = await cdpEval(client, GET_TF_EXPR).catch(() => '30');
+    await cdpEval(client, buildSetTFExpr('30')).catch(() => {});
+    await new Promise(r => setTimeout(r, 800));
+    bars = await cdpEval(client, buildOHLCVExpr(96)).catch(() => []); // 48h of 30M bars
+    if (confirmTF && confirmTF !== '30') {
+      await cdpEval(client, buildSetTFExpr(confirmTF)).catch(() => {});
+    }
   }
   if (!bars || bars.length === 0) return;
 
@@ -1808,6 +1919,8 @@ function logTrade(price, trigger, setup) {
   trades.push({
     id,
     firedAt:    new Date().toISOString(),
+    // Which feed produced the zone this signal fired on (plan P4 attribution).
+    zoneSource: DATA_SOURCE === 'native' ? 'computed' : 'tv',
     direction:  setup.direction,
     setupType:  setup.setupType,
     probability: setup.probability,
@@ -2034,16 +2147,22 @@ async function updateOutcomes(client) {
 
   // Switch to 30M and fetch enough bars to cover all open trades
   // (we always work on the 30M timeframe for outcome detection)
-  const originalTF = await cdpEval(client, GET_TF_EXPR).catch(() => '30');
-  await cdpEval(client, buildSetTFExpr('30'));
-  await new Promise(r => setTimeout(r, 800));
+  let bars;
+  if (DATA_SOURCE === 'native') {
+    // 7 days of completed 30M bars, straight from Binance — no TF juggling.
+    bars = await fetchNative30mOHLCV(336).catch(() => []);
+  } else {
+    const originalTF = await cdpEval(client, GET_TF_EXPR).catch(() => '30');
+    await cdpEval(client, buildSetTFExpr('30'));
+    await new Promise(r => setTimeout(r, 800));
 
-  // Fetch last 336 bars (7 days of 30M) — raw OHLCV
-  const bars = await cdpEval(client, buildOHLCVExpr(336)).catch(() => []);
+    // Fetch last 336 bars (7 days of 30M) — raw OHLCV
+    bars = await cdpEval(client, buildOHLCVExpr(336)).catch(() => []);
 
-  // Restore original timeframe
-  if (originalTF && originalTF !== '30') {
-    await cdpEval(client, buildSetTFExpr(originalTF));
+    // Restore original timeframe
+    if (originalTF && originalTF !== '30') {
+      await cdpEval(client, buildSetTFExpr(originalTF));
+    }
   }
 
   if (!bars || bars.length === 0) {
@@ -2149,9 +2268,66 @@ async function updateOutcomes(client) {
 // source differs. Read-only: errors are logged and swallowed; the signal
 // path is never affected. Gate evaluation: scripts/audit/zone-parity-report.js.
 // Disable with ZONE_PARITY=false.
+// TV shadow read for the POST-cutover parity gate. Never blocks the signal
+// path (the sidecar runs after all signal work) and every failure degrades to
+// null. This is the only remaining CDP consumer in native mode; it takes the
+// mutex because BZ/EW still share the TradingView session.
+async function readTVShadow(price) {
+  const lock = await acquireLock(5_000, 'btc-tv-shadow');
+  if (!lock) throw new Error('lock busy');
+  let client;
+  try {
+    ({ client } = await cdpConnect());
+    const tf = await cdpEval(client, GET_TF_EXPR).catch(() => null);
+    if (tf !== '30') { await cdpEval(client, buildSetTFExpr('30')); await new Promise(r => setTimeout(r, 800)); }
+    let vrvpRaw = null;
+    for (let i = 0; i < 4; i++) {
+      vrvpRaw = await cdpEval(client, VRVP_EXPR);
+      if (vrvpRaw && !vrvpRaw.error && vrvpRaw.rows?.length) break;
+      await new Promise(r => setTimeout(r, 500));
+    }
+    const studies = await cdpEval(client, STUDY_VALUES_EXPR).catch(() => []);
+    const parsed  = parseStudies(Array.isArray(studies) ? studies : []);
+    const levels  = computeVRVPLevels(vrvpRaw);
+    if (tf && tf !== '30') await cdpEval(client, buildSetTFExpr(tf)).catch(() => {});
+    const slim = t => t ? { type: t.type, direction: t.direction, mid: t.mid } : null;
+    return {
+      poc: levels?.poc ?? null, pocFresh: vrvpRaw?.poc ?? null,
+      vah: levels?.vah ?? null, val: levels?.val ?? null,
+      trigger: levels ? slim(checkVRVPProximity(price, levels)) : null,
+      cvd: parsed.cvd ?? null, oi: parsed.oi ?? null,
+    };
+  } finally {
+    try { await client?.close(); } catch {}
+    releaseLock('btc-tv-shadow');
+  }
+}
+
 async function zoneParitySidecar(price, indicators, tvTrigger) {
   if (process.env.ZONE_PARITY === 'false') return;
   try {
+    // Post-cutover the sidecar's job inverts: native is primary and TV is the
+    // shadow. Same JSONL schema (tv.* / mkt.*) so zone-parity-report.js
+    // consumes it unchanged.
+    if (DATA_SOURCE === 'native') {
+      const tvSide = await readTVShadow(price).catch(e => {
+        log(`tv-shadow unavailable (non-fatal): ${e.message}`); return null;
+      });
+      const slim = t => t ? { type: t.type, direction: t.direction, mid: t.mid } : null;
+      const lv = indicators.vrvpLevels;
+      const entry = {
+        ts: new Date().toISOString(), price,
+        tv:  tvSide ?? { poc: null, pocFresh: null, vah: null, val: null, trigger: null },
+        mkt: { poc: lv?.poc ?? null, vah: lv?.vah ?? null, val: lv?.val ?? null,
+               trigger: slim(tvTrigger) },   // in native mode this IS the live trigger
+        cvdTv: tvSide?.cvd ?? null, cvdMkt: indicators.cvd ?? null,
+        oiTv:  tvSide?.oi  ?? null, oiMkt:  indicators.oi  ?? null,
+      };
+      fs.mkdirSync(path.join(ROOT, 'logs'), { recursive: true });
+      fs.appendFileSync(path.join(ROOT, 'logs', 'zone-parity.jsonl'), JSON.stringify(entry) + '\n');
+      log(`zone-parity (native primary): POC ${entry.mkt.poc} | tv ${entry.tv.poc ?? 'blind'} | trigger mkt=${entry.mkt.trigger?.type ?? '∅'} tv=${entry.tv.trigger?.type ?? '∅'}`);
+      return;
+    }
     const { loadKlinesCached, buildVolumeProfile, computeCVD } = require('./lib/market-data');
     const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config', 'btc-zones.json'), 'utf8'));
     const bars = await loadKlinesCached({
@@ -2187,9 +2363,14 @@ async function zoneParitySidecar(price, indicators, tvTrigger) {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
-async function main() {
-  log('Stage 1 trigger check starting...');
+// ─── Data gathering ──────────────────────────────────────────────────────────
+// Two interchangeable readers with the same return shape:
+//   { price, indicators, client, restoreUserTF }
+// `client` is null on the native path and is never dereferenced there.
 
+// Legacy TradingView/CDP reader. Body unchanged from the pre-cutover main() —
+// this is the rollback path, so it stays byte-for-byte comparable.
+async function gatherTV() {
   // Serialize CDP access with BZ, EW, Poly. All multi-instrument scripts share
   // one TradingView Desktop session; without the lock a BZ analyze can collide
   // with a BTC poll and read stale data mid-timeframe-switch.
@@ -2387,11 +2568,64 @@ async function main() {
     if (indicators.oi  == null && binanceOI  != null) { indicators.oi  = binanceOI;  log(`OI from Binance: ${binanceOI?.toFixed(2)}B`); }
   }
 
+  return { price, indicators, client, restoreUserTF };
+}
+
+// Native reader — Binance Futures REST + the frozen zone calibration. No lock,
+// no CDP, no timeframe management: nothing here can be perturbed by another
+// script holding the mutex or by the operator zooming the chart. A failed read
+// skips the cycle loudly rather than signalling off partial data.
+async function gatherNative() {
+  try {
+    const snap = await readNativeSnapshot();
+    const indicators = {
+      cvd: snap.cvd,
+      oi: snap.oi,
+      sessionVP: snap.sessionVP,
+      vwap: snap.vwap,
+      volumes: snap.volumes,
+      vrvpLevels: computeVRVPLevels(snap.vrvpRaw),
+      // Natively the histogram rows and the level store are the SAME data —
+      // the stale-row split (audit D10) cannot exist on this path.
+      _vrvpPocFresh: snap.vrvpRaw.poc,
+      macd4h: null, rsi12h: null, weeklyTrend: null,
+    };
+    const lv = indicators.vrvpLevels;
+    log(`Native read: $${Math.round(snap.price).toLocaleString()} | POC ${lv?.poc} VAH ${lv?.vah} VAL ${lv?.val} | CVD ${snap.cvd} | OI ${snap.oi?.toFixed(0)}`);
+
+    // HTF momentum only matters when a zone is in play — same gate as the TV path.
+    if (checkVRVPProximity(snap.price, indicators.vrvpLevels)) {
+      indicators.macd4h      = computeMACD(await fetchNativeHTFCloses('4h', 60));
+      indicators.rsi12h      = computeRSI(await fetchNativeHTFCloses('12h', 30));
+      indicators.weeklyTrend = analyseWeeklyTrend(await fetchNativeHTFCloses('1w', 10));
+      log(`HTF: 4H MACD ${indicators.macd4h ? (indicators.macd4h.bullish ? 'bullish' : 'bearish') : 'n/a'} | 12H RSI ${indicators.rsi12h != null ? Math.round(indicators.rsi12h) : 'n/a'} | Weekly ${indicators.weeklyTrend ?? 'n/a'}`);
+    }
+    return { price: snap.price, indicators, client: null, restoreUserTF: async () => {} };
+  } catch (e) {
+    errorAlert(`Native data read failed: ${e.message}`,
+               'Binance fapi via lib/market-data.js',
+               'Check network / Binance status. No signal was evaluated this cycle.');
+    process.exit(1);
+  }
+}
+
+async function main() {
+  log(`Stage 1 trigger check starting (source: ${DATA_SOURCE})...`);
+
+  const { price, indicators, client, restoreUserTF } =
+    DATA_SOURCE === 'native' ? await gatherNative() : await gatherTV();
+
   indicators.oiTrend = getOITrend(indicators.oi);
   log(`CVD: ${indicators.cvd} | OI: ${indicators.oi} (${indicators.oiTrend ?? 'no trend yet'}) | VWAP: ${indicators.vwap} | Weekly: ${indicators.weeklyTrend ?? 'n/a'}`);
 
-  // Append CVD snapshot to history for use by checkPendingConfirmation
+  // Append CVD snapshot to history for use by checkPendingConfirmation.
+  // Drop cross-definition residue first (see resetCVDStateOnSourceChange).
   const stateForCVD = readState();
+  const cvdReset = resetCVDStateOnSourceChange(stateForCVD, DATA_SOURCE);
+  if (cvdReset) {
+    log(`CVD source ${cvdReset.prev} → ${DATA_SOURCE}: dropped ${cvdReset.dropped} history reading(s), `
+      + `cleared ${cvdReset.cleared} pending baseline(s) — the two definitions are not comparable`);
+  }
   appendCVDReading(stateForCVD, indicators.cvd);
   writeState(stateForCVD);
 
@@ -2400,7 +2634,7 @@ async function main() {
   await checkConfirmation(client, indicators);
   await updateOutcomes(client);
 
-  await client.close();
+  if (client) await client.close();
 
   // 7. Check if any alerted levels have been broken
   const invalidations = checkInvalidations(price, indicators);
@@ -2637,7 +2871,7 @@ async function main() {
   // continues on whatever TF they were using.
   await restoreUserTF();
   log('Stage 1 complete.');
-  releaseLock('btc-trigger');
+  if (DATA_SOURCE !== 'native') releaseLock('btc-trigger');
 }
 
 // ─── Entry Point ──────────────────────────────────────────────────────────────
@@ -2658,7 +2892,7 @@ if (require.main === module) {
       ].join('\n'));
     } catch {}
     // Best-effort release on crash (no-op if we never acquired)
-    try { releaseLock('btc-trigger'); } catch {}
+    if (DATA_SOURCE !== 'native') { try { releaseLock('btc-trigger'); } catch {} }
     finishCron(1);
   });
 }

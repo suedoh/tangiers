@@ -33,7 +33,7 @@ gate capital.
 | 03 | [Ledger rewrite — design-intent accounting](03-ledger-rewrite.md) | — | measurement | ✅ code+tests (recompute pending operator) |
 | 04 | [Single source of P&L truth](04-single-source-pnl.md) | 03 | measurement | ✅ |
 | 05 | [Dedup by price-time cell](05-dedup-price-time.md) | 03 | measurement/risk | ✅ |
-| 06 | [Exchange-native data cutover](06-exchange-native-data.md) | — (parallel OK) | data integrity | 🟡 patch ready, cutover pending operator |
+| 06 | [Exchange-native data cutover](06-exchange-native-data.md) | — (parallel OK) | data integrity | ✅ 2026-07-26 cutover live; 14d parity clock running |
 | 07 | [Signal research & falsification harness](07-signal-research.md) | 03, 04, 05, 06 | edge | 🟡 harness built; research not started |
 | 08 | [Execution layer changes](08-execution-layer.md) | 02; live-fire gated on 07 | execution | ✅ code+tests (live probes pending) |
 | 09 | [Acceptance gates → Phase E](09-acceptance-gates.md) | all | capital gate | 🟡 gate+reporting live; Phase E frozen |
