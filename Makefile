@@ -202,5 +202,8 @@ blofin-daily-pnl: ## Run the daily P&L report now (posts to #blofin-recon). Cron
 blofin-degraded-probe: ## Mongo-DOWN autotrade smoke: place + spool + degraded idempotency + cleanup (refuses if Mongo is up; needs BLOFIN_AUTOTRADE=true)
 	@$(NODE) $(TRADING)/scripts/blofin/degraded-probe.js
 
+blofin-governance-probe: ## Spec 02 governance smoke: same-direction cap, fail-safe read, margin cap, skip alerts (mocked; --live-reads / --live via node directly)
+	@$(NODE) $(TRADING)/scripts/blofin/governance-probe.js
+
 watchdog: ## Run the host infra watchdog once (Docker/Mongo/recon/spool health check)
 	@$(NODE) $(TRADING)/scripts/ops/watchdog.js

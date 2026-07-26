@@ -27,10 +27,15 @@
  *   RISK_PER_TRADE_PCT   used for sizing (existing Tangiers env var)
  */
 
-const blofin = require('./blofin');
-const store  = require('./blofin-store');
-const db     = require('./db');
-const dailyR = require('./daily-r');
+const fs      = require('fs');
+const path    = require('path');
+const blofin  = require('./blofin');
+const store   = require('./blofin-store');
+const db      = require('./db');
+const dailyR  = require('./daily-r');
+const discord = require('./discord');
+
+const ROOT = path.resolve(__dirname, '..', '..');
 
 // BloFin BTC-USDT-PERP contract specs (Phase A discovery):
 //   contractValue 0.001 BTC, tickSize 0.1, lotSize 0.1, minSize 0.1
@@ -40,6 +45,115 @@ const MIN_SIZE           = 0.1;
 const LEVERAGE           = Number(process.env.BLOFIN_LEVERAGE || 10); // set-leverage 10× iso (Phase A setup)
 
 const TIER_MULT = { A: 1.0, B: 0.7, C: 0.3 };
+
+// ─── Book governance (spec 02, 2026-07-26 rebuild) ───────────────────────────
+
+// Cap on open positions per direction (spec 02.1). Only 1 is supported: net
+// mode holds a single net position, so "same-direction position open" IS the
+// cap being full. The env var exists so the cap is visible in config, not to
+// invite tuning.
+function maxPositionsPerDirection() {
+  const n = Number(process.env.MAX_POSITIONS_PER_DIRECTION || 1);
+  if (n !== 1) {
+    console.log(`[autotrade] MAX_POSITIONS_PER_DIRECTION=${n} — only 1 is supported; using 1`);
+  }
+  return 1;
+}
+
+// Aggregate margin ceiling as % of account equity (spec 02.2). Default 30.
+function marginCapPct() {
+  const n = Number(process.env.MARGIN_CAP_PCT);
+  return Number.isFinite(n) && n > 0 ? n : 30;
+}
+
+/**
+ * Direction guards vs the current net position (spec 02.1). Returns
+ * `{ skip, kind }` or null. Pure — unit-asserted in
+ * scripts/tests/governance.test.js.
+ *
+ * Opposite-direction: pre-existing guard, message unchanged (probes pin it).
+ * Net mode makes fills fungible — an opposite entry silently CLOSES the old
+ * position against its cost basis (4 of 18 Phase-D signals unattributable
+ * this way, 2026-07-02 analysis).
+ *
+ * Same-direction: NEW — a same-direction entry while a position is open
+ * STACKS exposure. 48 long refires stacked 238.3 contracts on 2026-07-26,
+ * locking $1,528 of $1,570 margin (audit D8). Default policy is skip; a
+ * replace policy (close old, open new) is an operator decision (audit Q4)
+ * and is deliberately not implemented.
+ */
+function assessDirectionGuard({ direction, net }) {
+  if ((direction === 'long' && net < 0) || (direction === 'short' && net > 0)) {
+    return { skip: `opposite-direction position open (net ${net}) — one-direction book guard`,
+             kind: 'opposite-direction' };
+  }
+  if ((direction === 'long' && net > 0) || (direction === 'short' && net < 0)) {
+    return { skip: `same-direction position open (net ${net}) — book cap`,
+             kind: 'same-direction' };
+  }
+  return null;
+}
+
+/**
+ * Aggregate margin cap (spec 02.2): skip when (margin in use + this order's
+ * initial margin) would exceed capPct% of account equity. marginInUse =
+ * frozen USDT; equity = cash + frozen (uPnL excluded — stable and
+ * conservative). Unevaluable inputs → null, i.e. fail-open: only the
+ * same-direction guard is fail-safe (see the position-read catch in
+ * autotrade() for the rationale). Pure — unit-asserted.
+ */
+function assessMarginCap({ marginInUse, equity, orderMargin, capPct }) {
+  if (!Number.isFinite(marginInUse) || !Number.isFinite(equity) || equity <= 0
+      || !Number.isFinite(orderMargin)) return null;
+  const pct = ((marginInUse + orderMargin) / equity) * 100;
+  if (pct > capPct) {
+    return { skip: `margin cap: would use ${pct.toFixed(1)}% > ${capPct}%`, pct };
+  }
+  return null;
+}
+
+// ─── Skip alerting (spec 02.3 — silent skips hid a 24h+ outage) ──────────────
+//
+// Every governance/margin skip posts a red `signal-skipped-margin` alert to
+// #blofin-recon, rate-limited to one per skip-kind per 30 min (state-file
+// pattern shared with recon-once.js). The 2026-07-26 incident: every signal
+// after 01:50Z skipped silently on frozen margin for 24h+ before anyone
+// noticed. Alerting fails open and NEVER throws into the money path.
+
+const SKIP_ALERT_STATE       = path.join(ROOT, '.autotrade-skip-alert.json');
+const SKIP_ALERT_COOLDOWN_MS = 30 * 60 * 1000;
+
+function shouldPostSkipAlert(kind) {
+  try {
+    const st = (() => { try { return JSON.parse(fs.readFileSync(SKIP_ALERT_STATE, 'utf8')); } catch { return {}; } })();
+    if (st[kind] && Date.now() - st[kind] < SKIP_ALERT_COOLDOWN_MS) return false;
+    st[kind] = Date.now();
+    fs.writeFileSync(SKIP_ALERT_STATE, JSON.stringify(st));
+    return true;
+  } catch { return true; }  // fail-open — better a duplicate than silence
+}
+
+async function postSkipAlert(kind, { signalId, direction, detail, extra = [] }) {
+  try {
+    const webhook = process.env.BLOFIN_RECON_WEBHOOK;
+    if (!webhook) return;
+    if (!shouldPostSkipAlert(kind)) return;
+    const body = [
+      `🚨 **SIGNAL SKIPPED — ${kind.toUpperCase().replace(/-/g, ' ')}** 🚨`,
+      `A fired signal was NOT executed (\`signal-skipped-margin\` alert class). Skips used to be silent — that silence hid the 2026-07-26 24h+ execution outage.`,
+      ``,
+      `**Signal** \`${signalId ?? '?'}\` · ${direction ? direction.toUpperCase() : '?'}`,
+      `**Reason** ${detail}`,
+      ...extra,
+      ``,
+      `Rate-limited: one per skip-kind per ${SKIP_ALERT_COOLDOWN_MS / 60000} min.`,
+    ].join('\n');
+    await discord.postWebhook(webhook, 'error', body,
+      `Autotrade governance · ${blofin.isDemo() ? 'demo' : 'PROD'} · ${new Date().toUTCString().slice(5, 25)} UTC`);
+  } catch (e) {
+    console.error(`[autotrade] skip alert failed: ${e.message}`);
+  }
+}
 
 function isEnabled() {
   return process.env.BLOFIN_AUTOTRADE === 'true';
@@ -264,18 +378,30 @@ async function autotrade({
     if (prior) return { skipped: `signal ${signalId} already on exchange (degraded idempotency, order ${prior.orderId})` };
   }
 
-  // One-direction book guard (Phase D attribution fix 3). Net mode makes
-  // fills fungible: an entry opposite an open position CLOSES it against the
-  // old cost basis instead of opening exposure — 4 of 18 Phase-D signals were
-  // unattributable this way (2026-07-02 analysis). Fail-open on read errors:
-  // blocking the money path on a stalled read is how signals got dropped.
+  // Direction guards (spec 02.1) — opposite-direction (Phase D attribution
+  // fix 3, unchanged message) + same-direction book cap (NEW). See
+  // assessDirectionGuard for the incident history behind each.
+  //
+  // FAIL-SAFE on read error — deliberately unlike the old opposite-only
+  // guard, which failed open. An opposite-direction miss merely nets down
+  // exposure; a same-direction miss MULTIPLIES it (the exact 238-contract
+  // incident class this guard exists to kill). When the book cannot be read,
+  // it cannot be proven un-stacked, so the entry is skipped and alerted.
+  maxPositionsPerDirection();   // logs if configured ≠ 1 (only 1 supported)
+  let net;
   try {
     const positions = await blofin.getPositions(instId);
-    const net = (positions || []).reduce((s, p) => s + Number(p.positions || p.pos || 0), 0);
-    if ((direction === 'long' && net < 0) || (direction === 'short' && net > 0)) {
-      return { skipped: `opposite-direction position open (net ${net}) — one-direction book guard` };
-    }
-  } catch (_) { /* best-effort guard; proceed */ }
+    net = (positions || []).reduce((s, p) => s + Number(p.positions || p.pos || 0), 0);
+  } catch (e) {
+    const detail = `position read failed — fail-safe skip, same-direction book cap unverifiable: ${String(e.message).slice(0, 140)}`;
+    await postSkipAlert('position-read-failsafe', { signalId, direction, detail });
+    return { skipped: detail };
+  }
+  const guard = assessDirectionGuard({ direction, net });
+  if (guard) {
+    await postSkipAlert(guard.kind, { signalId, direction, detail: guard.skip });
+    return { skipped: guard.skip };
+  }
 
   const sizing = sizingFor({ entry, stop, setupType });
   if (sizing.error) return { skipped: sizing.error };
@@ -283,24 +409,49 @@ async function autotrade({
   let { contracts, sizePerTp, rDollar } = sizing;
   let marginTrim = null;
 
-  // Pre-flight margin check (2026-07-04 root cause: two entries dropped as
-  // opaque "error 1: All operations failed" — stacked same-direction ladders
-  // had frozen the margin and BloFin rejected the new entry; one drop was a
-  // +3R winner). Trim the stake to what available margin funds — R geometry
-  // is unchanged (same entry/stop/TPs, smaller size, rDollar scaled) — and
-  // skip cleanly below a floor. Fail-open: a balance-read error must never
-  // block the money path (that's how the Jun-27 outage dropped 11 signals).
+  // Pre-flight margin work — one balance read feeds two checks:
+  //
+  //   (a) AGGREGATE MARGIN CAP (spec 02.2): skip when margin-in-use plus this
+  //       order's initial margin would exceed MARGIN_CAP_PCT% of equity.
+  //       Bounds total book exposure regardless of how it accumulated.
+  //   (b) AVAILABLE-MARGIN TRIM (2026-07-04 root cause: two entries dropped
+  //       as opaque "error 1: All operations failed" — stacked ladders had
+  //       frozen the margin and BloFin rejected the new entry; one drop was
+  //       a +3R winner). Trim the stake to what available margin funds — R
+  //       geometry is unchanged (same entry/stop/TPs, smaller size, rDollar
+  //       scaled) — and skip cleanly below a floor.
+  //
+  // Fail-open on read error for BOTH: a balance-read error must never block
+  // the money path (that's how the Jun-27 outage dropped 11 signals). Only
+  // the same-direction guard above is fail-safe — a margin miss under-sizes
+  // or right-sizes one entry; a direction-guard miss stacks the book.
   try {
-    const bal   = await blofin.getBalance();
-    const usdt  = (bal || []).find(b => b.currency === 'USDT');
-    const avail = Number(usdt?.available);
+    const bal    = await blofin.getBalance();
+    const usdt   = (bal || []).find(b => b.currency === 'USDT');
+    const avail  = Number(usdt?.available);
+    const frozen = Number(usdt?.frozen);
+    const cash   = Number(usdt?.balance);
+    const liveEquity  = Number.isFinite(cash) ? cash + (Number.isFinite(frozen) ? frozen : 0) : NaN;
+    const orderMargin = (contracts * CONTRACT_VALUE_BTC * entry) / LEVERAGE;
+
+    const cap = assessMarginCap({
+      marginInUse: frozen, equity: liveEquity, orderMargin, capPct: marginCapPct(),
+    });
+    if (cap) {
+      await postSkipAlert('margin-cap', { signalId, direction, detail: cap.skip,
+        extra: [`**Book** margin in use $${frozen.toFixed(0)} · equity $${liveEquity.toFixed(0)} · this entry +$${orderMargin.toFixed(0)} initial margin`] });
+      return { skipped: cap.skip };
+    }
+
     if (Number.isFinite(avail)) {
       const marginFor = c => (c * CONTRACT_VALUE_BTC * entry) / LEVERAGE;
       const budget    = avail * 0.90;   // headroom for taker fee + mark-price drift
       if (marginFor(contracts) > budget) {
         const fit = quantizeSize((budget * LEVERAGE) / (CONTRACT_VALUE_BTC * entry));
         if (fit < MIN_SIZE || fit < contracts * 0.2) {
-          return { skipped: `insufficient margin: entry needs ~$${marginFor(contracts).toFixed(0)} at ${LEVERAGE}x, available $${avail.toFixed(0)} — fit ${fit} contracts below floor` };
+          const detail = `insufficient margin: entry needs ~$${marginFor(contracts).toFixed(0)} at ${LEVERAGE}x, available $${avail.toFixed(0)} — fit ${fit} contracts below floor`;
+          await postSkipAlert('insufficient-margin', { signalId, direction, detail });
+          return { skipped: detail };
         }
         marginTrim = `${contracts}→${fit} contracts (available $${avail.toFixed(0)})`;
         rDollar    = rDollar * (fit / contracts);
@@ -483,5 +634,11 @@ module.exports = {
   isEnabled,
   sizingFor,
   autotrade,
-  repriceLadder, // exported for probe unit assertions
+  repriceLadder,          // exported for probe unit assertions
+  // Spec 02 governance — exported for governance probe + tests:
+  assessDirectionGuard,
+  assessMarginCap,
+  marginCapPct,
+  maxPositionsPerDirection,
+  SKIP_ALERT_STATE,
 };
