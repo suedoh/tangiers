@@ -36,6 +36,7 @@ notes/audits/cron.log
 *.bak-*
 .market-data-cache/
 logs/zone-parity.jsonl
+logs/zone-parity.pre-cutover.jsonl
 .falsification-state.json
 .autotrade-disabled.json
 rebuild/tools/klines-*.json
