@@ -48,4 +48,4 @@ new data accrues. This gate must clear first.
 
 | Date (UTC) | Snapshot (contracts / avail margin) | Decision | Notes |
 |---|---|---|---|
-| _pending_ | | | |
+| 2026-07-26 | 238.3 long / $42.70 avail ($1,528 frozen); mark $64,678, +$132 unrealized | **(a) Flatten** — operator explicit choice | Reduce-only market sell 238.3, order `1000132968095`, FLAT confirmed by re-snapshot. Realized ≈ +$126. Final balance $1,697.18, $0 frozen. No orphaned active orders or pending TPSL. Gate CLEAR — forward testing unblocked. |
