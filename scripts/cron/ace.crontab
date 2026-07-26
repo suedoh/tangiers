@@ -60,4 +60,11 @@
 # Mid-week BTC win-rate audit — Wednesday 13:00 UTC
 0 13 * * 3 /app/scripts/audit/run-mid-week-diff.sh >> /app/notes/audits/cron.log 2>&1
 
+# Standing falsification gate (rebuild spec 09.1) — Monday 08:30 UTC, before the
+# 09:00 weekly report so the report reads a fresh .falsification-state.json.
+# Needs no CDP (Binance public REST + trades.json + webhooks). --record enables
+# the two-consecutive-fails trip: writes .autotrade-disabled.json (autotrade
+# skips entries while it exists; re-enable = operator deletes the file).
+30 8 * * 1 node /app/scripts/audit/falsification.js --days 90 --record >> /app/logs/falsification.log 2>&1
+
 # busybox crond requires a trailing newline below
