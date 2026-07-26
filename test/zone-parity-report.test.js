@@ -74,6 +74,28 @@ test('evaluateGate fails on CVD delta-sign disagreement', () => {
   assert.ok(g.failures.some(f => f.includes('cvd')));
 });
 
+test('evaluateGate fails on any native blind cycle, tolerates TV blindness', () => {
+  const t0 = Date.parse('2026-07-01T00:00:00Z');
+  const lines = Array.from({ length: 30 }, (_, i) =>
+    line(t0 + i * DAY / 2, { deltaPct: 0.01, cvdTv: i, cvdMkt: i * 2, oiTv: 100 + i, oiMkt: 200 + i }));
+  // one TV-blind cycle: informational, must not gate — and it is excluded
+  // from the trigger-agreement denominator (live cycles only)
+  lines[3].tv = { poc: null, vah: null, val: null, trigger: null };
+  lines[3].mkt.trigger = { type: 'VAL', direction: 'long', mid: 59000 }; // would "disagree" if scored
+  let g = evaluateGate(lines);
+  assert.equal(g.metrics.tvBlindCycles, 1);
+  assert.equal(g.metrics.nativeBlindCycles, 0);
+  assert.equal(g.metrics.triggerAgreementN, 29);      // 30 lines − 1 TV-blind
+  assert.equal(g.metrics.triggerAgreementPct, 100);   // blind line not counted against
+  assert.ok(!g.failures.some(f => f.includes('native blind')));
+  // one native-blind cycle: hard gate failure (spec 06 — 0 blind on native path)
+  lines[5].mkt = { poc: null, vah: null, val: null, trigger: null };
+  g = evaluateGate(lines);
+  assert.equal(g.metrics.nativeBlindCycles, 1);
+  assert.equal(g.verdict, 'FAIL');
+  assert.ok(g.failures.some(f => f.includes('native blind cycles 1 > 0')));
+});
+
 test('evaluateGate reports non-gated pocFresh metric when present', () => {
   const t0 = Date.parse('2026-07-01T00:00:00Z');
   const lines = Array.from({ length: 30 }, (_, i) => {
