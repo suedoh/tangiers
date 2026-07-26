@@ -88,15 +88,20 @@ function evaluateGate(lines) {
     metrics.pocFresh = { median: quantile(deltas, 0.5), p95: quantile(deltas, 0.95), n: deltas.length };
   }
 
-  // Trigger agreement: both null, or same type+direction
+  // Trigger agreement: both null, or same type+direction. Scored on LIVE
+  // cycles only (spec 06: "decision agreement on live cycles") — a TV-blind
+  // cycle says nothing about methodology agreement, and post-cutover the TV
+  // shadow will be blind whenever the chart is closed.
+  const live = lines.filter(l => l.tv?.poc != null || l.tv?.vah != null);
   let agree = 0;
-  for (const l of lines) {
+  for (const l of live) {
     const a = l.tv?.trigger, b = l.mkt?.trigger;
     if (!a && !b) { agree++; continue; }
     if (a && b && a.type === b.type && a.direction === b.direction) agree++;
   }
-  metrics.triggerAgreementPct = agree / lines.length * 100;
-  if (metrics.triggerAgreementPct < GATE.triggerAgreementPct)
+  metrics.triggerAgreementPct = live.length ? agree / live.length * 100 : null;
+  metrics.triggerAgreementN = live.length;
+  if (metrics.triggerAgreementPct != null && metrics.triggerAgreementPct < GATE.triggerAgreementPct)
     failures.push(`trigger agreement ${metrics.triggerAgreementPct.toFixed(1)}% < ${GATE.triggerAgreementPct}%`);
 
   // Blind cycles. The exchange-native side must NEVER be blind — spec 06
@@ -138,7 +143,7 @@ function main() {
   }
   if (g.metrics.pocFresh?.n)
     console.log(`  POC(fresh) median ${g.metrics.pocFresh.median?.toFixed(4)}%  p95 ${g.metrics.pocFresh.p95?.toFixed(4)}%  (n=${g.metrics.pocFresh.n}, informational)`);
-  console.log(`  Trigger agreement  ${g.metrics.triggerAgreementPct?.toFixed(1)}% (gate ≥${GATE.triggerAgreementPct}%)`);
+  console.log(`  Trigger agreement  ${g.metrics.triggerAgreementPct?.toFixed(1) ?? '—'}% on ${g.metrics.triggerAgreementN} live cycles (gate ≥${GATE.triggerAgreementPct}%)`);
   console.log(`  Blind cycles       native ${g.metrics.nativeBlindCycles} (gate ≤${GATE.nativeBlindMax}) · tv ${g.metrics.tvBlindCycles} (informational)`);
   console.log(`  CVD sign agreement ${g.metrics.cvdSignAgreementPct?.toFixed(1) ?? '—'}% (gate ≥${GATE.cvdSignAgreementPct}%)`);
   console.log(`  OI trend agreement ${g.metrics.oiTrendAgreementPct?.toFixed(1) ?? '—'}% (gate ≥${GATE.oiTrendAgreementPct}%)`);
