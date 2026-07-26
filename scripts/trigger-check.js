@@ -23,14 +23,20 @@
 
 'use strict';
 
-const CDP   = require(require('path').resolve(__dirname, '../tradingview-mcp/node_modules/chrome-remote-interface'));
+// chrome-remote-interface lives in the tradingview-mcp submodule. Guarded so
+// this file can be require()d as a module (ledger tests, recompute-history)
+// on machines/worktrees without the submodule — cdpConnect() throws
+// CDP_UNAVAILABLE if it's actually needed and missing.
+let CDP = null;
+try {
+  CDP = require(require('path').resolve(__dirname, '../tradingview-mcp/node_modules/chrome-remote-interface'));
+} catch (_) { /* module-mode consumers never reach cdpConnect */ }
 const path  = require('path');
 const fs    = require('fs');
 const https = require('https');
 const { execFileSync } = require('child_process');
 const autotrade = require('./lib/blofin-autotrade');
 const { acquireLock, releaseLock } = require('./lib/lock');
-const { walkExecutedLadder } = require('./lib/executed-walk');
 const { parseStudyNum } = require('./lib/parse-num');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -42,7 +48,7 @@ const STATE_FILE  = path.join(ROOT, '.trigger-state.json');
 const TRADES_FILE = path.join(ROOT, 'trades.json');
 
 const CDP_PORT         = 9222;
-const COOLDOWN_MS      = 1 * 60 * 60 * 1000; // 1 hour between alerts per zone
+// (COOLDOWN_MS removed — fire gating is the price-time cell dedup, spec 05)
 const PENDING_TTL_MS   = 90 * 60 * 1000;     // 90-min window to catch confirmation after flat-OI alert
 const OI_CONFIRM_PCT   = 0.005;              // OI must rise ≥ 0.5% from baseline to confirm
 const CVD_CONFIRM_MULT = 1.5;               // CVD must grow ≥ 1.5× from baseline to confirm
@@ -65,14 +71,18 @@ if (fs.existsSync(ENV_FILE)) {
 // Set TRADINGVIEW_ENABLED=false in .env on any machine that does not run
 // TradingView Desktop locally (e.g. a collaborator's machine that only shares
 // the Discord webhooks). This prevents spurious CDP error alerts.
-if (process.env.TRADINGVIEW_ENABLED === 'false') {
-  console.log('[trigger-check] TRADINGVIEW_ENABLED=false — skipping run on this machine.');
-  process.exit(0);
-}
+// Guards only apply when run as the cron entrypoint — requiring this file as
+// a module (ledger tests, audit/recompute-history.js) must never exit.
+if (require.main === module) {
+  if (process.env.TRADINGVIEW_ENABLED === 'false') {
+    console.log('[trigger-check] TRADINGVIEW_ENABLED=false — skipping run on this machine.');
+    process.exit(0);
+  }
 
-if (process.env.PRIMARY === 'false') {
-  console.log('[trigger-check] PRIMARY=false — secondary machine, Discord posting disabled.');
-  process.exit(0);
+  if (process.env.PRIMARY === 'false') {
+    console.log('[trigger-check] PRIMARY=false — secondary machine, Discord posting disabled.');
+    process.exit(0);
+  }
 }
 
 // ─── Logging ─────────────────────────────────────────────────────────────────
@@ -127,6 +137,9 @@ function errorAlert(what, where, fix) {
 // ─── CDP Helpers ─────────────────────────────────────────────────────────────
 
 async function cdpConnect() {
+  if (!CDP) {
+    throw { code: 'CDP_UNAVAILABLE', message: 'chrome-remote-interface not installed (tradingview-mcp submodule missing)' };
+  }
   let targets;
   try {
     targets = await CDP.List({ host: 'localhost', port: CDP_PORT });
@@ -1132,37 +1145,51 @@ function lookupCVDAt(state, targetTs) {
   ).cvd;
 }
 
-function isCoolingDown(zoneKey, incomingDir, cvd) {
-  try {
-    const entry = readState()[zoneKey];
-    if (!entry) return false;
-    const ts = typeof entry === 'number' ? entry : entry.ts; // handle legacy format
+// ─── Price-time cell dedup (rebuild spec 05, audit D8/D11) ────────────────────
+//
+// Replaces the VRVP level-identity cooldown (`isCoolingDown`, removed).
+// Level keys re-mint as the TV viewport drifts — 48 near-identical longs
+// refired on 2026-07-24→26 and stacked 238 contracts (D8); across history,
+// 801 nominal signals collapse to ~317 distinct setups (D11). A fired signal
+// now claims a (direction × 0.3%-price-band) CELL for 24h; nothing in that
+// cell fires again until it expires.
+//
+// CONTAINMENT parameters, not tuned edge parameters — the audit's stated
+// starting cell (§8b). Re-tuning awaits spec 07's sample bar (≥150 post-fix
+// signals, ≥2 regimes).
+const CELL_BAND_PCT   = 0.003;                    // 0.3%-wide price band
+const CELL_EXPIRY_MS  = 24 * 60 * 60 * 1000;      // 24h per cell
+const FIRED_CELLS_KEY = '_firedCells';
 
-    // Extended cooldown after a stop on this zone: 6h same-direction lock.
-    // Counter-direction trades fall through to the normal cooldown + bypass
-    // rules below (failed-breakout flips are still permitted).
-    if (typeof entry === 'object' && entry.stopUntil && Date.now() < entry.stopUntil) {
-      if (!incomingDir || !entry.stopDirection || incomingDir === entry.stopDirection) {
-        const remainH = ((entry.stopUntil - Date.now()) / 3600000).toFixed(1);
-        log(`Extended cooldown active: ${zoneKey} (${entry.stopDirection}) — ${remainH}h remaining`);
-        return true;
-      }
-    }
+function cellBandUsd(price) { return price * CELL_BAND_PCT; }
 
-    if ((Date.now() - ts) >= COOLDOWN_MS) return false;
+// Suppression = any unexpired same-direction fire whose zone price is within
+// one band width. DOCUMENTED DEVIATION from the spec's key sketch
+// `floor(zonePrice / (price × 0.003))`: verified on the 2026-07-24→26
+// incident data that the price-dependent divisor jitters the quantized index
+// across 330/331/332 for the SAME ~63.7k zone — the incident would still
+// have fired 3+, violating the spec's own acceptance (1 fire + 47
+// suppressed). Band-distance suppression implements the stated behavior
+// ("0.3%-wide price band × 24h × direction") without boundary jitter.
+function findBlockingCell(state, direction, zonePrice, nowMs) {
+  const cells = state[FIRED_CELLS_KEY];
+  if (!Array.isArray(cells)) return null;
+  for (const c of cells) {
+    if (c.direction !== direction) continue;
+    if (nowMs - c.ts >= CELL_EXPIRY_MS) continue;
+    if (Math.abs(zonePrice - c.zonePrice) < c.band) return c;
+  }
+  return null;
+}
 
-    // Direction-aware bypass: if the cooldown was set for a long and the new
-    // trigger is a short with negative CVD, the level has likely failed as
-    // support and flipped to resistance — allow the short to fire.
-    if (incomingDir && entry.direction && incomingDir !== entry.direction) {
-      if (incomingDir === 'short' && cvd != null && cvd < 0) {
-        log(`Cooldown bypass: ${zoneKey} was locked as long, short re-entry with CVD ${Math.round(cvd)} — failed-breakout pattern`);
-        return false;
-      }
-    }
+function markCellFired(state, direction, zonePrice, price, nowMs) {
+  if (!Array.isArray(state[FIRED_CELLS_KEY])) state[FIRED_CELLS_KEY] = [];
+  state[FIRED_CELLS_KEY].push({ ts: nowMs, direction, zonePrice, band: cellBandUsd(price) });
+}
 
-    return true;
-  } catch { return false; }
+function pruneCells(state, nowMs) {
+  if (!Array.isArray(state[FIRED_CELLS_KEY])) return;
+  state[FIRED_CELLS_KEY] = state[FIRED_CELLS_KEY].filter(c => nowMs - c.ts < CELL_EXPIRY_MS);
 }
 
 // Deduplicate near-adjacent same-type levels in state. VRVP levels shift
@@ -1286,9 +1313,18 @@ function checkInvalidations(price, indicators) {
           // (BACKTESTING.md rule). Booking those at -1R put 13 phantom
           // losses into the canonical record and the daily-R kill switch
           // (2026-07-05 audit F4). Only a confirmed trade loses real R here.
+          // Confirmed invalidations charge fees like any stop-out (spec 03:
+          // pnlR is net of fees everywhere).
           t.outcome = 'invalidated'; t.closedAt = new Date().toISOString();
-          t.pnlR = t.confirmed ? -1.0 : 0;
-          log(`Trade for level ${key} marked invalidated (${t.confirmed ? 'confirmed, -1R' : 'unconfirmed, 0R'})`);
+          if (t.confirmed && t.fillPrice != null && t.riskPerUnit > 0) {
+            const feeR = (FEE_TAKER_RATE * t.fillPrice + FEE_TAKER_RATE * t.stop) / t.riskPerUnit;
+            t.grossR = -1.0;
+            t.feeR   = round3(feeR);
+            t.pnlR   = round3(-1.0 - feeR);
+          } else {
+            t.pnlR = t.confirmed ? -1.0 : 0;
+          }
+          log(`Trade for level ${key} marked invalidated (${t.confirmed ? `confirmed, ${t.pnlR}R` : 'unconfirmed, 0R'})`);
         }
       }
       writeTrades(trades);
@@ -1309,8 +1345,10 @@ function checkInvalidations(price, indicators) {
       const watchKey = `_watch_${key}`;
       state[watchKey] = { ts: Date.now(), direction, levelType, levelMid, levelLo, levelHi, expires: Date.now() + 4 * 60 * 60 * 1000 };
       dedupeNearbyLevels(state, key, levelType, levelMid);
-      state[key] = { ts: Date.now() - (COOLDOWN_MS - 30 * 60 * 1000), direction, levelType, levelMid, levelLo, levelHi, stopHuntFiredAt: Date.now() };
-      log(`Level ${key} → stop hunt | re-entry alert fired | cooldown reset to 30m | re-fire guard armed (4h)`);
+      // Level entry retained for invalidation/reclaim tracking only — fire
+      // gating is the price-time cell (spec 05), not this timestamp.
+      state[key] = { ts: Date.now(), direction, levelType, levelMid, levelLo, levelHi, stopHuntFiredAt: Date.now() };
+      log(`Level ${key} → stop hunt | re-entry alert fired | re-fire guard armed (4h)`);
     }
   }
 
@@ -1617,13 +1655,53 @@ function checkPendingConfirmation(price, indicators) {
 // i.e. the trade had already closed when "confirmation" landed.
 const CONFIRM_MAX_AGE_SEC = 60 * 60; // 1 hour
 
-// Daily-R kill switch threshold. If today's realized R (sum of pnlR over
-// trades closed since 00:00 UTC) drops below this floor, new signals are
-// suppressed for the rest of the UTC day. Baseline saw 11 consecutive stops;
-// without a circuit breaker, a bad streak can compound. Re-evaluate after
-// 60 days of post-fix data.
-// Daily-R kill switch is shared with blofin-autotrade.js — see scripts/lib/daily-r.js
-const { DAILY_R_KILL_FLOOR, todayUtcR } = require('./lib/daily-r');
+// Daily-R kill switch. If today's realized R drops below the floor, new
+// signals are suppressed for the rest of the UTC day. Re-anchored to
+// EXCHANGE orders-history (spec 04.3, audit D7 — the old ledger sum was
+// fiction and could never trip); falls back to the corrected ledger with a
+// yellow alert when the API is unreachable. Shared with blofin-autotrade.js
+// — see scripts/lib/daily-r.js.
+const { DAILY_R_KILL_FLOOR, isKillActive } = require('./lib/daily-r');
+
+// 30M bar duration in seconds — the canonical confirmation/outcome timeframe.
+const BAR_30M_SEC = 30 * 60;
+
+// Design-intent confirmation decision (spec 03 / audit D4). Pure — shared by
+// checkConfirmation (live, TV bars) and audit/recompute-history.js (Binance
+// bars normalized to the same shape).
+//
+//   - Only COMPLETED 30M bars count: a bar confirms only when its close time
+//     (bar.time + 1800s) is <= nowSec. The TV series includes the in-progress
+//     bar whose "close" is the live tick — confirming on it was D4.
+//   - The bar must open after the signal and within CONFIRM_MAX_AGE_SEC.
+//   - Confirmation = completed close beyond the trigger (t.entry) in the
+//     signal direction.
+//
+// Returns { barTime, confirmedPrice } (barTime = bar OPEN, seconds) or null.
+function decideConfirmation(t, bars, nowSec) {
+  const signalTs = new Date(t.firedAt).getTime() / 1000;
+  const deadline = signalTs + CONFIRM_MAX_AGE_SEC;
+  for (const bar of bars) {
+    if (!(bar.time > signalTs && bar.time <= deadline)) continue;
+    if (bar.time + BAR_30M_SEC > nowSec) continue; // forming bar — never confirm on it
+    const closeConfirms = t.direction === 'long'
+      ? bar.close > t.entry
+      : bar.close < t.entry;
+    if (closeConfirms) return { barTime: bar.time, confirmedPrice: bar.close };
+  }
+  return null;
+}
+
+// Unconfirmed ⇒ no trade (spec 03 item 6). Once the confirmation window has
+// fully closed on COMPLETED bars — the last candidate bar opens at
+// firedAt+3600s and completes 1800s later — the signal can never confirm and
+// is retired as 'expired_unconfirmed'. pnlR stays null: no position ever
+// existed, so it is excluded from every performance aggregate (reported as a
+// count only).
+function unconfirmedExpiry(t, nowSec) {
+  const signalTs = new Date(t.firedAt).getTime() / 1000;
+  return nowSec > signalTs + CONFIRM_MAX_AGE_SEC + BAR_30M_SEC;
+}
 
 async function checkConfirmation(client, indicators) {
   const trades = readTrades();
@@ -1631,11 +1709,15 @@ async function checkConfirmation(client, indicators) {
   // Anything older than CONFIRM_MAX_AGE_SEC will never confirm, even if
   // a future 30M bar happens to close beyond entry — that close is no
   // longer the entry trigger.
+  // Watch window extends one bar past the cap: the last candidate bar can
+  // OPEN at firedAt+3600s and only completes 1800s later — under strict
+  // completed-close semantics it must still be evaluated at the next poll.
+  // decideConfirmation() itself enforces the bar-open deadline.
   const nowSec = Date.now() / 1000;
   const unconfirmed = trades.filter(t => {
     if (t.confirmed) return false;
     const ageSec = nowSec - new Date(t.firedAt).getTime() / 1000;
-    return ageSec <= CONFIRM_MAX_AGE_SEC;
+    return ageSec <= CONFIRM_MAX_AGE_SEC + BAR_30M_SEC;
   });
   if (unconfirmed.length === 0) return;
 
@@ -1653,30 +1735,23 @@ async function checkConfirmation(client, indicators) {
   let changed = false;
 
   for (const t of unconfirmed) {
-    const signalTs = new Date(t.firedAt).getTime() / 1000;
-    const deadline = signalTs + CONFIRM_MAX_AGE_SEC;
-    // Bars that closed AFTER the signal AND within the cap window
-    const relevantBars = bars.filter(b => b.time > signalTs && b.time <= deadline);
-    if (relevantBars.length === 0) continue;
-
     // CVD was validated at signal fire time (criteria check). Re-checking it
-    // here at an arbitrary future poll with current CVD adds noise — CVD flips
-    // direction constantly in volatile markets and the bar that closed above
-    // entry may be hours old. The 30M close beyond entry IS the confirmation.
-    for (const bar of relevantBars) {
-      const closeConfirms = t.direction === 'long'
-        ? bar.close > t.entry
-        : bar.close < t.entry;
+    // here at an arbitrary future poll with current CVD adds noise — the
+    // completed 30M close beyond entry IS the confirmation (spec 03).
+    const conf = decideConfirmation(t, bars, nowSec);
+    if (!conf) continue;
 
-      if (closeConfirms) {
-        t.confirmed      = true;
-        t.confirmedAt    = new Date(bar.time * 1000).toISOString();
-        t.confirmedPrice = bar.close;
-        changed = true;
-        log(`Trade ${t.id} CONFIRMED — 30M close ${bar.close} ${t.direction === 'long' ? 'above' : 'below'} entry ${t.entry}`);
-        break;
-      }
-    }
+    t.confirmed      = true;
+    t.confirmedAt    = new Date(conf.barTime * 1000).toISOString();
+    t.confirmedPrice = conf.confirmedPrice;
+    // Design-intent fill (spec 03): the trade the ledger scores fills at the
+    // confirming close. The planned `entry` stays recorded for forensics but
+    // is never a fill. All R math downstream keys off riskPerUnit.
+    t.fillPrice   = conf.confirmedPrice;
+    t.riskPerUnit = Math.abs(conf.confirmedPrice - t.stop);
+    t.accounting  = 'design-intent-v1';
+    changed = true;
+    log(`Trade ${t.id} CONFIRMED — completed 30M close ${conf.confirmedPrice} ${t.direction === 'long' ? 'above' : 'below'} entry ${t.entry} | riskPerUnit ${t.riskPerUnit.toFixed(1)}`);
   }
 
   if (changed) writeTrades(trades);
@@ -1698,12 +1773,21 @@ async function checkConfirmation(client, indicators) {
 //   rr1:            "2.2",  rr2: "6.9",  rr3: "3.0"
 //   criteria:       [ { label, pass, auto } ... ]  snapshot of criteria at signal time
 //   indicators:     { cvd, oi, oiTrend, vwap, macd4hBullish, rsi12h }
-//   confirmed:      false | true   — 30M close above entry with +CVD happened
-//   confirmedAt:    null | ISO timestamp
-//   confirmedPrice: null | number
-//   outcome:        null | "tp1" | "tp2" | "tp3" | "stop" | "invalidated" | "expired"
+//   confirmed:      false | true   — COMPLETED 30M close beyond entry happened
+//   confirmedAt:    null | ISO timestamp (confirming bar OPEN time)
+//   confirmedPrice: null | number   (the confirming bar's close = the fill)
+//   fillPrice:      null | number   — design-intent fill (= confirmedPrice)
+//   riskPerUnit:    null | number   — |fillPrice − stop|, the R denominator
+//   accounting:     'design-intent-v1'
+//   outcome:        null | "tp1" | "tp2" | "tp3" | "stop" | "invalidated"
+//                   | "expired" | "expired_unconfirmed"
 //   closedAt:       null | ISO timestamp
-//   pnlR:           null | number   (R-multiple: 1.0 = hit TP1, -1.0 = stopped out, etc.)
+//   grossR:         null | number   — ladder R before fees
+//   feeR:           null | number   — fees in R (6bp taker / 2bp maker measured)
+//   pnlR:           null | number   — NET of fees. null on expired_unconfirmed
+//                   (no trade existed — excluded from aggregates)
+//   legacyOutcome / legacyPnlR — pre-rewrite values, preserved once by
+//                   scripts/audit/recompute-history.js. Never deleted.
 // }
 
 function readTrades() {
@@ -1742,13 +1826,20 @@ function logTrade(price, trigger, setup) {
       macd4hBullish: setup._macd4h  != null ? setup._macd4h.bullish : null,
       rsi12h:        setup._rsi12h  != null ? Math.round(setup._rsi12h) : null,
     },
-    // Confirmation tracking — did the 30M trigger bar actually close above entry?
+    // Confirmation tracking — did a COMPLETED 30M bar close beyond entry?
     // Populated by checkConfirmation() on subsequent polls, not at signal time.
     confirmed:       false,
     confirmedAt:     null,
     confirmedPrice:  null,
+    // Design-intent accounting (spec 03): fill = confirming close, R keys
+    // off riskPerUnit = |fillPrice − stop|, pnlR is NET of fees.
+    fillPrice:   null,
+    riskPerUnit: null,
+    accounting:  'design-intent-v1',
     outcome:  null,
     closedAt: null,
+    grossR:   null,
+    feeR:     null,
     pnlR:     null,
   });
   writeTrades(trades);
@@ -1843,49 +1934,95 @@ function postAutotradeDeadLetter(signalId, setup, trigger, detail) {
   }
 }
 
-// ─── Bar-accurate outcome detection ──────────────────────────────────────────
+// ─── Bar-accurate outcome detection — design-intent accounting (spec 03) ────
 //
-// Replaces spot-price polling. For each open trade, fetches 30M OHLCV bars
-// from the bar AFTER the signal fired up to now, then walks bar-by-bar:
+// The trade the ledger scores must be a trade someone could have taken:
 //
-//   Long:  if bar.low <= stop  → LOSS  (stop hit before TP on ambiguous bars)
-//          elif bar.high >= tp1/tp2/tp3 → WIN at highest TP reached
+//   - Fill = confirmedPrice (the confirming 30M close). The planned `entry`
+//     limit is forensics only — 502/801 historical signals never traded
+//     through it before a TP, yet were booked as fills (audit D1).
+//   - R denominator = riskPerUnit = |confirmedPrice − stop|.
+//   - 1/3-1/3-1/3 TP ladder, distances re-anchored to the fill. Rungs bank
+//     in order at rr_i = |tp_i − fill| / riskPerUnit each closing 1/3 of the
+//     position. A rung the fill already ran through banks its (negative or
+//     ~zero) re-anchored rr — that is what really happens to a ladder placed
+//     after the move.
+//   - SAME-BAR AMBIGUITY: STOP FIRST. If a bar touches the stop, the whole
+//     remaining position closes at −1R×remaining and NO rung is banked from
+//     that bar. Conservative and now actually enforced, because only
+//     completed bars are walked (audit D5 — forming-bar reads inverted this
+//     guarantee 25 times in history).
+//   - Fees charged per trade at the measured schedule (audit D3): entry 6bp
+//     taker on full notional, each rung exit 2bp maker on its slice, stop
+//     exit 6bp taker on the remainder. feeR = fee$ / (riskPerUnit × size);
+//     pnlR is NET of fees, grossR stored alongside.
+//   - Outcome label is the TERMINAL event: 'tpN' when the last rung fills,
+//     'stop' when the stop closes the remainder (pnlR can still be positive
+//     if rungs banked first). Returns null while the ladder is live.
 //
-//   Short: if bar.high >= stop → LOSS
-//          elif bar.low <= tp1/tp2/tp3  → WIN at lowest TP reached
-//
-// On a bar where BOTH stop and a TP are crossed (a big candle), stop wins —
-// conservative but honest. This prevents phantom TP hits on stop-out candles.
-//
-// Bars since signal: capped at 336 (7 days × 48 × 30M bars) — more than enough
-// for any trade to resolve. Older open trades expire after 30 days as before.
+// Measured fee schedule from real BloFin fills (audit D3) — 6bp taker / 2bp
+// maker. Re-measure at prod tiers before Phase E (spec 09.4).
+const FEE_TAKER_RATE = 0.0006;
+const FEE_MAKER_RATE = 0.0002;
 
-// Canonical bar-walk: first bar to cross stop or a TP decides the outcome
-// (stop wins same-bar ambiguity — conservative, documented). Full position
-// is credited at the first touched level. Canonical confirmed-track ONLY —
-// the executed-hypothetical track uses lib/executed-walk.js (1/3-ladder
-// payoff) since 2026-07-04; crediting the full position at a distant tp3
-// produced phantom +40R records. See
-// refactors/2026-07-04-executed-track-ladder-rewalk.md.
 function walkBarsForOutcome(t, relevantBars) {
-  const stop = t.stop, tp1 = t.tp1, tp2 = t.tp2, tp3 = t.tp3;
-  const rr1 = parseFloat(t.rr1), rr2 = parseFloat(t.rr2), rr3 = parseFloat(t.rr3);
+  const fill = t.confirmedPrice != null ? t.confirmedPrice : t.fillPrice;
+  const stop = t.stop;
+  if (fill == null || stop == null) return null;
+  const riskPerUnit = Math.abs(fill - stop);
+  if (!(riskPerUnit > 0)) return null;
+  const isLong = t.direction === 'long';
+
+  const tps = [t.tp1, t.tp2, t.tp3].filter(v => v != null);
+  if (tps.length === 0) return null;
+  const slice = 1 / tps.length;
+  const rungs = tps.map(px => ({
+    px,
+    rr: (isLong ? px - fill : fill - px) / riskPerUnit,
+  }));
+
+  // Fees accrue per unit of position size; feeR normalizes by riskPerUnit.
+  let feeUsd    = FEE_TAKER_RATE * fill; // entry, taker, full size
+  let realized  = 0;                     // gross R banked so far
+  let remaining = 1;
+  let hit       = 0;
+
+  const finish = (outcome, barTime) => {
+    const grossR = realized;
+    const feeR   = feeUsd / riskPerUnit;
+    return {
+      outcome,
+      grossR:        round3(grossR),
+      feeR:          round3(feeR),
+      pnlR:          round3(grossR - feeR),
+      rungsBanked:   hit,
+      closedBarTime: barTime,
+    };
+  };
 
   for (const bar of relevantBars) {
-    if (t.direction === 'long') {
-      if (bar.low  <= stop) return { outcome: 'stop', pnlR: -1.0, closedBarTime: bar.time };
-      if (bar.high >= tp3)  return { outcome: 'tp3',  pnlR: rr3,  closedBarTime: bar.time };
-      if (bar.high >= tp2)  return { outcome: 'tp2',  pnlR: rr2,  closedBarTime: bar.time };
-      if (bar.high >= tp1)  return { outcome: 'tp1',  pnlR: rr1,  closedBarTime: bar.time };
-    } else {
-      if (bar.high >= stop) return { outcome: 'stop', pnlR: -1.0, closedBarTime: bar.time };
-      if (bar.low  <= tp3)  return { outcome: 'tp3',  pnlR: rr3,  closedBarTime: bar.time };
-      if (bar.low  <= tp2)  return { outcome: 'tp2',  pnlR: rr2,  closedBarTime: bar.time };
-      if (bar.low  <= tp1)  return { outcome: 'tp1',  pnlR: rr1,  closedBarTime: bar.time };
+    // Stop first — checked before any rung on the same bar.
+    const stopTouched = isLong ? bar.low <= stop : bar.high >= stop;
+    if (stopTouched) {
+      realized += remaining * -1;
+      feeUsd   += FEE_TAKER_RATE * stop * remaining;
+      return finish('stop', bar.time);
     }
+    while (hit < rungs.length) {
+      const r = rungs[hit];
+      const touched = isLong ? bar.high >= r.px : bar.low <= r.px;
+      if (!touched) break;
+      realized  += slice * r.rr;
+      feeUsd    += FEE_MAKER_RATE * r.px * slice;
+      remaining -= slice;
+      hit++;
+    }
+    if (hit === rungs.length) return finish(`tp${hit}`, bar.time);
   }
   return null;
 }
+
+function round3(x) { return Math.round(x * 1000) / 1000; }
 
 async function updateOutcomes(client) {
   const trades = readTrades();
@@ -1914,123 +2051,91 @@ async function updateOutcomes(client) {
     return;
   }
 
+  const nowSec = Date.now() / 1000;
+
   for (const t of trades) {
     if (t.outcome !== null) continue;
 
-    // Expire after 30 days (applies to confirmed and unconfirmed alike)
+    // Unconfirmed ⇒ no trade (spec 03 item 6). Once the confirmation window
+    // has fully closed on completed bars, retire the signal. pnlR stays null
+    // — no position ever existed; excluded from all performance aggregates.
+    if (!t.confirmed) {
+      if (unconfirmedExpiry(t, nowSec)) {
+        t.outcome  = 'expired_unconfirmed';
+        t.closedAt = new Date().toISOString();
+        t.pnlR     = null;
+        changed    = true;
+        log(`Trade ${t.id} expired_unconfirmed (no completed 30M close beyond entry within 1h)`);
+      }
+      continue;
+    }
+
+    // Confirmed but unresolved after 30 days — should be unreachable with
+    // sub-1% stops; kept as a terminal state so nothing lingers forever.
     const age = Date.now() - new Date(t.firedAt).getTime();
     if (age > 30 * 24 * 60 * 60 * 1000) {
       t.outcome  = 'expired';
       t.closedAt = new Date().toISOString();
       t.pnlR     = 0;
       changed    = true;
-      log(`Trade ${t.id} expired (30 days, no outcome)`);
+      log(`Trade ${t.id} expired (30 days, confirmed but no outcome)`);
       continue;
     }
 
-    // Unconfirmed trades had no entry — per BACKTESTING.md "the entry condition
-    // was never met." Don't bar-walk for TP/stop on them; they sit at outcome:null
-    // and will expire at 30 days with pnlR:0. Previously this produced phantom
-    // -1R "losses" on positions that were never opened.
-    if (!t.confirmed) continue;
+    // Legacy-confirmed records (pre-spec-03) lack the design-intent fields —
+    // backfill from confirmedPrice so the walker can price them honestly.
+    if (t.confirmedPrice != null && (t.riskPerUnit == null || t.fillPrice == null)) {
+      t.fillPrice   = t.confirmedPrice;
+      t.riskPerUnit = Math.abs(t.confirmedPrice - t.stop);
+      t.accounting  = 'design-intent-v1';
+      changed = true;
+    }
 
-    // Only look at bars that closed AFTER the signal fired
-    const signalTs = new Date(t.firedAt).getTime() / 1000; // seconds
-    const relevantBars = bars.filter(b => b.time > signalTs);
+    // Walk from the bar AFTER confirmation, completed bars only (spec 03
+    // item 4): closeTime > confirmTs && closeTime <= now. confirmTs is the
+    // confirming bar's close. The forming bar is never walked (audit D5).
+    const confirmCloseSec = new Date(t.confirmedAt).getTime() / 1000 + BAR_30M_SEC;
+    // Bars cover only the trailing 7 days. A trade confirmed BEFORE the
+    // window start would be walked from mid-history and mislabeled (same
+    // guard class as the 2026-07-02 executed-track fix). Skip — the
+    // historical recompute owns anything that old.
+    if (!bars.length || bars[0].time > confirmCloseSec) continue;
+    const relevantBars = bars.filter(b =>
+      b.time + BAR_30M_SEC > confirmCloseSec && b.time + BAR_30M_SEC <= nowSec);
     if (relevantBars.length === 0) continue;
 
-    // Same-bar ambiguity: stop wins (conservative). Documented in commit
-    // 6a93d0d, BACKTESTING.md and docs/performance-tracking.md.
+    // Same-bar ambiguity: stop wins (conservative) — enforced inside
+    // walkBarsForOutcome, which now also prices the 1/3 ladder off the
+    // confirmedPrice fill and charges fees (design-intent accounting).
     const walk = walkBarsForOutcome(t, relevantBars);
-    const outcome       = walk?.outcome ?? null;
-    const pnlR          = walk?.pnlR ?? null;
-    const closedBarTime = walk?.closedBarTime ?? null;
 
-    if (outcome !== null) {
-      t.outcome  = outcome;
-      t.pnlR     = pnlR;
-      t.closedAt = closedBarTime
-        ? new Date(closedBarTime * 1000).toISOString()
-        : new Date().toISOString();
-      changed = true;
-      log(`Trade ${t.id} closed: ${outcome} | R: ${pnlR} | bar: ${t.closedAt}`);
-
-      // Extended cooldown on stop: 3 same-zone shorts stopped within 2h on
-      // 2026-04-13 because the uniform 1h cooldown re-opened too soon. After
-      // a stop on a level, lock that level for 6h (or until natural cooldown
-      // would have lifted — whichever is longer). Same-direction only.
-      if (outcome === 'stop' && t.zone?.type && t.zone?.mid != null) {
-        const zoneKey = `${t.zone.type.toLowerCase()}-${Math.round(t.zone.mid)}`;
-        const state = readState();
-        const existing = state[zoneKey];
-        const stopUntil = Date.now() + 6 * 60 * 60 * 1000;
-        if (existing && typeof existing === 'object') {
-          existing.stopUntil = stopUntil;
-          existing.stopDirection = t.direction;
-        } else {
-          state[zoneKey] = {
-            ts: Date.now(),
-            direction: t.direction,
-            levelType: t.zone.type,
-            levelMid:  t.zone.mid,
-            levelLo:   t.zone.low,
-            levelHi:   t.zone.high,
-            stopUntil,
-            stopDirection: t.direction,
-          };
-        }
-        writeState(state);
-        log(`Extended cooldown: ${zoneKey} (${t.direction}) locked for 6h after stop`);
-      }
-    }
-  }
-
-  // ── Executed-hypothetical track (Phase D attribution fix 2, 2026-07-02) ──
-  //
-  // Autotrade enters at signal-fire, so PLACED signals carry real exchange
-  // exposure even when the 30M confirmation never comes — 2 unconfirmed
-  // Jun-27 shorts were SL'd for −4.2R while invisible to the canonical track.
-  // Walk placed signals from fire-time into SEPARATE fields so the canonical
-  // confirmation-gated pipeline (outcome/pnlR, daily-R kill, weekly cohorts,
-  // win-rate-diff anomaly counters) stays byte-identical. Exchange fills
-  // remain the true P&L; this is the like-for-like chart-hypothetical.
-  // No cooldown side effects — those belong to the strategy track only.
-  // Only meaningful for signals fired after 2026-07-02 (older ones are
-  // outside the 7-day bar window and expire; attribution uses Mongo fills).
-  for (const t of trades) {
-    if (t.executionStatus !== 'placed' || t.executedOutcome) continue;
-
-    const age = Date.now() - new Date(t.firedAt).getTime();
-    if (age > 30 * 24 * 60 * 60 * 1000) {
-      t.executedOutcome  = 'expired';
-      t.executedPnlR     = 0;
-      t.executedClosedAt = new Date().toISOString();
-      changed = true;
-      continue;
-    }
-
-    const signalTs = new Date(t.firedAt).getTime() / 1000;
-    // Bars cover only the trailing 7 days. A trade that fired BEFORE the
-    // window start would be walked from mid-history and mislabeled (verified
-    // live 2026-07-02: 16 stale trades all "resolved" on the window's first
-    // wide bar). Walk only when full history since fire-time is present;
-    // pre-window trades stay null and expire at 30d — the exchange fills in
-    // blofin_orders are their ground truth anyway.
-    if (!bars.length || signalTs < bars[0].time) continue;
-    const relevantBars = bars.filter(b => b.time > signalTs);
-    if (relevantBars.length === 0) continue;
-
-    const walk = walkExecutedLadder(t, relevantBars);
     if (walk) {
-      t.executedOutcome  = walk.outcome;
-      t.executedPnlR     = walk.pnlR;
-      t.executedClosedAt = walk.closedBarTime
+      const outcome = walk.outcome;
+      t.outcome  = outcome;
+      t.grossR   = walk.grossR;
+      t.feeR     = walk.feeR;
+      t.pnlR     = walk.pnlR;   // NET of fees
+      t.closedAt = walk.closedBarTime
         ? new Date(walk.closedBarTime * 1000).toISOString()
         : new Date().toISOString();
       changed = true;
-      log(`Trade ${t.id} executed-track: ${walk.outcome} | R: ${walk.pnlR} (canonical outcome: ${t.outcome ?? 'null'})`);
+      log(`Trade ${t.id} closed: ${outcome} | gross ${walk.grossR}R − fees ${walk.feeR}R = net ${walk.pnlR}R | rungs ${walk.rungsBanked} | bar: ${t.closedAt}`);
+
+      // Post-stop lockout: the fired cell already blocks the same
+      // direction × 0.3% band for 24h (spec 05) — strictly stronger than
+      // the old 6h stopUntil extended cooldown, which is removed with
+      // isCoolingDown(). Opposite-direction re-entries (failed-breakout
+      // flips) remain allowed because cells are direction-keyed.
     }
   }
+
+  // Executed-hypothetical track RETIRED (rebuild spec 04.1, audit D6). It
+  // priced rungs off the planned entry, walked from fire-time, and charged no
+  // fees — 2.3× overstated vs exchange truth. The exchange already records
+  // what it tries to estimate; scripts/blofin/attribution.js persists
+  // per-signal exchange net R onto trade records daily. Existing
+  // executedOutcome/executedPnlR/executedClosedAt values are FROZEN in place
+  // (historical forensics only) — nothing writes them anymore.
 
   if (changed) writeTrades(trades);
 }
@@ -2323,9 +2428,25 @@ async function main() {
   if (trigger) {
     const levelKey = `${trigger.type.toLowerCase()}-${Math.round(trigger.mid)}`;
 
-    if (isCoolingDown(levelKey, trigger.direction, indicators.cvd)) {
-      log(`Level ${levelKey} triggered but cooling down — skipping`);
+    // Cell dedup (spec 05): one alert per direction × 0.3% price band × 24h.
+    // Any alerting branch below (signal, regime filter, gates, kill notice)
+    // claims the cell — the level-identity cooldown that let the same idea
+    // refire 48 times is gone.
+    const cellNow   = Date.now();
+    const cellState = readState();
+    pruneCells(cellState, cellNow);
+    const blockingCell = findBlockingCell(cellState, trigger.direction, trigger.mid, cellNow);
+    writeState(cellState);
+
+    if (blockingCell) {
+      const agoH = ((cellNow - blockingCell.ts) / 3600000).toFixed(1);
+      log(`Cell dedup: ${trigger.direction} ${trigger.type} @$${Math.round(trigger.mid)} suppressed — cell fired ${agoH}h ago @$${Math.round(blockingCell.zonePrice)} (band $${Math.round(blockingCell.band)}, expires 24h)`);
     } else {
+      {
+        const st = readState();
+        markCellFired(st, trigger.direction, trigger.mid, price, cellNow);
+        writeState(st);
+      }
       log(`TRIGGER: ${trigger.type} $${Math.round(trigger.lo).toLocaleString()}–$${Math.round(trigger.hi).toLocaleString()} | direction: ${trigger.direction} | dist $${Math.round(trigger.dist).toLocaleString()}`);
 
       const setup = evaluateSetup(price, trigger, indicators, indicators.vrvpLevels);
@@ -2403,12 +2524,12 @@ async function main() {
           && setup.setupType.startsWith('C')
           && trigger.type === 'VAH';
 
-        // Daily-R kill switch: if today's realized R has dropped below the
-        // floor, suppress new signals until UTC midnight. Stop hunts and bad
-        // streaks compound otherwise.
-        const todayR = todayUtcR();
-        if (todayR <= DAILY_R_KILL_FLOOR) {
-          log(`Daily-R kill: today's R = ${todayR.toFixed(2)} ≤ ${DAILY_R_KILL_FLOOR} — suppressing ${levelKey}`);
+        // Daily-R kill switch: exchange-realized net R today (fallback:
+        // corrected ledger + yellow alert). If below the floor, suppress
+        // new signals until UTC midnight.
+        const kill = await isKillActive();
+        if (kill.active) {
+          log(`Daily-R kill: today's R = ${kill.todayR.toFixed(2)} ≤ ${DAILY_R_KILL_FLOOR} (source: ${kill.source}) — suppressing ${levelKey}`);
           const levelStr = `$${Math.round(trigger.lo).toLocaleString()}–$${Math.round(trigger.hi).toLocaleString()}`;
           notify('info', [
             `📊 ${trigger.type} APPROACHED — DAILY-R KILL ACTIVE | BTCUSDT.P`,
@@ -2416,7 +2537,7 @@ async function main() {
             `**Price** $${Math.round(price).toLocaleString()} | **${trigger.type}** ${levelStr}`,
             ``,
             `**SIGNAL SUPPRESSED — DAILY DRAWDOWN CAP HIT**`,
-            `Today's realized R = ${todayR.toFixed(2)}R (floor: ${DAILY_R_KILL_FLOOR}R). New signals paused until 00:00 UTC.`,
+            `Today's realized R = ${kill.todayR.toFixed(2)}R (floor: ${DAILY_R_KILL_FLOOR}R, source: ${kill.source === 'exchange' ? 'exchange fills' : 'ledger fallback'}). New signals paused until 00:00 UTC.`,
             ``,
             `**RESUMES**  Tomorrow's UTC day automatically`,
             `━━━━━━━━━━━━━━━━━━━━━━━━━━`,
@@ -2521,17 +2642,42 @@ async function main() {
 
 // ─── Entry Point ──────────────────────────────────────────────────────────────
 
-main().catch(err => {
-  log(`FATAL: ${err.message || err}`);
-  try {
-    notify('error', [
-      '❌ **ERROR — Ace Trigger Check crashed**',
-      `**What:** Unhandled exception: ${err.message}`,
-      '**Where:** trigger-check.js main()',
-      '**Fix:** Check logs/trigger-check.log for the full stack trace.',
-    ].join('\n'));
-  } catch {}
-  // Best-effort release on crash (no-op if we never acquired)
-  try { releaseLock('btc-trigger'); } catch {}
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch(err => {
+    log(`FATAL: ${err.message || err}`);
+    try {
+      notify('error', [
+        '❌ **ERROR — Ace Trigger Check crashed**',
+        `**What:** Unhandled exception: ${err.message}`,
+        '**Where:** trigger-check.js main()',
+        '**Fix:** Check logs/trigger-check.log for the full stack trace.',
+      ].join('\n'));
+    } catch {}
+    // Best-effort release on crash (no-op if we never acquired)
+    try { releaseLock('btc-trigger'); } catch {}
+    process.exit(1);
+  });
+}
+
+// ─── Module exports (tests + audit/recompute-history.js only) ────────────────
+// Pure ledger functions — no CDP, no fs side effects. The cron entrypoint
+// above never touches these; scripts/tests/ledger.test.js and
+// scripts/audit/recompute-history.js require them so the recompute and the
+// live pipeline share ONE implementation of design-intent accounting.
+module.exports = {
+  CONFIRM_MAX_AGE_SEC,
+  FEE_TAKER_RATE,
+  FEE_MAKER_RATE,
+  decideConfirmation,
+  unconfirmedExpiry,
+  walkBarsForOutcome,
+  evaluateSetup,
+  // Price-time cell dedup (spec 05) — pure, operate on a passed-in state object.
+  CELL_BAND_PCT,
+  CELL_EXPIRY_MS,
+  FIRED_CELLS_KEY,
+  cellBandUsd,
+  findBlockingCell,
+  markCellFired,
+  pruneCells,
+};

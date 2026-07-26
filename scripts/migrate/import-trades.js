@@ -26,6 +26,12 @@ function extractBTCFactors(criteria) {
   };
 }
 
+// The spread carries the full record through unchanged — including the
+// design-intent-v1 ledger fields introduced by rebuild spec 03/04
+// (fillPrice, riskPerUnit, grossR, feeR, net pnlR, accounting,
+// legacyOutcome/legacyPnlR/legacyConfirmed*, exchangeNetR, exchangeFeeUsd).
+// Do not enumerate them here; new schema fields must always flow to Mongo
+// without a migrate change.
 function normalizeBTC(t) {
   return {
     ...t,
