@@ -24,7 +24,9 @@ not shipped.
 | 8 | Same battery at k=3 | 10 | 2026-07-26 hunt |
 | 9 | Funding family F1–F6 at k=1 and k=3 | 12 | 2026-07-26 hunt |
 | 10 | Walk-forward logistic model, primary margin cell, k∈{1,2,3} | 3 | 2026-07-26 hunt |
-| **Σ** | **hypothesis cells tested to date** | **98** | |
+| 11 | Rule battery H1–H10 at 4h, k = 1, 2, 3 (H7 vwap applies) | 30 | 2026-07-27 round 3 |
+| 12 | Rule battery H1–H10 at 1d, k = 1, 2, 3 (H7 excluded — no intraday VWAP) | 27 | 2026-07-27 round 3 |
+| **Σ** | **hypothesis cells tested to date** | **155** | |
 
 Descriptive/diagnostic measurements (accounting reconciliations, calibration Brier/ECE,
 autocorrelation, walk-forward buckets, random-direction nulls, the random-entry MC
@@ -105,11 +107,89 @@ Tooling, all reusable and read-only: [scripts/research/](../scripts/research/) �
 **planted 60% edge**, which it recovered at 60.3% (p=1.3e-38) while scoring unrelated rules at
 ~50% — so a real edge of that size would not have been missed.
 
+## Round 3 — higher timeframes, where the toll is smaller (2026-07-27)
+
+**Why this round.** Fee-in-R scales as 1/stop-width, so the 59.4% break-even that killed
+rounds 1–2 is a property of *30-minute geometry*, not of the market. Rounds 1–2 searched
+only 30m. This round holds the method fixed and raises the bar duration.
+
+**Corpus.** Binance USDT-M perp, **2019-09-08 → 2026-07-27** (vs 2y before): 2,515 1d bars,
+15,084 4h bars, **zero gaps, zero dupes**. Labels resolved on **723,971 5m bars** (also zero
+gaps) rather than 1m — at daily-ATR barrier widths a 5m bar straddling both barriers is
+vanishingly rare, and the measured ambiguity confirms it (0.00–0.07%). The window spans the
+2021 bull, the 2022 bear, and the 2024–26 cycle, so the ≥2-regime requirement is met by data
+rather than by waiting.
+
+**`build-dataset.js` was 30m-only** despite taking file arguments — `t[i] + 1_800_000` for the
+bar close plus every lookback as a bar count tuned to 30m (12/48/336/1440). Now parameterised
+by `--bar` with per-timeframe windows. **Regression-checked: rebuilding 30m k=1 reproduces all
+16 features on all 33,187 shared rows with zero mismatches**, so round-1/2 numbers stand. The
+new build yields 323 extra rows because the old warmup summed two *overlapping* windows.
+
+**The economics, measured per timeframe (6bp taker in / 2bp maker out):**
+
+| TF | k | median ATR | stop | fee | break-even | always-long |
+|---|---|---|---|---|---|---|
+| 30m | 1 | 0.43% | 0.42% | 0.188R | **59.4%** | 49.6% |
+| 4h | 1 | 1.57% | 1.57% | 0.051R | **52.6%** | 50.8% |
+| 4h | 2 | 1.55% | 3.11% | 0.026R | **51.3%** | 51.1% |
+| 1d | 1 | 4.17% | 4.17% | 0.019R | **51.0%** | 53.9% |
+| 1d | 3 | 4.05% | 12.16% | 0.007R | **50.3%** | 56.7% |
+
+(30m reproduces the spec's published 59.4/54.7/53.2 exactly — the cost model is calibrated,
+not re-derived.) **The thesis is confirmed structurally: the hurdle falls from 59.4% to ~51%.**
+But note the last column — at 1d, *always-long alone* (53.9–56.7%) already clears break-even.
+At daily scale the fee hurdle stops being the binding constraint and **drift** becomes the
+thing to beat. Every result below is therefore reported against always-long, not against 50%.
+
+**Result: 12 of 57 new cells clear their own break-even on day-clustered CIs — where 0 of 98
+did at 30m.** Under cumulative BH-FDR (q=0.10, 155 cells), and against spec 07.1's full
+actionability rule (≥10pp lift AND FDR AND n≥50 AND CI clearing the floor): **0 actionable.**
+Five of the twelve are worse than simply being long once drift is netted out.
+
+| Date | Hypothesis | n | Result | Verdict |
+|---|---|---|---|---|
+| 2026-07-27 | Raising the timeframe lowers the fee hurdle enough to expose an edge | 57 cells | hurdle 59.4%→50.3%; 12 cells clear break-even vs 0 at 30m; best E[R] +0.183R | **Confirmed structurally** — geometry, not zone logic, was destroying round-1 economics |
+| 2026-07-27 | H5-imbCont (order flow) at 1d is real | 713–788 | k=3: 59.5% overall, but walk-forward **68.3% → 50.7%** and regime **+10.3pp uptrend / −10.8pp downtrend**; E[R] +0.359 → +0.007 across halves | **Refuted** — the exact funding-lead signature: decays out of sample, and is drift wearing a costume |
+| 2026-07-27 | H9-trendHiVol (momentum conditioned on top-30% vol) at 4h is real | 3,688–4,106 | k=1: 55.1% [52.7, 57.8] clustered vs 52.6% break-even, ESS 1,586. **Positive E[R] in BOTH regimes and BOTH chronological halves** at k=1 and k=2. Edge concentrated where drift fails: downtrend lift **+8.9pp** (always-long 45.5%), uptrend lift ≈0 | **Lead — survives round 1 of killing** |
+
+**Why H9 is not the funding lead repeating itself.** The funding cell died because its
+apparent edge was long-bias: +10.9pp in uptrends, −2.8pp in downtrends. H9 has the *opposite*
+shape — it merely matches buy-and-hold in uptrends (lift −0.5pp) and does its work in
+downtrends where always-long loses (45.5% → 54.4%). It is also stable across k=1/2/3 and
+across both halves of a 7-year window, rather than living in one barrier width and one year.
+
+**Why it is still not actionable, and must not be traded.**
+1. **E[R] +0.051R (k=1) to +0.129R (k=2) vs the spec's +0.25R bar.** It misses, at every k.
+2. **Lift over always-long is +4.7pp vs the 10pp actionability threshold.** Misses.
+3. **It is the best of 57 cells, chosen after seeing results.** The halves test is a weak
+   walk-forward; a rolling-refit OOS test has not been run.
+4. **H9 is vol-scaled time-series momentum** — a documented, widely-harvested risk premium,
+   not a discovery. That it only survives fees at 4h+ is exactly what you'd expect of a
+   well-known effect in a liquid market: it is arbitraged at the timeframes people trade.
+5. Spec 07.1's +0.25R bar was derived from *30m* fee economics (fee floor 0.10–0.20R + margin).
+   At 4h the floor is 0.026–0.051R, so the same reasoning implies a lower bar. **Whether the
+   bar should scale with timeframe is an operator decision and must be made BEFORE the next
+   round, not after seeing that a lower bar would pass this cell.** Recording it here so the
+   decision is timestamped independently of the result.
+
+**Round-3 conclusion.** The 30m dead end was partly a geometry problem, and that is worth
+knowing: measurement at 4h/1d is where any future search should live. One lead survived its
+first two killing tests, which is one more than rounds 1–2 produced across 98 cells. It is a
+lead, not an edge. Spec 08 live-fire stays inactive.
+
 ## Open hypotheses queue (test when sample bar is met — spec 07.1: ≥150 post-fix signals, ≥60d, ≥2 regimes)
 
+- **H9-trendHiVol at 4h — the live lead (round 3).** Next gates, in order: (a) rolling-refit
+  walk-forward, not chronological halves; (b) sensitivity to the 0.7 atrPctl and 24h-momentum
+  choices — if the edge only exists at exactly those cut-points it is fitted; (c) operator
+  decision on whether the +0.25R bar scales with timeframe, taken *before* re-scoring;
+  (d) execution realism at 4h holds — funding carry over multi-day holds is unmodelled and
+  can exceed the entire +0.05R edge at k=1.
 - Re-measure the current signal at ≥1.0×ATR structural stops on the corrected ledger
   (first experiment per spec 07.3 — cheapest path; audit could not rule out that geometry,
-  not zone logic, destroys the edge).
+  not zone logic, destroys the edge). **Round 3 partially answers this**: geometry was
+  demonstrably part of the problem at 30m.
 - Regime conditioning (only a downtrend-chop regime is sampled to date).
 - Confirmation-strength filters.
 - Zone-type splits (tier/zone ranking currently accounting-dependent).

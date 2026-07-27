@@ -38,8 +38,37 @@ const arg = (name, def = null) => {
 };
 
 const K         = Number(arg('k', 1));           // barrier width in ATR
-const HORIZON_H = Number(arg('horizon', 24));    // hours to resolve a barrier
-const WARMUP    = 336 + 1440;                    // 7d structure + 30d percentile windows
+const BAR       = arg('bar', '30m');             // feature-bar timeframe
+
+// Every lookback below used to be a bar count hard-coded for 30m spacing
+// (12=6h, 48=24h, 336=7d, 1440=30d) alongside a literal `t[i] + 1_800_000` for
+// the bar close. Higher timeframes need their own windows: 336 daily bars is a
+// year of lookback and would eat most of a 2,515-bar series as warmup.
+//
+// Windows are chosen to span comparable *calendar* time where that is
+// meaningful, and to keep warmup a small fraction of each series:
+//   mom  — three momentum lookbacks, in bars
+//   pctl — ATR-percentile / z-score window
+//   rng  — structural high-low range window
+const TF = {
+  '30m': { ms: 1_800_000,  mom: [12, 48, 336], pctl: 1440, rng: 336, horizonH: 24 },
+  '1h':  { ms: 3_600_000,  mom: [6, 24, 168],  pctl: 720,  rng: 168, horizonH: 48 },
+  '4h':  { ms: 14_400_000, mom: [6, 30, 42],   pctl: 180,  rng: 42,  horizonH: 96 },
+  '1d':  { ms: 86_400_000, mom: [3, 7, 30],    pctl: 180,  rng: 30,  horizonH: 480 },
+}[BAR];
+if (!TF) throw new Error(`unsupported --bar ${BAR} (want 30m|1h|4h|1d)`);
+
+const BAR_MS    = TF.ms;
+const HORIZON_H = Number(arg('horizon', TF.horizonH));
+const MOM       = TF.mom;
+const PCTL_W    = TF.pctl;
+const RNG_W     = TF.rng;
+const WARMUP    = Math.max(PCTL_W, RNG_W, MOM[2]) + MOM[0];
+// A day-anchored VWAP is meaningless once a bar IS a day (or longer): every bar
+// becomes its own session, so vwapDist collapses to a function of the bar's own
+// shape rather than an independent benchmark. Drop it rather than ship a
+// feature that silently means something different at one timeframe.
+const USE_VWAP  = BAR_MS < 86_400_000;
 
 // ─── indicators (all causal — index i sees only 0..i) ────────────────────────
 
@@ -133,7 +162,10 @@ function resolveBarrier(K1, startIdx, entry, up, dn, horizonMs) {
 
   const K30 = JSON.parse(fs.readFileSync(f30, 'utf8'));
   const K1  = JSON.parse(fs.readFileSync(f1m, 'utf8'));
-  console.log(`30m bars ${K30.t.length} | 1m bars ${K1.t.length}`);
+  console.log(`feature bars (${BAR}) ${K30.t.length} | label bars (${K1.interval || '1m'}) ${K1.t.length}`);
+  if (K30.interval && K30.interval !== BAR) {
+    throw new Error(`--bar ${BAR} but feature file holds ${K30.interval} bars`);
+  }
 
   const { t, o, h, l, c, v, tb } = K30;
   const n = t.length;
@@ -144,25 +176,26 @@ function resolveBarrier(K1, startIdx, entry, up, dn, horizonMs) {
   const e50   = ema(c, 50);
   const atrPct = atr.map((a, i) => (a == null ? null : a / c[i]));
 
-  // 12-bar (6h) aggressor imbalance: (buy − sell) / total, from taker-buy base volume.
+  // Aggressor imbalance over MOM[0] bars: (buy − sell) / total, from taker-buy base volume.
+  const W = MOM[0];
   const imb = new Array(n).fill(null);
-  for (let i = 11; i < n; i++) {
+  for (let i = W - 1; i < n; i++) {
     let vol = 0, buy = 0;
-    for (let j = i - 11; j <= i; j++) { vol += v[j]; buy += tb[j]; }
+    for (let j = i - (W - 1); j <= i; j++) { vol += v[j]; buy += tb[j]; }
     imb[i] = vol > 0 ? (2 * buy - vol) / vol : null;
   }
-  // 12-bar volume total, for its own z-score
-  const vol12 = new Array(n).fill(null);
-  for (let i = 11; i < n; i++) { let s = 0; for (let j = i - 11; j <= i; j++) s += v[j]; vol12[i] = s; }
+  // Same-window volume total, for its own z-score
+  const volW = new Array(n).fill(null);
+  for (let i = W - 1; i < n; i++) { let s = 0; for (let j = i - (W - 1); j <= i; j++) s += v[j]; volW[i] = s; }
 
   console.log('computing rolling windows…');
-  const atrPctl = rollingPctl(atrPct, 1440);
-  const imbZ    = rollingZ(imb, 1440);
-  const volZ    = rollingZ(vol12, 1440);
+  const atrPctl = rollingPctl(atrPct, PCTL_W);
+  const imbZ    = rollingZ(imb, PCTL_W);
+  const volZ    = rollingZ(volW, PCTL_W);
 
   // UTC-day-anchored VWAP (session VWAP, same anchor the live system uses)
   const vwap = new Array(n).fill(null);
-  {
+  if (USE_VWAP) {
     let day = null, pv = 0, vv = 0;
     for (let i = 0; i < n; i++) {
       const d = Math.floor(t[i] / 86_400_000);
@@ -182,26 +215,34 @@ function resolveBarrier(K1, startIdx, entry, up, dn, horizonMs) {
 
     const price = c[i];
     const barrier = K * atr[i];
-    const closeMs = t[i] + 1_800_000;               // bar i closes here
-    const s = lowerBound(K1.t, closeMs);            // first 1m bar at/after the close
+    const closeMs = t[i] + BAR_MS;                  // bar i closes here
+    const s = lowerBound(K1.t, closeMs);            // first label bar at/after the close
     if (s >= K1.t.length) continue;
 
     const lab = resolveBarrier(K1, s, price, price + barrier, price - barrier, horizonMs);
     if (lab.ambiguous) { ambiguous++; continue; }
     if (lab.upFirst == null) { unresolved++; continue; }
 
-    // 7d structural range position
+    // Structural range position over RNG_W bars
     let hi7 = -Infinity, lo7 = Infinity;
-    for (let j = i - 335; j <= i; j++) { if (h[j] > hi7) hi7 = h[j]; if (l[j] < lo7) lo7 = l[j]; }
+    for (let j = i - (RNG_W - 1); j <= i; j++) { if (h[j] > hi7) hi7 = h[j]; if (l[j] < lo7) lo7 = l[j]; }
 
+    // ret6h/ret24h/ret7d are SLOT names, kept so the pre-registered rule battery
+    // in hypotheses.js runs unchanged at every timeframe. They mean MOM[0]/[1]/[2]
+    // bars back — at 30m that is literally 6h/24h/7d, at 4h it is 1d/5d/7d, at 1d
+    // it is 3d/7d/30d. meta.momentumSpans records the true spans. mom1/2/3 are
+    // honest aliases for new code.
     rows.push({
       t: t[i],
       price,
       atrPct: atrPct[i],
       atrPctl: atrPctl[i],
-      ret6h:  Math.log(c[i] / c[i - 12]),
-      ret24h: Math.log(c[i] / c[i - 48]),
-      ret7d:  Math.log(c[i] / c[i - 336]),
+      ret6h:  Math.log(c[i] / c[i - MOM[0]]),
+      ret24h: Math.log(c[i] / c[i - MOM[1]]),
+      ret7d:  Math.log(c[i] / c[i - MOM[2]]),
+      mom1:   Math.log(c[i] / c[i - MOM[0]]),
+      mom2:   Math.log(c[i] / c[i - MOM[1]]),
+      mom3:   Math.log(c[i] / c[i - MOM[2]]),
       emaSpread: (e20[i] - e50[i]) / price,
       rsi: rsi[i],
       rangePos: hi7 > lo7 ? (price - lo7) / (hi7 - lo7) : null,
@@ -221,9 +262,15 @@ function resolveBarrier(K1, startIdx, entry, up, dn, horizonMs) {
   process.stderr.write('\n');
 
   const up = rows.filter(r => r.upFirst === 1).length;
+  const hrs = bars => +(bars * BAR_MS / 3_600_000).toFixed(2);
   const meta = {
     builtAt: new Date().toISOString(),
+    bar: BAR, barMs: BAR_MS,
     k: K, horizonH: HORIZON_H,
+    momentumBars: MOM,
+    momentumSpans: { mom1: `${hrs(MOM[0])}h`, mom2: `${hrs(MOM[1])}h`, mom3: `${hrs(MOM[2])}h` },
+    pctlWindowBars: PCTL_W, rangeWindowBars: RNG_W, warmupBars: WARMUP,
+    vwapUsed: USE_VWAP,
     rows: rows.length, ambiguous, unresolved,
     ambiguousPct: +(100 * ambiguous / (rows.length + ambiguous + unresolved)).toFixed(2),
     unresolvedPct: +(100 * unresolved / (rows.length + ambiguous + unresolved)).toFixed(2),
