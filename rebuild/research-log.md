@@ -27,7 +27,8 @@ not shipped.
 | 11 | Rule battery H1–H10 at 4h, k = 1, 2, 3 (H7 vwap applies) | 30 | 2026-07-27 round 3 |
 | 12 | Rule battery H1–H10 at 1d, k = 1, 2, 3 (H7 excluded — no intraday VWAP) | 27 | 2026-07-27 round 3 |
 | 13 | H9 cut-point grid (atrPctl ×5 × momentum ×2 × k ×2) | 20 | 2026-07-27 round 4 |
-| **Σ** | **hypothesis cells tested to date** | **175** | |
+| 14 | 1h cut-point grid (atrPctl ×5 × momentum ×2 × k ×3) | 30 | 2026-07-27 round 5 |
+| **Σ** | **hypothesis cells tested to date** | **205** | |
 
 Descriptive/diagnostic measurements (accounting reconciliations, calibration Brier/ECE,
 autocorrelation, walk-forward buckets, random-direction nulls, the random-entry MC
@@ -234,6 +235,48 @@ Replace it with, and require simultaneously:
 3. **≥10pp lift over always-long on the same entry schedule**,
 4. consistency across **at least two of k ∈ {1,2,3}**.
 Best current cell: k=3 at **+6.18R/yr** OOS — fails row 1, passes row 3. Nothing passes all four.
+
+## Round 5 — the frequency/edge tradeoff is real and binding (2026-07-27)
+
+**Cells: +30** (1h: 5 atrPctl × 2 momentum × 3 k) → cumulative family **205**.
+
+Round 4 established the binding constraint for a fully-automated product: a rule must clear
+**Sharpe ≥1.0 after selection deflation** *and* fire **≥100×/yr**, because a 24-trade/yr rule
+needs eight years to reach a verifiable sample and the regime will not hold still that long.
+4h had edge without frequency; 30m had frequency without edge. **1h was the untested middle.**
+
+Corpus: 60,337 1h bars 2019-09→2026-07, zero gaps. Labels on the same 5m series.
+
+| TF · k | break-even | best in-sample (non-overlap) | trades/yr | OOS lift vs always-long | verdict |
+|---|---|---|---|---|---|
+| 1h · 1 | 55.3% | **−19.9R/yr** (gross +97R, **fees −231R**) | 319 | +4.9pp | **Refuted** — fees are 2.4× gross |
+| 1h · 2 | 52.7% | +6.1R/yr | 130 | +2.6pp | **Refuted** — OOS lift collapses |
+| 1h · 3 | 51.8% | **+9.8R/yr @ 119 trades/yr** ← the target zone | 119 | **−0.4pp** | **Refuted out of sample** |
+
+1h k=3 is the round's headline failure and the reason the choose-early/score-late test exists:
+in-sample it looked like the answer — +9.8R/yr at 119 trades/yr is almost exactly the product
+spec. Selected honestly on 2019–2023 and scored on untouched 2023–2026, it lands at 50.4% hit
+against an always-long rate of 50.9% — **worse than doing nothing.**
+
+**The tradeoff, now measured across four timeframes.** This is the round's real contribution:
+
+| | 30m | 1h | 4h | 1d |
+|---|---|---|---|---|
+| fee hurdle | 59.4% | 55.3% | 52.6% | 51.0% |
+| frequency | very high | high | low | very low |
+| OOS edge | none | none | k=1 +7.8pp / k=3 +21.2pp | refuted |
+| Sharpe (OOS, net) | — | — | 0.25 (k=1) / 1.30→**0.76 deflated** (k=3) | — |
+| trades/yr | — | — | 99 / **24** | — |
+
+**Where there is frequency, fees eat the edge. Where there is edge, frequency is too low to
+verify.** No setting of the momentum × volatility family — the only family to survive 205 cells —
+delivers both. That is a bounded, useful negative: it says this family cannot be automated at a
+verifiable frequency, not that no edge exists anywhere.
+
+**Consequence for the product.** There is currently **nothing to automate**. The remaining
+untested feature space is the order-book corpus (decision date 2026-08-25 per 07.5), which is
+genuinely independent of everything above — it is the first candidate feature set that is not a
+transformation of OHLCV.
 
 ## Open hypotheses queue (test when sample bar is met — spec 07.1: ≥150 post-fix signals, ≥60d, ≥2 regimes)
 
