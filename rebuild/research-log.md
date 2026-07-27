@@ -26,7 +26,8 @@ not shipped.
 | 10 | Walk-forward logistic model, primary margin cell, k∈{1,2,3} | 3 | 2026-07-26 hunt |
 | 11 | Rule battery H1–H10 at 4h, k = 1, 2, 3 (H7 vwap applies) | 30 | 2026-07-27 round 3 |
 | 12 | Rule battery H1–H10 at 1d, k = 1, 2, 3 (H7 excluded — no intraday VWAP) | 27 | 2026-07-27 round 3 |
-| **Σ** | **hypothesis cells tested to date** | **155** | |
+| 13 | H9 cut-point grid (atrPctl ×5 × momentum ×2 × k ×2) | 20 | 2026-07-27 round 4 |
+| **Σ** | **hypothesis cells tested to date** | **175** | |
 
 Descriptive/diagnostic measurements (accounting reconciliations, calibration Brier/ECE,
 autocorrelation, walk-forward buckets, random-direction nulls, the random-entry MC
@@ -177,6 +178,62 @@ across both halves of a 7-year window, rather than living in one barrier width a
 knowing: measurement at 4h/1d is where any future search should live. One lead survived its
 first two killing tests, which is one more than rounds 1–2 produced across 98 cells. It is a
 lead, not an edge. Spec 08 live-fire stays inactive.
+
+## Round 4 — the lead under capacity, funding and honest OOS (2026-07-27)
+
+Tool: [scripts/research/lead-tests.js](../scripts/research/lead-tests.js). Four gates, each of
+which has killed a previous candidate. **Cells: +20** (5 atrPctl × 2 momentum × 2 k grid) →
+cumulative family **175**.
+
+**The finding that matters — R/trade is the wrong unit, and it nearly fooled us.**
+H9 fires on 4,106 of 14,852 4h bars, but a position is open most of the time: only **1,365 of
+those 4,106 signals are actually tradeable** on a non-overlapping book. Restricted to trades you
+could really take, the round-3 headline collapses:
+
+| | per-signal (round 3) | non-overlapping book (round 4) |
+|---|---|---|
+| hit rate | 55.1% | **52.5%** (break-even 52.6%) |
+| E[R]/trade | +0.051R | **−0.005R** |
+| annual | — | **−1.0R/yr** |
+
+The overlapping signals were correlated — clusters of wins inside single trending moves, counted
+repeatedly. **This is the round-1 overlap failure wearing a new costume**, and every future
+result must be reported on a non-overlapping book. Funding (11.7% annualised, 7,538 settlements
+2019→2026) costs a further 0.5–4R over the book; mean hold is only 13.3h so it is not fatal, but
+it is not negligible either.
+
+**What survived: the volatility gradient, not the chosen cut-point.** Per-signal expectancy rises
+monotonically with the ATR percentile across both k and both momentum definitions — 0.5→+0.002,
+0.6→+0.016, 0.7→+0.051, 0.8→+0.107, 0.9→+0.132R. A smooth gradient across a grid is far better
+evidence than a spike at one value. Momentum choice matters too: the 1-day lookback (`mom1`) is
+**negative everywhere**; the effect lives entirely in 5–7 day momentum.
+
+**Honest out-of-sample (choose cut-point on 2019-10→2023-11, score 2023-11→2026-07, untouched):**
+
+| k | chosen on early data | OOS n | OOS hit | always-long | lift | net/yr | verdict |
+|---|---|---|---|---|---|---|---|
+| 1 | atrPctl>0.9 mom2 | 269 | 53.9% | 46.1% | **+7.8pp** | +2.53R | survives (point est.) |
+| 2 | atrPctl>0.7 mom3 | 212 | 50.9% | 51.9% | −0.9pp | −0.80R | **fails** |
+| 3 | atrPctl>0.9 mom2 | 66 | 63.6% | 42.4% | **+21.2pp** | +6.18R | survives |
+
+Two of three survive a genuine OOS test, with the correct regime signature: the OOS window is the
+recent downtrend where always-long *loses* (46.1% / 42.4%), and the rule beats it by 7.8–21.2pp.
+That is the opposite of the funding lead, which was long-bias in disguise.
+
+**Why it is still not tradeable.** k=1's Wilson CI on 53.9% (n=269) is ≈[47.9, 59.8] — the lower
+bound sits **below** its 52.6% break-even. k=3 clears its floor but on **n=66**. And k=2 fails
+outright; a real effect should not be that inconsistent across barrier width. Verdict: **the
+strongest candidate the project has produced, and still short of the bar.**
+
+**Bar recommendation (quant call, made on the UNIT argument, and the current leads FAIL it).**
+Spec 07.1's "+0.25R/trade" is the wrong denominator at any timeframe — it is blind to frequency
+and to overlap, which is precisely the error that made a −1.0R/yr rule look like +0.051R/trade.
+Replace it with, and require simultaneously:
+1. **≥ +10R/year on a non-overlapping book, net of fees AND funding** (≈10%/yr at 1% risk),
+2. **OOS lower CI bound above the cell's own break-even**, not above 50%,
+3. **≥10pp lift over always-long on the same entry schedule**,
+4. consistency across **at least two of k ∈ {1,2,3}**.
+Best current cell: k=3 at **+6.18R/yr** OOS — fails row 1, passes row 3. Nothing passes all four.
 
 ## Open hypotheses queue (test when sample bar is met — spec 07.1: ≥150 post-fix signals, ≥60d, ≥2 regimes)
 
