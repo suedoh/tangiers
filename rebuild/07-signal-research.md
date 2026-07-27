@@ -73,6 +73,50 @@ notional/risk ≈250 ⇒ taker-in/maker-out ≈ **0.20R**, maker/maker ≈ **0.1
 Every candidate's expectancy is reported **net** using this model; `feeR` per trade from
 spec 03 is the realized check. Prod fee tiers are unverified — re-measure at Phase E.
 
+## 7.5 Stop rules — written 2026-07-27, BEFORE the data exists
+
+Added because the order-flow premise ran ~3 months on assertion before anything measured it.
+These exist so a marginal result cannot quietly become "collect one more month". **Any change
+to the thresholds below must be dated and justified in the research log, and a change made
+after seeing the result it governs is void.**
+
+### Order-book corpus (`book-recorder.js`, started 2026-07-26)
+
+- **Decision date: 2026-08-25** (30 days of coverage). Not "when it looks ready".
+- **Precondition:** `liqAllSeen` climbing and ≥25 days of non-gap rows. If the recorder was
+  broken for part of the window, the window extends by the outage — it does not shrink the bar.
+- **Test:** the same pre-registered battery, on a **non-overlapping book, net of fees and
+  funding**, against always-long on the same entry schedule.
+- **STOP if:** no book-derived feature produces ≥ +10R/yr with an OOS CI lower bound above its
+  own break-even. On STOP, the corpus is archived, the recorder is switched off, and
+  microstructure is marked refuted-at-this-scale in the log. **No extension for "one more month"
+  — a real edge at 1-minute resolution does not need 60 days to become visible when 30 days of
+  minute bars is ~43,000 observations.**
+- **Continue only if** a feature clears the bar *and* the operator signs off in writing.
+
+### Any future lead
+
+- **Report on a non-overlapping book, always.** Per-signal statistics are void as evidence:
+  round 4 showed +0.051R/trade become −0.005R/trade once overlap was removed.
+- **Charge funding.** It is not in the barrier label and runs ~11.7% annualised.
+- **Choose cut-points on early data and score on untouched late data.** In-sample grid maxima
+  are not results.
+- **Time-box: 4 weeks from lead to verdict.** A lead that cannot be resolved in 4 weeks with
+  historical data is not resolvable by waiting; it is under-powered and should be logged as such.
+
+### Bar (proposed 2026-07-27, replaces the +0.25R/trade row — operator sign-off required)
+
+`+0.25R/trade` is blind to frequency and overlap, and that blindness is exactly what made a
+−1.0R/yr rule read as profitable. Replace with **all four, simultaneously**:
+
+1. **≥ +10R/year** on a non-overlapping book, net of fees and funding (≈10%/yr at 1% risk);
+2. **OOS CI lower bound above the cell's own break-even** (not above 50%);
+3. **≥10pp lift over always-long** on the same entry schedule;
+4. **consistent across ≥2 of k ∈ {1,2,3}**.
+
+Recorded while the best live candidate **fails row 1** (+6.18R/yr), so this bar is not
+reverse-engineered from a passing result.
+
 ## Definition of Done (for any candidate promoted to spec 08 live-fire)
 
 - [ ] Falsification harness built, reproduces audit numbers on the historical book
