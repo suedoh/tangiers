@@ -126,6 +126,9 @@ book-report: ## Post the order-book corpus weekly report to Discord now
 book-report-dry: ## Preview the weekly corpus report without posting
 	@$(NODE) $(TRADING)/scripts/research/book-report.js --dry-run
 
+zone-replay: ## Replay the VRVP zone signal over the full 5m corpus (~20 min, 237k signals)
+	@$(NODE) --max-old-space-size=8192 $(TRADING)/scripts/research/zone-replay.js --k 1
+
 report: ## Run the weekly performance report now and post to #btc-backtest
 	@$(NODE) $(TRADING)/scripts/weekly-report.js
 

@@ -28,7 +28,10 @@ not shipped.
 | 12 | Rule battery H1–H10 at 1d, k = 1, 2, 3 (H7 excluded — no intraday VWAP) | 27 | 2026-07-27 round 3 |
 | 13 | H9 cut-point grid (atrPctl ×5 × momentum ×2 × k ×2) | 20 | 2026-07-27 round 4 |
 | 14 | 1h cut-point grid (atrPctl ×5 × momentum ×2 × k ×3) | 30 | 2026-07-27 round 5 |
-| **Σ** | **hypothesis cells tested to date** | **205** | |
+| 15 | Selective prediction on price bars (4 TF×k configs × 5 coverages) | 20 | 2026-08-03 round 6 |
+| 16 | Zone signal META + DIR selective (2 models × 6 coverages) | 12 | 2026-08-03 round 6 |
+| 17 | Zone replay headline + 5 zone-type cells | 6 | 2026-08-03 round 6 |
+| **Σ** | **hypothesis cells tested to date** | **243** | |
 
 Descriptive/diagnostic measurements (accounting reconciliations, calibration Brier/ECE,
 autocorrelation, walk-forward buckets, random-direction nulls, the random-entry MC
@@ -294,3 +297,140 @@ transformation of OHLCV.
 - Confirmation-strength filters.
 - Zone-type splits (tier/zone ranking currently accounting-dependent).
 - A-tier inversion re-test at n(A) ≥ 150 (two independent hints, both sub-bar).
+
+## Round 6 — the zone signal itself, at 292× the live sample (2026-08-03)
+
+**Why this round.** Every prior round tested market-wide rules on *price bars*. Nobody had ever
+tested **the system's own signal** at a sample that could resolve anything: the live ledger has
+814 signals (ESS ≈ 348), and the 2026-08-03 audit measured 43.5% symmetric skill on it — enough
+to say "no edge on average", nowhere near enough to rule out a **high-probability subset**. The
+operator's standing request is precisely for such a subset. So this round makes that question
+answerable.
+
+**New tool — [scripts/research/zone-replay.js](../scripts/research/zone-replay.js)** (`make
+zone-replay`). Replays the live VRVP proximity rule across the whole 5m corpus at the live
+10-min poll cadence: rolling 14-day volume profile, `computeVRVPLevels`/`checkVRVPProximity`
+logic, one row per trigger with features known at trigger time and a symmetric ±k×ATR label
+resolved strictly afterwards. **237,735 signals, 2019-09 → 2026-07, 66% trigger rate.** This
+turns "wait 4 months for 800 live signals" into "20 minutes for 237,735" and is the capability
+whose absence let the order-flow premise run 3 months on assertion.
+
+*Fidelity deviations, disclosed:* log-price bucket grid at constant relative width (an absolute
+34.7 grid is 0.87% of price in 2019 and 0.055% today — no single rule spans the corpus
+otherwise); labels on 5m not 1m; no CVD/OI/session-VWAP (not available historically — taker-buy
+ratio, which CVD is built from, IS used); no confirmation gate or dedup, because this measures
+the SIGNAL, not the execution wrapper.
+
+**Validation against the live book.** In the live calendar window the replay reads 50.92%
+[49.92, 51.91] vs the live ledger's 46.07% [42.67, 49.50] measured from fire price — *not*
+overlapping. Diagnosed rather than waved through: applying a live-equivalent 12h zone cooldown
+to the replay in that window gives 48.38% [43.11, 53.69], which **does** overlap the live book.
+The live 814 is a small, heavily clustered, mildly unlucky draw; the 237,735-row estimate is the
+reliable one. Cooldown does not change the full-corpus result (50.18–51.18% at 1/4/12/24h).
+
+### The headline
+
+| cohort | n | hit | 95% CI | break-even (k=1) |
+|---|---|---|---|---|
+| **all replayed zone signals** | **237,735** | **50.40%** | **[50.20, 50.60]** | **60.65%** |
+| always-long benchmark | 237,735 | 49.86% | — | — |
+
+**The zone signal is a coin, to ±0.2pp, across 6.9 years and every regime.** Directional lift
+over always-long: **+0.54pp**. No zone type escapes: HVN-long 50.32%, HVN-short 50.47%,
+VAH-long 49.96%, VAH-short 51.19%, VAL-long 50.05%. No year escapes: 49.53% (2023) to 52.06%
+(2026). This is no longer a sample-size question.
+
+### Geometry cannot rescue it — the requirement table
+
+`fee_R = 0.0008 / stopFrac`, so break-even hit `= 0.5 × (1 + fee_R)`. Median ATR30m over the
+corpus is 0.454%.
+
+| stop width | stopFrac | fee (R) | break-even | signal short by |
+|---|---|---|---|---|
+| 0.216% (live plan) | 0.216% | 0.370R | **68.52%** | −18.12pp |
+| 1×ATR | 0.454% | 0.176R | 58.80% | −8.40pp |
+| 2×ATR | 0.909% | 0.088R | 54.40% | −4.00pp |
+| 3×ATR | 1.363% | 0.059R | 52.93% | −2.53pp |
+| 10×ATR | 4.543% | 0.018R | 50.88% | −0.48pp |
+
+For a 50.40% signal to break even the fee must be ≤0.0080R ⇒ **stop ≥10.00% of price = 22×ATR30m
+(≈$6,300 at BTC $63k)** — at which point the surviving "edge" is 0.4pp, indistinguishable from
+the 49.86% drift benchmark. **No geometry at any width makes this signal profitable.** This
+closes the spec 07.3 open question "geometry vs zone logic": it is the zone logic.
+
+### Selective prediction — can a model with an ABSTAIN option find a good subset?
+
+Purged walk-forward (embargo = one full label horizon), HistGradientBoosting, 7-day block
+bootstrap, and a **label-shuffle null through the identical pipeline** — the decisive control,
+because selecting the top 1% of 170,000 rows manufactures a high hit rate from noise.
+
+**META (accept the zone's direction, predict whether it wins) — refuted, and inverted.**
+Hit *falls* as confidence rises: 50.33% → 49.24% → 47.06% → 44.53% at coverage 1.00 → 0.10 →
+0.02 → 0.01, and sits **below its own null at every coverage**. There is nothing in the zone's
+direction to meta-label.
+
+**DIR (ignore the zone, predict direction) — real information, still unprofitable.** This is
+the one genuinely positive finding of the round:
+
+| coverage | n | hit | null (5 shuf) | always-long | break-even | net R |
+|---|---|---|---|---|---|---|
+| 1.00 | 170,000 | 50.36% | 49.83% | 49.77% | 61.38% | −0.2205 |
+| 0.10 | 17,000 | 51.76% | 49.46% | 50.54% | 62.99% | −0.2246 |
+| 0.05 | 8,501 | 52.91% | 49.49% | 49.11% | 63.68% | −0.2153 |
+| 0.01 | 1,700 | **56.47%** | 51.45% | 54.53% | **65.00%** | −0.1705 [−0.2825, −0.0397] |
+
+Monotone in coverage, beats its null everywhere, beats always-long. **This is a real directional
+edge.** It is also unprofitable, and the reason is structural:
+
+**ADVERSE COST SELECTION — the round's actual finding.** Break-even *rises* with confidence
+(61.38% → 65.00%) because the states the model is confident about are the **quiet** ones:
+median ATR falls 0.434% → 0.305% (−30%) from full coverage to the top 1%, and `fee_R = cost/ATR`,
+so the toll rises 0.228R → 0.300R. Accuracy gains 6.1pp; the hurdle gains 3.6pp. The signal
+starts 11pp behind and finishes 8.5pp behind. **Predictability and transaction cost are
+positively coupled** — the market is most forecastable exactly where it is most expensive to
+trade that forecast. No tuning removes this; it is a property of the cost model, not the
+predictor. (Linear corr(confidence, ATR) is only −0.007 — this is a tail effect, not a
+linear one, which is why no prior univariate test could have seen it.)
+
+### Selective prediction on plain price bars (rounds 1–5 feature set, new objective)
+
+| TF | k | best cell | hit | break-even | always-long | null max | net R |
+|---|---|---|---|---|---|---|---|
+| 1h | 3 | cov 0.05 | 54.30% | 52.32% | 52.04% | 48.53% | +0.0397 [−0.084, +0.166] |
+| 4h | 3 | cov 0.10 | 55.33% | 51.00% | **58.88%** | 50.76% | +0.0867 |
+| 4h | 1 | cov 0.05 | 55.19% | 52.54% | **56.15%** | 54.42% | +0.0530 |
+| 1h | 1 | cov 0.05 | 53.05% | 56.19% | 49.88% | 49.69% | −0.0628 |
+
+Both 4h cells **lose to always-long on their own selected bars** — the model finds favourable
+bars and then gives the advantage back by going short on some of them. Only **1h k=3 cov 0.05**
+beat break-even, always-long and every null shuffle simultaneously. Kill-tested:
+
+| Date | Hypothesis | n | Result | Verdict |
+|---|---|---|---|---|
+| 2026-08-03 | Zone signal has directional edge (definitive test) | 237,735 | 50.40% [50.20, 50.60] vs 60.65% break-even; +0.54pp over always-long | **Refuted — definitively** |
+| 2026-08-03 | Some zone TYPE has edge | 237,735 | all five within 1.2pp of 50% | **Refuted** |
+| 2026-08-03 | Geometry, not zone logic, is the problem | — | needs 22×ATR stop to break even; edge then = drift | **Refuted — it is the zone logic** |
+| 2026-08-03 | META-labelling the zone signal finds a good subset | 170,000 | 50.33%→44.53% as confidence rises; below null throughout | **Refuted, inverted** |
+| 2026-08-03 | A direction model on zone states finds a profitable subset | 170,000 | real edge (56.47% @1%, beats null 51.45% and always-long 54.53%) but break-even rises to 65.00% | **Refuted on economics — edge real, toll larger** |
+| 2026-08-03 | 1h k=3 selective (cov 0.05) is a viable edge | 2,081 | halves 48.75% / 59.85%; by year 2021 **39.34%**, 2022 49.13%, 2023 50.11%, 2024 **64.81%**, 2025 56.04%, 2026 57.20%; +0.040R vs the +0.25R bar | **Refuted — regime artefact**, same signature as the round-2 funding lead |
+
+*(The 6-seed stability check in that kill-test was void — `HistGradientBoostingClassifier` is
+deterministic on fixed data, so all six seeds returned identical numbers. Recorded as not-run
+rather than as a passed check.)*
+
+**FDR bookkeeping.** New hypothesis cells this round: 20 (selective on bars, 4 configs × 5
+coverages) + 12 (zone META/DIR × 6 coverages) + 6 (zone headline + 5 zone types) = **38**.
+**Cumulative family: 243 cells. Still 0 actionable.**
+
+### Round-6 conclusion
+
+The zone signal is not under-tuned, mis-parameterised, or badly gated. Measured at 237,735
+instances across every regime BTC has had, it is **a coin flip with a 60.65% toll**, and no
+geometry reaches it. The one real edge found anywhere in the round is inaccessible because it
+lives in the low-volatility states where cost-in-R is highest.
+
+**There is nothing here to tune into high-probability setups.** The honest options are (a) the
+order-book corpus, still the only untested feature family, decision date 2026-08-25 per 07.5;
+or (b) accept that at these horizons directional prediction is a coin and that the only thing in
+243 cells which reliably clears its own costs is **long exposure at multi-day horizons** — which
+is beta, not a signal, and needs no alert pipeline to capture.
