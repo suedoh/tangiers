@@ -31,7 +31,8 @@ not shipped.
 | 15 | Selective prediction on price bars (4 TF×k configs × 5 coverages) | 20 | 2026-08-03 round 6 |
 | 16 | Zone signal META + DIR selective (2 models × 6 coverages) | 12 | 2026-08-03 round 6 |
 | 17 | Zone replay headline + 5 zone-type cells | 6 | 2026-08-03 round 6 |
-| **Σ** | **hypothesis cells tested to date** | **243** | |
+| 18 | Long-only timing filter (3 TF×k configs × 4 coverages) | 12 | 2026-08-03 round 6b |
+| **Σ** | **hypothesis cells tested to date** | **255** | |
 
 Descriptive/diagnostic measurements (accounting reconciliations, calibration Brier/ECE,
 autocorrelation, walk-forward buckets, random-direction nulls, the random-entry MC
@@ -418,9 +419,35 @@ beat break-even, always-long and every null shuffle simultaneously. Kill-tested:
 deterministic on fixed data, so all six seeds returned identical numbers. Recorded as not-run
 rather than as a passed check.)*
 
+### Round 6b — the model as a long-only TIMING filter
+
+Motivated directly by the round-6 sweep, not invented afterwards: at 4h k=3 cov 0.10 the model
+hit 55.33% while **always-long on those same bars hit 58.88%** — it was selecting favourable
+bars and then giving the advantage back by going short on some. So split the two jobs: use the
+score for WHEN to be in the market, and always go long.
+
+At 4h k=3 this produced the strongest cell of the entire round — coverage 0.05: **hit 60.04%,
+net +0.1801R/trade vs always-long's +0.0182R, against a 48.07% null.** It clears break-even,
+clears always-long by 10×, and beats its null by 12pp. It fails only the block-bootstrap CI
+([−0.0927, +0.4222]) — and then dies completely on regime:
+
+| year | filtered hit | always-long that year | lift |
+|---|---|---|---|
+| 2022 | 60.71% | 45.32% | **+15.39pp** |
+| 2023 | 57.24% | 57.53% | −0.29pp |
+| 2024 | 83.19% | 58.38% | **+24.80pp** |
+| 2025 | 53.01% | 51.25% | +1.76pp |
+| 2026 | 16.13% | 48.43% | **−32.30pp** |
+
+**The whole result is 2024**, and **2026 — the regime closest to live conditions — is the worst
+year on record for it.** Chronological halves 54.07% / 65.99% confirm the instability. Refuted,
+same signature as the funding lead and the 1h k=3 lead. (1h k=3 and 4h k=2 long-only variants
+fail outright: per-trade CI includes zero at every coverage.)
+
 **FDR bookkeeping.** New hypothesis cells this round: 20 (selective on bars, 4 configs × 5
-coverages) + 12 (zone META/DIR × 6 coverages) + 6 (zone headline + 5 zone types) = **38**.
-**Cumulative family: 243 cells. Still 0 actionable.**
+coverages) + 12 (zone META/DIR × 6 coverages) + 6 (zone headline + 5 zone types) + 12 (long-only
+timing filter, 3 configs × 4 coverages) = **50**.
+**Cumulative family: 255 cells. Still 0 actionable.**
 
 ### Round-6 conclusion
 
@@ -432,5 +459,5 @@ lives in the low-volatility states where cost-in-R is highest.
 **There is nothing here to tune into high-probability setups.** The honest options are (a) the
 order-book corpus, still the only untested feature family, decision date 2026-08-25 per 07.5;
 or (b) accept that at these horizons directional prediction is a coin and that the only thing in
-243 cells which reliably clears its own costs is **long exposure at multi-day horizons** — which
+255 cells which reliably clears its own costs is **long exposure at multi-day horizons** — which
 is beta, not a signal, and needs no alert pipeline to capture.
