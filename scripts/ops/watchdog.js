@@ -54,7 +54,7 @@ const { execFileSync } = require('child_process');
 const { loadEnv, ROOT } = require('../lib/env');
 loadEnv();
 
-if (process.env.PRIMARY === 'false') {
+if (process.env.PRIMARY === 'false' && require.main === module) {
   console.log('[watchdog] PRIMARY=false — skipping');
   process.exit(0);
 }
@@ -67,6 +67,20 @@ const DOCKER_BIN      = fs.existsSync('/usr/local/bin/docker') ? '/usr/local/bin
 const STRIKES_TO_ALERT   = 2;               // 2 × 5-min cron = 10 min of confirmed failure
 const ALERT_COOLDOWN_MS  = 2 * 60 * 60 * 1000;
 const RECON_STALE_MIN    = 20;              // recon cadence is 3 min
+// Recon-window health (audit A2, 2026-08-03). 15 passes ≈ 45 min at the 3-min
+// cadence; 3 failures in that window ≈ 20%. Calibrated against the measured
+// record: 2026-08-03 ran at 32% (≈5/15 → strikes), 2026-07-19 at 4.0% and
+// 2026-07-25 at 4.2% (≈0.6/15 → stays green). A total outage is 15/15.
+const RECON_WINDOW_PASSES     = 15;
+const RECON_MAX_ERR_IN_WINDOW = 3;
+const RECON_PASS_GRACE_MS     = 60_000;     // a pass younger than this may still be running
+const RECON_TAIL_BYTES        = 65_536;     // ~15 passes incl. 403 stack traces
+const RECON_PASS_MARKER  = '─── BloFin reconciliation ─── ';
+const RECON_DONE_MARKER  = '─── Done. ───';
+// Any of: a non-zero summary count, a thrown error, or an HTTP status. The
+// `unexpected:` / bare-`Error:` / `blofin http NNN` arms are what the old
+// summary-only matcher missed entirely.
+const RECON_ERR_RE = /reconcile errors: [1-9]|resolve errors: [1-9]|^unexpected:|^\s*(?:[A-Za-z]*Error):|blofin http \d{3}/;
 const SPOOL_STALE_MIN    = 15;
 const BOOK_STATE         = path.join(ROOT, '.book-recorder-state.json');
 const BOOK_STALE_MIN     = 15;              // recorder writes one row per minute
@@ -152,30 +166,87 @@ async function checkMongo() {
   }
 }
 
+/**
+ * Health of the recent recon window, from the log text alone (pure — tested in
+ * test/watchdog-recon.test.js).
+ *
+ * Two things were wrong before (audit A2, 2026-08-03):
+ *
+ * 1. The matcher only knew `reconcile errors:` / `resolve errors:`. Those are
+ *    SUMMARY lines — a thrown error aborts the pass long before they are
+ *    written. A Cloudflare 403 (the dominant failure mode since 2026-07-10)
+ *    therefore produced a pass containing no matched string at all, and the
+ *    watchdog read that as healthy. Now a pass is healthy only if it COMPLETED
+ *    and logged no error: completion is the signal, absence of known strings
+ *    is not.
+ *
+ * 2. Only the LAST pass was inspected. The observed failure is intermittent —
+ *    on 2026-08-03, 40 of 124 cycles (32%) failed while the rest succeeded, so
+ *    a last-pass-only check flips green roughly two times in three and can
+ *    almost never reach the 2 consecutive strikes an alert needs. Now the last
+ *    RECON_WINDOW_PASSES (≈45 min) are counted and the class strikes at
+ *    RECON_MAX_ERR_IN_WINDOW. That fires on total outage (all failed) AND on
+ *    today's partial degradation, while a lone blip stays green.
+ *
+ * A pass still in flight is neither healthy nor failed — it is excluded until
+ * it has had RECON_PASS_GRACE_MS to finish.
+ */
+function evaluateReconLog(tail, { nowMs = Date.now() } = {}) {
+  const chunks = tail.split(RECON_PASS_MARKER).slice(1);
+  if (!chunks.length) return { ok: true, passes: 0, errored: 0 };
+
+  const window = chunks.slice(-RECON_WINDOW_PASSES);
+  const errors = [];
+  let counted = 0, stalled = null;
+
+  window.forEach((body, i) => {
+    const startedMs = Date.parse((body.slice(0, 30).trim().split(/\s/)[0]) || '');
+    const errLine   = body.split('\n').find(l => RECON_ERR_RE.test(l));
+    if (errLine) { counted++; errors.push(errLine.trim().slice(0, 160)); return; }
+    if (body.includes(RECON_DONE_MARKER)) { counted++; return; }
+
+    // Incomplete. The last pass may simply be running right now; anything
+    // older than the grace window, or followed by another pass, never finished.
+    const inFlight = i === window.length - 1
+      && Number.isFinite(startedMs) && nowMs - startedMs < RECON_PASS_GRACE_MS;
+    if (inFlight) return;
+    counted++;
+    const at = Number.isFinite(startedMs) ? new Date(startedMs).toISOString() : 'unknown time';
+    const msg = `pass at ${at} never completed`;
+    errors.push(msg);
+    if (i === window.length - 1) stalled = msg;
+  });
+
+  // A hung *current* pass is its own condition, not an error rate: recon is
+  // 3-min cadence, so the newest pass sitting unfinished means the runner is
+  // stuck now. Freshness alone would not catch it until RECON_STALE_MIN.
+  if (stalled) {
+    return { ok: false, passes: counted, errored: errors.length,
+      detail: `recon appears hung — most recent ${stalled}` };
+  }
+  if (errors.length >= RECON_MAX_ERR_IN_WINDOW) {
+    return {
+      ok: false, passes: counted, errored: errors.length,
+      detail: `recon running but erroring — ${errors.length}/${counted} of the last passes failed `
+            + `(~${Math.round(counted * 3)} min): "${errors[errors.length - 1]}"`,
+    };
+  }
+  return { ok: true, passes: counted, errored: errors.length };
+}
+
 function checkReconFresh() {
   try {
     const ageMin = (Date.now() - fs.statSync(RECON_LOG).mtimeMs) / 60_000;
     if (ageMin > RECON_STALE_MIN) {
       return { ok: false, detail: `blofin-recon.log last written ${ageMin.toFixed(0)} min ago (cadence: 3 min)` };
     }
-    // Freshness alone missed the 2026-07-04 E11000 loop: recon ran every
-    // 3 min but errored on every pass — watchdog said recon=ok throughout.
-    // Scan the last pass (final ~4KB) for error lines so runs-but-fails
-    // strikes the same class as doesn't-run. Two consecutive erroring
-    // passes 5 min apart → strike; the normal 2-strike alert flow applies.
     const fd  = fs.openSync(RECON_LOG, 'r');
     const sz  = fs.fstatSync(fd).size;
-    const len = Math.min(4096, sz);
+    const len = Math.min(RECON_TAIL_BYTES, sz);
     const buf = Buffer.alloc(len);
     fs.readSync(fd, buf, 0, len, sz - len);
     fs.closeSync(fd);
-    const tail     = buf.toString('utf8');
-    const lastPass = tail.slice(tail.lastIndexOf('─── BloFin reconciliation ───'));
-    const errLine  = lastPass.split('\n').find(l => /reconcile errors: [1-9]|resolve errors: [1-9]/.test(l));
-    if (errLine) {
-      return { ok: false, detail: `recon running but erroring — last pass: "${errLine.trim()}"` };
-    }
-    return { ok: true };
+    return evaluateReconLog(buf.toString('utf8'));
   } catch {
     return { ok: false, detail: 'blofin-recon.log missing' };
   }
@@ -413,4 +484,10 @@ async function main() {
   log(summary);
 }
 
-main().catch(e => { console.error('[watchdog] fatal:', e.message); process.exit(1); });
+// Pure evaluator exported for test/watchdog-recon.test.js. The cron entrypoint
+// below is gated so requiring this module never runs a health sweep.
+module.exports = { evaluateReconLog, RECON_WINDOW_PASSES, RECON_MAX_ERR_IN_WINDOW };
+
+if (require.main === module) {
+  main().catch(e => { console.error('[watchdog] fatal:', e.message); process.exit(1); });
+}

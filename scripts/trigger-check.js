@@ -1960,6 +1960,50 @@ function logTrade(price, trigger, setup) {
   return id;
 }
 
+// ─── Autotrade settlement ────────────────────────────────────────────────────
+//
+// The autotrade promise is not just telemetry. Its chain carries, in order:
+// entry → fetch actual fill → risk trim → **standalone SL** → verify SL → TP
+// ladder; and its .then/.catch write executionStatus and post the dead-letter
+// alert. finishCron() ends the run with process.exit(), so anything still in
+// flight when main() resolves is killed mid-sequence — potentially between the
+// entry fill and the SL that protects it, with no record that it happened.
+//
+// Measured (audit A2 → A1, refactors/btc-audit-2026-08-03.md): 3 of the 13
+// signals after cb38c94 (the cron-exit-discipline fix, which removed the
+// process leak that had been masking this) carry no executionStatus at all,
+// versus 0 of the 173 before it — two-sided Fisher p=2.7e-4.
+//
+// Pure with respect to side effects: the caller decides what to do with the
+// unsettled list. Unit-tested in test/autotrade-settle.test.js.
+const AUTOTRADE_SETTLE_MS = 120_000; // >> the ~5s happy path, << the 10-min cadence
+
+async function settleAutotrades(pending, { timeoutMs = AUTOTRADE_SETTLE_MS } = {}) {
+  const t0 = Date.now();
+  if (!pending.length) return { settled: 0, unsettled: [], timedOut: false, ms: 0 };
+
+  let timer;
+  const deadline = new Promise(resolve => {
+    timer = setTimeout(() => resolve('__timeout__'), timeoutMs);
+    if (typeof timer.unref === 'function') timer.unref();
+  });
+  const outcome = await Promise.race([
+    Promise.allSettled(pending.map(p => p.promise)).then(() => '__settled__'),
+    deadline,
+  ]);
+  clearTimeout(timer);
+
+  // A rejected chain is still SETTLED — the caller's .catch already stamped it
+  // 'dropped'. Only never-resolved calls are unknown-state.
+  const unsettled = pending.filter(p => !p.settled).map(p => p.signalId);
+  return {
+    settled: pending.length - unsettled.length,
+    unsettled,
+    timedOut: outcome === '__timeout__',
+    ms: Date.now() - t0,
+  };
+}
+
 // ─── Execution disposition tagging ───────────────────────────────────────────
 //
 // Records whether a logged signal actually reached the exchange via autotrade.
@@ -2612,6 +2656,9 @@ async function gatherNative() {
 async function main() {
   log(`Stage 1 trigger check starting (source: ${DATA_SOURCE})...`);
 
+  // In-flight autotrade calls, settled before this run is allowed to exit.
+  const pendingAutotrades = [];
+
   const { price, indicators, client, restoreUserTF } =
     DATA_SOURCE === 'native' ? await gatherNative() : await gatherTV();
 
@@ -2823,9 +2870,12 @@ async function main() {
           if (!indicators.oiTrend || indicators.oiTrend === 'flat') {
             markPending(levelKey, setup.direction, trigger, indicators);
           }
-          // Autotrade — fire-and-forget, gated by BLOFIN_AUTOTRADE=true.
-          // Errors here MUST NOT block Discord posting or trades.json.
-          autotrade.autotrade({
+          // Autotrade — runs concurrently with the rest of the cycle so it can
+          // never delay a Discord post or trades.json, but it is SETTLED before
+          // the process is allowed to exit (settleAutotrades, below). Errors
+          // here MUST NOT block Discord posting or trades.json.
+          const atRec = { signalId, settled: false };
+          atRec.promise = autotrade.autotrade({
             signalId, direction: setup.direction, setupType: setup.setupType,
             entry: setup.entry, stop: setup.stop,
             tp1: setup.tp1Price, tp2: setup.tp2Price, tp3: setup.tp3Price,
@@ -2836,7 +2886,9 @@ async function main() {
             else                { const det = `${r.orders?.length || 0} orders${r.unsynced ? ' (mongo-down, spooled)' : ''}${r.marginTrim ? ` (margin-trimmed ${r.marginTrim})` : ''}`;
                                   log(`Autotrade placed ${det} for ${signalId}`); markExecution(signalId, 'placed', det);
                                   if (r.unsynced) postAutotradeDegradedNote(signalId, r); }
-          }).catch(e => { log(`Autotrade error: ${e.message}`); markExecution(signalId, 'dropped', e.message); postAutotradeDeadLetter(signalId, setup, trigger, e.message); });
+          }).catch(e => { log(`Autotrade error: ${e.message}`); markExecution(signalId, 'dropped', e.message); postAutotradeDeadLetter(signalId, setup, trigger, e.message); })
+            .finally(() => { atRec.settled = true; });
+          pendingAutotrades.push(atRec);
         }
         triggered = true;
       }
@@ -2870,8 +2922,32 @@ async function main() {
   // Restore the user's chart TF before releasing the lock so manual analysis
   // continues on whatever TF they were using.
   await restoreUserTF();
-  log('Stage 1 complete.');
   if (DATA_SOURCE !== 'native') releaseLock('btc-trigger');
+
+  // Settle autotrade LAST — after the CDP lock is released, so a slow exchange
+  // can never hold the TradingView mutex, but before main() resolves and
+  // finishCron() calls process.exit(). See settleAutotrades().
+  if (pendingAutotrades.length) {
+    const s = await settleAutotrades(pendingAutotrades);
+    if (s.timedOut) {
+      log(`Autotrade settle TIMEOUT after ${AUTOTRADE_SETTLE_MS}ms — unsettled: ${s.unsettled.join(', ')}`);
+      for (const id of s.unsettled) {
+        markExecution(id, 'dropped', `settle timeout after ${AUTOTRADE_SETTLE_MS}ms — EXCHANGE STATE UNKNOWN, verify manually`);
+      }
+      try {
+        notify('error', [
+          '❌ **ERROR — Autotrade did not settle before exit**',
+          `**What:** ${s.unsettled.length} autotrade call(s) still in flight after ${AUTOTRADE_SETTLE_MS / 1000}s: ${s.unsettled.join(', ')}`,
+          '**Risk:** an entry may have filled without its standalone SL placed. Tagged `executionStatus=dropped`.',
+          '**Fix:** check open BloFin positions and pending TPSL now (`make blofin-status`); recon\'s protection invariant is the backstop.',
+        ].join('\n'));
+      } catch {}
+    } else {
+      log(`Autotrade settled ${s.settled} call(s) in ${s.ms}ms`);
+    }
+  }
+
+  log('Stage 1 complete.');
 }
 
 // ─── Entry Point ──────────────────────────────────────────────────────────────
@@ -2918,4 +2994,7 @@ module.exports = {
   findBlockingCell,
   markCellFired,
   pruneCells,
+  // Autotrade settlement (audit A1) — pure, no fs/network side effects.
+  AUTOTRADE_SETTLE_MS,
+  settleAutotrades,
 };
