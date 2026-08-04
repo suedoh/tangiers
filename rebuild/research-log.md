@@ -33,7 +33,9 @@ not shipped.
 | 17 | Zone replay headline + 5 zone-type cells | 6 | 2026-08-03 round 6 |
 | 18 | Long-only timing filter (3 TF×k configs × 4 coverages) | 12 | 2026-08-03 round 6b |
 | 19 | Funding carry (3 fee models × 6 hold periods) | 18 | 2026-08-03 round 7 |
-| **Σ** | **hypothesis cells tested to date** | **273** | |
+| 20 | Cross-sectional carry (2 fee models) | 2 | 2026-08-04 round 8a |
+| 21 | Swing: trailing-stop grid ×5 + symmetric always-long ×3 | 8 | 2026-08-04 round 8b |
+| **Σ** | **hypothesis cells tested to date** | **283** | |
 
 Descriptive/diagnostic measurements (accounting reconciliations, calibration Brier/ECE,
 autocorrelation, walk-forward buckets, random-direction nulls, the random-entry MC
@@ -553,3 +555,101 @@ zone pipeline.
    negative-funding run: −1.037% of notional.
 4. Risk moves rather than disappears: margin/liquidation on the perp leg, two-venue operational
    risk, and basis convergence — not price direction.
+
+## Round 8 — the two operator questions: cross-sectional carry, and swing trading (2026-08-04)
+
+Operator asked whether BloFin is truly ruled out, and whether swing trading changes the answer.
+Both tested. Both refuted, for different reasons.
+
+### 8a — Cross-sectional funding carry (the only carry executable on BloFin alone)
+
+BloFin has no spot and no dated futures, so round 7's BTC cash-and-carry has no second leg
+there. But it lists 88 perps whose funding differs enormously — measured live 2026-08-04:
+ZK −16.47bp/8h (−180%/yr) to M +10.97bp/8h (+120%/yr), a **300%/yr cross-sectional spread**.
+So: long the perps paying you to be long, short the perps paying you to be short, dollar-neutral,
+every leg a perp.
+
+Tools: [xs-carry-fetch.js](../scripts/research/xs-carry-fetch.js) +
+[xs-carry-test.js](../scripts/research/xs-carry-test.js). Universe: the **81 perps tradeable on
+both venues** (verified by intersecting BloFin's instrument list with Binance's, not assumed).
+History from Binance — BloFin serves none. 80 symbols × >500 settlements, 2022-01 → 2026-08,
+10,196-point settlement grid. Config: 5 legs/side, daily rebalance, ranked on 21-settlement
+trailing funding, ranking strictly on information prior to each period.
+
+| fee | n | gross carry | basket price P&L | cost | net | win% | 95% block CI |
+|---|---|---|---|---|---|---|---|
+| maker 2bp | 1,951 | +0.0639%/day | +0.0475%/day | 0.080% | **+11.5%/yr** | 50% | **[−29.4, +52.7]** |
+| taker 6bp | 1,951 | +0.0639%/day | +0.0475%/day | 0.240% | **−46.9%/yr** | 46% | [−87.0, −3.8] |
+
+**The carry is real — and the hedge is not.** This is the whole finding:
+
+| | round 7 (BTC spot vs perp) | round 8 (alt vs alt) |
+|---|---|---|
+| legs | **same asset** | different coins |
+| un-hedged price noise ÷ carry | **0.4×** | **39.5×** |
+
+sd(price P&L) is 2.52% per period against a carry of 0.064%. The dollar-neutral basket is not
+risk-neutral, so the funding is drowned by idiosyncratic co-movement. Over the full 4.5 years the
+maker-fee equity curve compounds to **×0.992 — flat — with a −76.1% maximum drawdown**, worst
+single day −12.18%. At taker fees, which is the realistic assumption on thin alt perps, it is
+−46.9%/yr with a CI excluding zero on the wrong side.
+
+Regime (maker): 2022 +42.6%, 2023 +52.7%, **2024 −41.4%**, 2025 +9.8%, 2026 +6.9%.
+
+**Verdict: refuted.** Extreme negative funding is compensation for a token in freefall, not a
+mispricing — you collect 180%/yr while the price halves. Round 7's hedge worked because both
+legs were the same asset; nothing on BloFin reproduces that.
+
+### 8b — Swing trading
+
+Does the lower fee bar at multi-day horizons (break-even 59.4% at 30m → 50.3% at 1d) produce a
+business? Benchmark is **buy-and-hold**, not zero — any long-biased rule flatters itself in a
+window where BTC rose. BTC daily 2019-09 → 2026-07, 2,515 bars.
+
+**Buy & hold: CAGR 35.5%, max drawdown −76.7%, Sharpe 0.81.**
+
+Long with a *trailing* stop, exit on trail, breakout re-entry, fees both ways:
+
+| trail | trades | win% | CAGR | max DD | Sharpe | time in mkt | vs buy&hold |
+|---|---|---|---|---|---|---|---|
+| 1×ATR | 37 | 32.4% | −1.5% | −27.0% | −0.05 | 2% | −36.9pp |
+| 2×ATR | 22 | 36.4% | +1.1% | −39.8% | 0.15 | 6% | −34.4pp |
+| 3×ATR | 17 | 23.5% | −2.1% | −53.3% | 0.01 | 11% | −37.6pp |
+| 5×ATR | 10 | 20.0% | **+11.9%** | −46.6% | 0.54 | 19% | −23.5pp |
+| 8×ATR | 8 | 25.0% | +8.0% | −61.0% | 0.40 | 27% | −27.5pp |
+
+**Every configuration loses to buy-and-hold by 23–38pp of CAGR**, and win rates are **20–36%** —
+trend-following's profile is many small losses and few large wins, the opposite of the operator's
+80–90% target. The genuine benefit is risk, not return: the 1×ATR trail cuts max drawdown from
+−76.7% to −27.0%. *(Caveat: the breakout re-entry rule is strict — requiring a reclaim of the
+prior peak keeps time-in-market at 2–27%, which depresses CAGR. A looser re-entry would trade
+more; it would not change the ordering, since every exit pays fees the benchmark does not.)*
+
+**What does work at daily horizons is drift, and it needs no signal:**
+
+| k | n | always-long hit | break-even | net R/trade |
+|---|---|---|---|---|
+| 1 | 2,469 | 52.77% | ~51.6% | **+0.0303** |
+| 2 | 2,421 | 55.39% | ~50.8% | **+0.0953** |
+| 3 | 2,244 | 57.22% | ~50.5% | **+0.1359** |
+
+Positive at every k — this is round 3's result restated as money. But **52.8–57.2% is not
+80–90%**, and reaching 80–90% requires skewing the geometry, which gives the expectancy straight
+back (measured: 1:9 target:stop → 90.0% wins at −0.0254R).
+
+| Date | Hypothesis | n | Result | Verdict |
+|---|---|---|---|---|
+| 2026-08-04 | Cross-sectional funding carry is executable and profitable on BloFin | 1,951 periods, 80 symbols | maker +11.5%/yr CI [−29.4, +52.7]; taker −46.9%/yr; equity ×0.992 over 4.5y; maxDD −76.1%; price noise **39.5×** the carry | **Refuted — no real hedge** |
+| 2026-08-04 | Swing trading (trailing stop, multi-day) beats buy-and-hold | 2,515 daily bars | every trail 23–38pp of CAGR **worse**; win rates 20–36% | **Refuted** |
+| 2026-08-04 | Always-long at daily barriers clears its costs | 2,244–2,469 | +0.030 / +0.095 / +0.136 R/trade at k=1/2/3 | **Supported — but it is drift, not signal, and it is 53–57% not 80–90%** |
+
+**FDR bookkeeping.** New cells: 2 (xs-carry fee models) + 5 (trailing-stop grid) + 3 (symmetric
+always-long) = **10**. **Cumulative family: 283 cells.**
+
+### Where this leaves BloFin
+
+Every carry structure needs two legs that are the *same risk*. BloFin lists one instrument type —
+perpetuals — so the only pairs available are different coins, and round 8a measures exactly how
+badly that fails (39.5× noise-to-carry). The remaining honest options on BloFin are directional
+(refuted at 237,735 instances, round 6) or long-biased beta (works, ~53–57% win rate, and is
+just owning BTC with liquidation risk attached).
