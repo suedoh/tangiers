@@ -35,7 +35,8 @@ not shipped.
 | 19 | Funding carry (3 fee models × 6 hold periods) | 18 | 2026-08-03 round 7 |
 | 20 | Cross-sectional carry (2 fee models) | 2 | 2026-08-04 round 8a |
 | 21 | Swing: trailing-stop grid ×5 + symmetric always-long ×3 | 8 | 2026-08-04 round 8b |
-| **Σ** | **hypothesis cells tested to date** | **283** | |
+| 22 | BloFin-native carry (3 fee cases × 3 holds) | 9 | 2026-08-04 round 9 |
+| **Σ** | **hypothesis cells tested to date** | **292** | |
 
 Descriptive/diagnostic measurements (accounting reconciliations, calibration Brier/ECE,
 autocorrelation, walk-forward buckets, random-direction nulls, the random-entry MC
@@ -653,3 +654,92 @@ perpetuals — so the only pairs available are different coins, and round 8a mea
 badly that fails (39.5× noise-to-carry). The remaining honest options on BloFin are directional
 (refuted at 237,735 instances, round 6) or long-biased beta (works, ~53–57% win rate, and is
 just owning BTC with liquidation risk attached).
+
+## Round 9 — the carry on BLOFIN'S OWN RATES, after a correction of record (2026-08-04)
+
+### Correction first
+
+Round 8 concluded BloFin has no spot market and therefore no second leg, and that conclusion was
+stated to the operator as settled. **It was wrong.** `/api/v1/market/instruments?instType=SPOT`
+silently ignores `instType` and returns the swap list, which was read as "no spot on the venue".
+BloFin's spot API is a **separate namespace** — `/api/v1/spot/market/*` — carrying **241 spot
+instruments in prod and 27 in demo, BTC-USDT present in both**, with a live order book and a
+`accountType=spot` wallet visible on the demo key. This is precisely the failure mode
+[CLAUDE.md](../CLAUDE.md) warns about ("BloFin docs are wrong — probe first, trust later"),
+committed by treating one endpoint's response as authoritative for the whole exchange.
+
+**Consequence: round 7's cash-and-carry IS single-venue executable on BloFin.** Round 8a
+(cross-sectional alt carry, refuted at 39.5× noise-to-carry) becomes moot — the real hedge, same
+asset on both legs, is available and needs no second venue.
+
+### Why Binance's number does not transfer
+
+Funding is venue-specific. Spot-checked 2026-08-04: **BloFin −7.0%/yr while Binance's trailing 90
+settlements ran +6.34%/yr** — same asset, ~13pp apart. So round 7's economics were re-run on
+BloFin's own book. Tool: [blofin-carry-test.js](../scripts/research/blofin-carry-test.js).
+Data: BloFin public endpoints, 1,599 settlements + aligned spot/perp 8h candles,
+**2025-02-18 → 2026-08-04** (500 days — the API's depth; Binance gave 7 years).
+
+| | BloFin | Binance (round 7 full sample) |
+|---|---|---|
+| mean funding / 8h | 0.568 bp = **6.22%/yr** | 1.065 bp = 11.67%/yr |
+| settlements positive | **71.8%** | 85.5% |
+| basis P&L per trade | **0.000–0.002%** | 0.000–0.002% |
+
+**The hedge works identically** — same asset both legs, price cancels. That was never the
+question; the carry level was.
+
+### Economics on BloFin rates (return on capital: spot 1.0× + perp margin at 10×)
+
+| fees | hold | n | carry | cost | net/trade | annualised | win% | 95% block CI |
+|---|---|---|---|---|---|---|---|---|
+| matched maker (2bp/2bp) | 7d | 76 | 0.119% | 0.080% | +0.036% | **+1.89%** | 66% | **[0.2, 3.5]** |
+| matched maker | 15d | 35 | 0.254% | 0.080% | +0.159% | **+3.87%** | 74% | **[1.5, 6.2]** |
+| matched maker | 30d | 17 | 0.511% | 0.080% | +0.394% | **+4.80%** | **76%** | **[1.5, 7.8]** |
+| spot 10bp / all taker | 15d | 35 | 0.254% | 0.240% | +0.014% | +0.33% | 63% | [−1.9, 2.5] |
+| spot 10bp / all taker | 30d | 17 | 0.511% | 0.240% | +0.249% | +3.03% | 71% | [−0.3, 6.1] |
+| spot 10bp / all taker | 7d | 76 | 0.119% | 0.240% | −0.109% | **−5.69%** | 21% | [−7.3, −4.1] |
+
+All three matched-maker CIs exclude zero. Every taker/10bp CI includes it.
+
+### The regime risk is recent and large
+
+| month | rate | annualised | % positive |
+|---|---|---|---|
+| 2025-08 | 1.482 bp | +16.2% | 99% |
+| 2026-02 | 0.435 bp | +4.8% | 79% |
+| **2026-03** | −0.548 bp | **−6.0%** | **15%** |
+| **2026-04** | −0.809 bp | **−8.9%** | **7%** |
+| **2026-05** | −0.401 bp | −4.4% | 20% |
+| **2026-06** | −0.174 bp | −1.9% | 27% |
+| 2026-07 | 0.496 bp | +5.4% | 70% |
+
+**Four consecutive months (2026-03 → 06) of inverted funding**, bottoming at 7% of settlements
+positive. A position held through that window pays rather than collects. The gate's job is to be
+flat in exactly those months.
+
+| Date | Hypothesis | n | Result | Verdict |
+|---|---|---|---|---|
+| 2026-08-04 | BloFin has no spot leg (round 8 claim) | — | 241 prod / 27 demo SPOT instruments under `/api/v1/spot/*` | **RETRACTED — the claim was false** |
+| 2026-08-04 | Carry clears costs on BloFin's own rates at maker fees | 17–76 trades | +1.89 / +3.87 / **+4.80%/yr** at 7/15/30d, all CIs excluding zero, 66–76% win | **Supported** |
+| 2026-08-04 | …at taker or 10bp spot fees | 17–76 | +3.03%/yr at 30d, CI [−0.3, 6.1]; **−5.69%/yr** at 7d | **Not supported — passive fills are a precondition** |
+
+**Two unresolved inputs, both material.**
+1. **BloFin spot fees are UNVERIFIED.** No fee-rate endpoint exists (`/account/fee-rate` and
+   variants all return 152404 "not supported"). The matched-maker row assumes 2bp spot maker by
+   analogy with the measured perp fee. That assumption is the difference between +4.80% with a CI
+   excluding zero and +3.03% with a CI including it. It can only be settled by measuring an actual
+   spot fill.
+2. **n=17 at 30-day holds**, and the 7-day block bootstrap is too tight when the hold exceeds the
+   block. Treat the CIs as optimistic; the monthly regime table needs no bootstrap and is the
+   honest view.
+
+### Engine re-pointed
+
+`scripts/carry/monitor.js` was built reading **Binance** and has been corrected to read BloFin —
+the execution venue — for spot, perp and funding. This changed its live decision, which is the
+point: on Binance's rate it opened a position (net 4.03%/yr); on BloFin's actual rate it computes
+net 3.02%/yr and **correctly stays flat** against the 4% gate. Gating on the wrong venue's funding
+would have opened the trade during exactly the months BloFin was paying to stay out.
+
+**FDR bookkeeping.** New cells: 9 (3 fee cases × 3 holds). **Cumulative family: 292 cells.**

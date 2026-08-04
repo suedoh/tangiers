@@ -95,21 +95,40 @@ const readJson = (f, d) => { try { return JSON.parse(fs.readFileSync(f, 'utf8'))
 const writeJson = (f, o) => { if (!DRY) fs.writeFileSync(f, JSON.stringify(o, null, 2)); };
 
 // ─── Market snapshot ─────────────────────────────────────────────────────────
+//
+// Read from BLOFIN, the execution venue — not Binance. Funding is venue-specific
+// and the gap is not cosmetic: measured 2026-08-04, BloFin BTC-USDT sat at
+// −7.0%/yr while Binance's trailing 90 settlements ran +6.34%/yr, ~13pp apart on
+// the same asset. Round 9 measured BloFin's own 500-day history at 6.22%/yr vs
+// Binance's 11.67% full-sample, with a four-month inversion (2026-03→06) that
+// Binance's series does not show the same way. Gating on the wrong venue's rate
+// would open the trade in exactly the months BloFin was paying us to stay out.
+//
+// Both legs live on BloFin: spot BTC-USDT (/api/v1/spot/market/*, a SEPARATE
+// namespace from the swap API) and perp BTC-USDT. Same asset both sides, which
+// is what makes the hedge real — round 8a measured cross-coin "hedges" at 39.5×
+// noise-to-carry versus 0.4× here.
+const BLOFIN_HOST = process.env.BLOFIN_ENV === 'prod'
+  ? 'https://openapi.blofin.com' : 'https://demo-trading-openapi.blofin.com';
+
 async function snapshot() {
-  const [spotT, perpP, fundHist] = await Promise.all([
-    get('https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT'),
-    get('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT'),
-    get(`https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=${TRAIL_SETTLES}`),
+  const [spotT, perpT, fundHist] = await Promise.all([
+    get(`${BLOFIN_HOST}/api/v1/spot/market/tickers?instType=SPOT&instId=BTC-USDT`),
+    get(`${BLOFIN_HOST}/api/v1/market/tickers?instType=SWAP&instId=BTC-USDT`),
+    get(`${BLOFIN_HOST}/api/v1/market/funding-rate-history?instId=BTC-USDT&limit=100`),
   ]);
-  const spot = Number(spotT.price);
-  const mark = Number(perpP.markPrice);
-  const rates = fundHist.map(f => Number(f.fundingRate)).filter(Number.isFinite);
-  if (!(spot > 0) || !(mark > 0) || rates.length < 10) throw new Error('incomplete market snapshot');
-  const meanRate = rates.reduce((s, x) => s + x, 0) / rates.length;
+  const pick = (j, id) => (j.data || []).find(x => x.instId === id) || (j.data || [])[0];
+  const s = pick(spotT, 'BTC-USDT'), p = pick(perpT, 'BTC-USDT');
+  const spot = Number(s?.last), mark = Number(p?.last);
+  const hist = (fundHist.data || []).map(x => ({ t: Number(x.fundingTime), r: Number(x.fundingRate) }))
+    .filter(x => Number.isFinite(x.r)).sort((a, b) => b.t - a.t);
+  const rates = hist.slice(0, TRAIL_SETTLES).map(x => x.r);
+  if (!(spot > 0) || !(mark > 0) || rates.length < 10) throw new Error('incomplete BloFin market snapshot');
+  const meanRate = rates.reduce((s2, x) => s2 + x, 0) / rates.length;
   return {
     spot, mark,
     basis: (mark - spot) / spot,
-    nextFunding: Number(perpP.lastFundingRate),
+    nextFunding: hist[0].r,
     trailMean: meanRate,
     trailAnn: meanRate * 3 * 365,
     posShare: rates.filter(x => x > 0).length / rates.length,
