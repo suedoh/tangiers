@@ -32,7 +32,8 @@ not shipped.
 | 16 | Zone signal META + DIR selective (2 models × 6 coverages) | 12 | 2026-08-03 round 6 |
 | 17 | Zone replay headline + 5 zone-type cells | 6 | 2026-08-03 round 6 |
 | 18 | Long-only timing filter (3 TF×k configs × 4 coverages) | 12 | 2026-08-03 round 6b |
-| **Σ** | **hypothesis cells tested to date** | **255** | |
+| 19 | Funding carry (3 fee models × 6 hold periods) | 18 | 2026-08-03 round 7 |
+| **Σ** | **hypothesis cells tested to date** | **273** | |
 
 Descriptive/diagnostic measurements (accounting reconciliations, calibration Brier/ECE,
 autocorrelation, walk-forward buckets, random-direction nulls, the random-entry MC
@@ -461,3 +462,94 @@ order-book corpus, still the only untested feature family, decision date 2026-08
 or (b) accept that at these horizons directional prediction is a coin and that the only thing in
 255 cells which reliably clears its own costs is **long exposure at multi-day horizons** — which
 is beta, not a signal, and needs no alert pipeline to capture.
+
+## Round 7 — funding CARRY, not funding as a predictor (2026-08-03)
+
+**Different in kind from rounds 1–6.** Those asked "can we predict direction?" — answered no
+across 255 cells. This asks a structural question with no forecast in it: hold long spot +
+short perp, collect the 8-hourly funding the crowded side pays, and see whether the payment
+exceeds the cost of holding both legs. Price direction cancels between the legs.
+
+**Not to be confused with round 2's F1–F6**, which used funding as a *directional predictor* and
+was refuted. This captures the payment itself.
+
+Tool: [scripts/research/carry-test.js](../scripts/research/carry-test.js). Data: 7,538 funding
+settlements 2019-09 → 2026-07, plus Binance spot and perp 8h closes (7,544 bars each), aligned
+to settlement.
+
+### The hedge works — this is the part rounds 1–6 could never achieve
+
+| | value |
+|---|---|
+| mean funding / 8h | **1.065 bp** = **11.67% annualised** (full sample) |
+| settlements positive | 85.5% |
+| **basis P&L per trade** | **0.000–0.002%** — direction genuinely cancels |
+| \|Δbasis\| over 7d, p95 | 0.096% vs a 7-day carry of 0.224% ⇒ **noise is 0.4× the signal** |
+
+That last row is the inversion of every prior round: here the payment is *larger* than the
+noise around it. Nothing in 255 directional cells had that property.
+
+**Break-even hold** (round trip = 4 legs): taker 32bp → 10.0 days · mixed 20bp → 6.3 days ·
+maker 8bp → 2.5 days.
+
+**Full-sample simulated carry, non-overlapping, return on capital (spot 1.0× + perp margin at
+10×), net of all four legs:**
+
+| fee model | hold | n | net/trade | annualised | win% | 95% block CI (ann.) |
+|---|---|---|---|---|---|---|
+| taker | 90×8h (30d) | 83 | +0.585% | **+7.12%** | 74.7% | [4.33, 10.34] |
+| mixed | 90×8h | 83 | +0.694% | **+8.45%** | 86.7% | [5.65, 11.77] |
+| maker | 90×8h | 83 | +0.803% | **+9.77%** | 90.4% | [6.98, 13.12] |
+
+**These are the first CIs excluding zero anywhere in spec 07.** Short holds are strongly
+negative at every fee model (3×8h taker = −95% annualised) — the cost is fixed and the carry is
+per-period, so this is a hold-duration trade, not a signal.
+
+### The decay is the whole story
+
+| year | mean bp/8h | annualised | % settlements positive |
+|---|---|---|---|
+| 2020 | 1.570 | 17.19% | 85.7% |
+| 2021 | 2.795 | **30.61%** | 92.7% |
+| 2022 | 0.380 | 4.16% | 77.9% |
+| 2023 | 0.718 | 7.87% | 89.9% |
+| 2024 | 1.089 | 11.92% | 91.6% |
+| 2025 | 0.468 | 5.13% | 87.1% |
+| 2026 | **0.167** | **1.83%** | **66.7%** |
+
+The 11.67% full-sample figure is carried by 2020–21. Monotone compression since — the signature
+of a well-known trade being arbitraged. Net-of-cost by year at hold=90: 2021 +22.9%, 2024 +7.1%,
+2025 +1.0%, **2026 −2.5%** (taker) / +0.2% (maker).
+
+**Restricted to the regime that matters (2024-08 →, n=2,178 settlements, gross carry 4.85%):**
+
+| hold | taker | mixed | maker |
+|---|---|---|---|
+| 45×8h (15d) | −2.67% | −0.02% | +2.64% |
+| 90×8h (30d) | +0.87% | +2.19% | **+3.52%** |
+| 180×8h (60d) | +2.64% | +3.30% | **+3.96%** |
+
+### Verdict
+
+| Date | Hypothesis | n | Result | Verdict |
+|---|---|---|---|---|
+| 2026-08-03 | Delta-neutral funding carry covers its costs | 7,538 settlements / 83 non-overlapping 30d trades | full sample +7.1 to +9.8% ann, CI excludes zero, basis P&L ≈ 0 | **Supported — first cell in spec 07 to clear** |
+| 2026-08-03 | …and is still viable in the current regime | 2,178 settlements | 2026 gross carry 1.83%; net +3.5–4.0% (maker, 30–60d holds), ~0% mixed, **negative at taker** | **Marginal — pays roughly the risk-free rate** |
+
+**Honest reading.** The trade is real, structural, and direction-neutral — everything rounds 1–6
+were not. It has also been arbitraged down to approximately the return on T-bills, requires
+fully passive execution on both legs to stay positive, and needs 30–60 day holds. It is a
+*carry* business, not a signal business, and it competes with cash rather than with the old
+zone pipeline.
+
+**Caveats before anyone sizes this.**
+1. **Executability blocker:** BloFin is futures-only in this setup. The long-spot leg needs a
+   spot venue and a second set of credentials/reconciliation. That is real infrastructure, not a
+   config change.
+2. The 7-day block bootstrap is **too tight** at 30–60 day holds (blocks shorter than the hold).
+   Treat the full-sample CIs as optimistic; the year table, which needs no bootstrap, is the
+   honest view.
+3. Funding was negative on 14.5% of settlements overall and **33% in 2026**. Worst cumulative
+   negative-funding run: −1.037% of notional.
+4. Risk moves rather than disappears: margin/liquidation on the perp leg, two-venue operational
+   risk, and basis convergence — not price direction.
