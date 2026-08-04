@@ -129,6 +129,15 @@ book-report-dry: ## Preview the weekly corpus report without posting
 zone-replay: ## Replay the VRVP zone signal over the full 5m corpus (~20 min, 237k signals)
 	@$(NODE) --max-old-space-size=8192 $(TRADING)/scripts/research/zone-replay.js --k 1
 
+carry: ## Run one carry-engine cycle now (paper; opens/holds/closes per the gate)
+	@$(NODE) $(TRADING)/scripts/carry/monitor.js
+
+carry-status: ## Show the carry engine's open position and realised ledger
+	@$(NODE) $(TRADING)/scripts/carry/monitor.js --status
+
+carry-test: ## Re-measure funding carry over the full history (round 7)
+	@$(NODE) $(TRADING)/scripts/research/carry-test.js
+
 report: ## Run the weekly performance report now and post to #btc-backtest
 	@$(NODE) $(TRADING)/scripts/weekly-report.js
 

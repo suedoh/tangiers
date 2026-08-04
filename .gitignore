@@ -46,3 +46,7 @@ rebuild/tools/klines-*.json
 data/orderbook/
 .book-recorder-state.json
 .discord-bot-health.json
+
+# Carry engine (paper) — runtime state + ledger
+.carry-state.json
+carry-trades.json

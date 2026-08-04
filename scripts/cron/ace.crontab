@@ -74,3 +74,11 @@
 0 8 * * 1 node /app/scripts/research/book-report.js >> /app/logs/book-report.log 2>&1
 
 # busybox crond requires a trailing newline below
+
+# Carry engine — delta-neutral funding capture, PAPER. Hourly: the gate is
+# evaluated continuously but the trade is a 30-day hold, so most cycles are
+# no-ops. Needs no CDP and no exchange credentials (Binance public data only),
+# so it lives in the container. See scripts/carry/monitor.js.
+0 * * * * node /app/scripts/carry/monitor.js >> /app/logs/carry.log 2>&1
+
+# busybox crond requires a trailing newline below
