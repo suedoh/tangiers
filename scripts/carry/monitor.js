@@ -14,8 +14,10 @@
  * with price direction cancelling between the legs (measured basis P&L per trade:
  * 0.000–0.002%).
  *
- * This engine runs that trade on PAPER against live Binance public data. It holds
- * no credentials, places no orders, and cannot move money. Its job is to produce a
+ * This engine runs that trade on PAPER against live BloFin public data — the
+ * execution venue, since funding is venue-specific and BloFin's book is not
+ * Binance's. It holds no credentials, places no orders, and cannot move money.
+ * Its job is to produce a
  * real, dated, out-of-sample track record of a strategy whose in-sample economics
  * are already known — because round 7 also measured the carry decaying from 30.61%
  * annualised (2021) to 1.83% (2026), which is the difference between a business and
@@ -56,13 +58,25 @@ loadEnv();
 const STATE_FILE  = path.join(ROOT, '.carry-state.json');
 const LEDGER_FILE = path.join(ROOT, 'carry-trades.json');
 
-// ─── Economics. Every number here is measured, not assumed. ──────────────────
-// Perp fees: BloFin real fills (2026-07-26 audit §2). Spot fees: Binance retail.
-// Both sides assumed PASSIVE — round 7 showed taker execution turns the current
+// ─── Economics ───────────────────────────────────────────────────────────────
+// Both legs assumed PASSIVE — round 7/9 showed taker execution turns the current
 // regime negative, so maker fills are a precondition, not an optimisation.
+// PERP fee: VERIFIED 2026-08-04 against 199 real account fills — median exactly
+// 6.00bp taker (scripts/blofin/verify-assumptions.js). The maker leg is the
+// 2bp side of that same schedule.
 const FEE_PERP_MAKER = 0.0002;
-const FEE_SPOT_MAKER = 0.0002;
-const ROUND_TRIP     = 2 * (FEE_PERP_MAKER + FEE_SPOT_MAKER);   // 8 bp
+// SPOT fee: **UNVERIFIED**. BloFin exposes no fee-rate endpoint (every variant
+// returns 152404) and the account has never filled a spot order, so this cannot
+// be measured read-only. Round 9 showed the assumption is load-bearing:
+//   spot 2bp  → carry +4.80%/yr, CI [1.5, 7.8]   (excludes zero)
+//   spot 10bp → carry +3.03%/yr, CI [-0.3, 6.1]  (includes zero)
+// The engine therefore gates on the PESSIMISTIC figure until a real fill
+// replaces it. Being flat when the trade would have worked costs nothing; being
+// long when it does not costs money. Set CARRY_SPOT_FEE_BP once measured.
+const SPOT_FEE_MEASURED = Number(process.env.CARRY_SPOT_FEE_BP);
+const FEE_SPOT_MAKER = Number.isFinite(SPOT_FEE_MEASURED) ? SPOT_FEE_MEASURED / 1e4 : 0.0010;
+const SPOT_FEE_IS_ASSUMED = !Number.isFinite(SPOT_FEE_MEASURED);
+const ROUND_TRIP     = 2 * (FEE_PERP_MAKER + FEE_SPOT_MAKER);
 const LEVERAGE       = Number(process.env.CARRY_LEVERAGE || 3);  // perp leg only
 const CAPITAL_MULT   = 1 + 1 / LEVERAGE;
 
@@ -108,14 +122,20 @@ const writeJson = (f, o) => { if (!DRY) fs.writeFileSync(f, JSON.stringify(o, nu
 // namespace from the swap API) and perp BTC-USDT. Same asset both sides, which
 // is what makes the hedge real — round 8a measured cross-coin "hedges" at 39.5×
 // noise-to-carry versus 0.4× here.
-const BLOFIN_HOST = process.env.BLOFIN_ENV === 'prod'
-  ? 'https://openapi.blofin.com' : 'https://demo-trading-openapi.blofin.com';
+// Market data always comes from PROD, whatever BLOFIN_ENV is. These are public,
+// unauthenticated endpoints — no credentials are involved and the demo hard rule
+// is untouched. Verified 2026-08-04: across 100 shared settlements, demo and prod
+// funding were identical **0 times**, max |Δ| 1.670bp (demo mean 0.473bp vs prod
+// 0.485bp). Demo is close in aggregate but is not prod's book. The paper run only
+// has value if it predicts what REAL trading would earn, so it must gate on the
+// rate real money would receive.
+const MARKET_HOST = 'https://openapi.blofin.com';
 
 async function snapshot() {
   const [spotT, perpT, fundHist] = await Promise.all([
-    get(`${BLOFIN_HOST}/api/v1/spot/market/tickers?instType=SPOT&instId=BTC-USDT`),
-    get(`${BLOFIN_HOST}/api/v1/market/tickers?instType=SWAP&instId=BTC-USDT`),
-    get(`${BLOFIN_HOST}/api/v1/market/funding-rate-history?instId=BTC-USDT&limit=100`),
+    get(`${MARKET_HOST}/api/v1/spot/market/tickers?instType=SPOT&instId=BTC-USDT`),
+    get(`${MARKET_HOST}/api/v1/market/tickers?instType=SWAP&instId=BTC-USDT`),
+    get(`${MARKET_HOST}/api/v1/market/funding-rate-history?instId=BTC-USDT&limit=100`),
   ]);
   const pick = (j, id) => (j.data || []).find(x => x.instId === id) || (j.data || [])[0];
   const s = pick(spotT, 'BTC-USDT'), p = pick(perpT, 'BTC-USDT');
@@ -246,6 +266,10 @@ async function main() {
   log(`spot $${m.spot.toFixed(0)} · basis ${(m.basis * 1e4).toFixed(2)}bp · trailing carry `
     + `${(m.trailAnn * 100).toFixed(2)}%/yr (${m.nRates} settles, ${(m.posShare * 100).toFixed(0)}% positive)`);
   log(`gate: cost ${(g.costAnn * 100).toFixed(2)}%/yr at ${MIN_HOLD_DAYS}d hold → net ${(g.netAnn * 100).toFixed(2)}%/yr — ${g.reason}`);
+  if (SPOT_FEE_IS_ASSUMED) {
+    log(`  note: spot fee UNMEASURED — gating on the pessimistic ${(FEE_SPOT_MAKER * 1e4).toFixed(0)}bp. `
+      + `Set CARRY_SPOT_FEE_BP once a real spot fill measures it; at 2bp the gate would clear ~1.8%/yr sooner.`);
+  }
 
   const nowMs = Date.now();
 

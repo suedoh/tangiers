@@ -20,10 +20,18 @@ const snap = annualised => ({
   posShare: 0.9, nRates: 90,
 });
 
-test('round-trip cost is 8bp — four passive legs', () => {
-  // 2 perp maker (2bp) + 2 spot maker (2bp). Round 7 showed taker execution
-  // turns the current regime negative, so passive fills are a precondition.
-  assert.equal(Math.round(ROUND_TRIP * 1e4), 8);
+test('unmeasured spot fee ⇒ the PESSIMISTIC cost is used, not the hopeful one', () => {
+  // Phase 0 (2026-08-04) verified the perp leg at exactly 6.00bp taker across 199
+  // real fills, but the SPOT leg has never filled and BloFin exposes no fee-rate
+  // endpoint. Round 9 showed that assumption is load-bearing: 2bp → +4.80%/yr with
+  // a CI excluding zero; 10bp → +3.03%/yr with a CI including it.
+  //
+  // With CARRY_SPOT_FEE_BP unset the engine must assume 10bp, giving
+  // 2×(2bp perp + 10bp spot) = 24bp. Being flat when the trade would have worked
+  // costs nothing; being long when it does not costs money. If this assertion
+  // ever fails because someone lowered the default, that is the bug — not this test.
+  assert.equal(process.env.CARRY_SPOT_FEE_BP, undefined, 'test env must not pin the fee');
+  assert.equal(Math.round(ROUND_TRIP * 1e4), 24);
 });
 
 test('a rich carry regime opens the trade', () => {

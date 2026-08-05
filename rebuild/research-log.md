@@ -743,3 +743,38 @@ net 3.02%/yr and **correctly stays flat** against the 4% gate. Gating on the wro
 would have opened the trade during exactly the months BloFin was paying to stay out.
 
 **FDR bookkeeping.** New cells: 9 (3 fee cases × 3 holds). **Cumulative family: 292 cells.**
+
+## Phase 0 — verifying the inputs everything rests on (2026-08-04)
+
+Triggered by the self-audit: one wrong inference ("BloFin has no spot", drawn from a single
+endpoint's response) had propagated into a strategic conclusion. The same class of unverified
+assumption sat under the numbers — **6bp taker / 2bp maker** was measured once in the 2026-07-26
+audit and carried through 292 cells without re-check. Tool:
+[verify-assumptions.js](../scripts/blofin/verify-assumptions.js) — read-only, places no orders.
+
+| # | input | result |
+|---|---|---|
+| 1 | **Perp fees** | ✅ **VERIFIED.** 199 real account fills (2026-07-22→31): median **exactly 6.00bp**, mean 5.20bp. The cost model under all 292 cells is correct. |
+| 2 | **Demo vs prod funding** | ⚠️ **THEY DIFFER.** Across 100 shared settlements, identical **0 times**, max \|Δ\| 1.670bp (demo mean 0.473bp vs prod 0.485bp). Close in aggregate, not the same book. |
+| 3 | **Spot fees** | 🔴 **STILL OPEN.** No fee-rate endpoint (152404 on every variant); the account has never filled a spot order, so it cannot be closed read-only, and this work will not place an order to close it. |
+
+**Two engine changes followed directly from (2) and (3).**
+
+*Market data now reads PROD, whatever `BLOFIN_ENV` is* — public unauthenticated endpoints, no
+credentials, demo hard-rule untouched. A paper run only has value if it predicts what real
+trading would earn, so it must gate on the rate real money would receive, not demo's.
+
+*The gate now assumes the PESSIMISTIC spot fee (10bp) until measured.* Round 9 showed the
+assumption is load-bearing — 2bp → +4.80%/yr CI [1.5, 7.8] excluding zero; 10bp → +3.03%/yr CI
+[−0.3, 6.1] including it. Being flat when the trade would have worked costs nothing; being long
+when it would not costs money. `CARRY_SPOT_FEE_BP` replaces the assumption once a real fill
+measures it, and the engine logs the caveat on every cycle until then.
+
+**Net effect on live behaviour, same market:** cost rose 0.97% → 2.92%/yr, net fell 3.02% →
+**1.85%/yr**, and the engine stays flat against its 4% gate. Both corrections made the system
+more conservative, which is the expected direction for correctness fixes.
+
+**The open item, stated precisely.** The spot fee closes only when a spot order actually fills.
+That requires the execution layer and operator authorisation — it is not something the paper
+engine can discover on its own, and claiming otherwise would be the same over-promise this log
+exists to prevent.
