@@ -138,6 +138,18 @@ carry-status: ## Show the carry engine's open position and realised ledger
 carry-test: ## Re-measure funding carry over the full history (round 7)
 	@$(NODE) $(TRADING)/scripts/research/carry-test.js
 
+carry-exec: ## Rehearse the carry execution (computes sizes, sends NOTHING)
+	@$(NODE) $(TRADING)/scripts/carry/execute.js
+
+carry-unwind: ## Rehearse closing the carry position (sends NOTHING)
+	@$(NODE) $(TRADING)/scripts/carry/execute.js --unwind
+
+book-dataset: ## Build the order-book feature/label matrix (Path B)
+	@$(NODE) $(TRADING)/scripts/research/book-dataset.js --k 21 --horizon 240
+
+book-dataset-status: ## Order-book corpus coverage + maturity guard
+	@$(NODE) $(TRADING)/scripts/research/book-dataset.js --status
+
 report: ## Run the weekly performance report now and post to #btc-backtest
 	@$(NODE) $(TRADING)/scripts/weekly-report.js
 
