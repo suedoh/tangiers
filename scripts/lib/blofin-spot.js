@@ -118,8 +118,12 @@ async function transfer({ currency = 'USDT', amount, from, to, confirm = false }
 // Round through an integer lot count and re-round to the lot's decimal places —
 // `Math.floor(sz/LOT)*LOT` alone yields 0.0030700000000000002, which then gets
 // stringified into an order payload.
+// The epsilon matters: roundLot() is applied twice (preflight, then placeOrder),
+// and 0.00307/0.00001 evaluates to 306.9999… so a bare floor silently drops a
+// lot on the second pass — the rehearsal showed a 0.00307 plan emitting a
+// 0.00306 payload. Nudge before flooring so an already-rounded value is stable.
 const LOT_DP = String(LOT_SIZE).split('.')[1]?.length ?? 0;
-const roundLot = sz => Number((Math.floor(sz / LOT_SIZE) * LOT_SIZE).toFixed(LOT_DP));
+const roundLot = sz => Number((Math.floor(sz / LOT_SIZE + 1e-9) * LOT_SIZE).toFixed(LOT_DP));
 const roundTick = px => Math.round(px / TICK_SIZE) * TICK_SIZE;
 
 /**

@@ -11,7 +11,13 @@
  *   node scripts/blofin/fund-demo.js              # default: 10000 USDT
  *   node scripts/blofin/fund-demo.js 50000        # custom amount
  *   node scripts/blofin/fund-demo.js 5000 BTC     # alt currency
+ *   node scripts/blofin/fund-demo.js 500 USDT --account spot   # fund the SPOT wallet
  *   make blofin-fund
+ *
+ * NOTE — wallets do NOT pool on BloFin. Measured 2026-08-09: futures USDT
+ * 1680.98 while spot and funding sat at 0. The carry strategy buys its long leg
+ * on SPOT, so it needs the spot wallet funded specifically; topping up futures
+ * does nothing for it. Hence --account.
  */
 
 const { loadEnv } = require('../lib/env');
@@ -37,7 +43,12 @@ function printBalance(label, bal) {
 
 async function main() {
   const amount   = process.argv[2] ? Number(process.argv[2]) : 10000;
-  const currency = process.argv[3] || 'USDT';
+  const currency = (process.argv[3] && !process.argv[3].startsWith('--')) ? process.argv[3] : 'USDT';
+  const ai       = process.argv.indexOf('--account');
+  const account  = ai > -1 && process.argv[ai + 1] ? process.argv[ai + 1] : 'futures';
+  if (!['futures', 'spot', 'funding'].includes(account)) {
+    console.error(`Invalid --account ${account} (want futures|spot|funding)`); process.exit(1);
+  }
 
   if (!blofin.isDemo()) {
     console.error('Refusing to run: BLOFIN_ENV=prod. Demo top-ups only.');
@@ -50,17 +61,18 @@ async function main() {
 
   console.log(`─── BloFin demo top-up ───`);
   console.log(`amount:   ${amount} ${currency}`);
+  console.log(`account:  ${account}`);
   console.log(`env:      demo`);
   console.log('');
 
   console.log('Before:');
-  try { printBalance('  futures', await blofin.getBalance('futures')); }
+  try { printBalance(`  ${account}`, await blofin.getBalance(account)); }
   catch (e) { console.error('  failed to read balance:', e.message); process.exit(1); }
 
   console.log('');
   console.log('Applying…');
   try {
-    const res = await blofin.applyDemoMoney(currency, amount);
+    const res = await blofin.applyDemoMoney(currency, amount, { accountType: account });
     console.log('  ✓ response:', JSON.stringify(res));
   } catch (e) {
     console.error('  ✗ FAIL:', e.message);
@@ -69,7 +81,7 @@ async function main() {
 
   console.log('');
   console.log('After:');
-  try { printBalance('  futures', await blofin.getBalance('futures')); }
+  try { printBalance(`  ${account}`, await blofin.getBalance(account)); }
   catch (e) { console.error('  failed to read balance:', e.message); process.exit(1); }
 
   console.log('');

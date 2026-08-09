@@ -78,8 +78,17 @@ async function preflight(notionalUsd) {
     return u ? Number(u.available) : 0;
   })();
 
-  const btcSize = spot.roundLot(notionalUsd / ask);
-  const contracts = Math.floor((btcSize / PERP_CONTRACT_BTC) * 10) / 10;   // perp lotSize 0.1
+  // Size the PERP leg first, then buy exactly that much spot. Sizing spot first
+  // and flooring the hedge leaves an unhedged remainder — the rehearsal showed
+  // 0.00307 BTC spot against 3 contracts (0.003 BTC), i.e. ~$4.55 of naked
+  // directional exposure. Small, but directional risk is the one thing a
+  // delta-neutral strategy must carry none of, so the legs are made commensurate
+  // by construction: perp lotSize 0.1 × contractValue 0.001 = 0.0001 BTC steps.
+  const HEDGE_STEP_BTC = PERP_CONTRACT_BTC * 0.1;
+  const rawBtc = notionalUsd / ask;
+  const contracts = Math.floor((rawBtc / PERP_CONTRACT_BTC) * 10 + 1e-9) / 10;
+  const btcSize = spot.roundLot(contracts * PERP_CONTRACT_BTC);
+  const hedgeResidualBtc = Math.abs(btcSize - contracts * PERP_CONTRACT_BTC);
   const perpMarginNeeded = (contracts * PERP_CONTRACT_BTC * ask) / Number(process.env.CARRY_LEVERAGE || 3);
 
   const problems = [];
@@ -89,7 +98,10 @@ async function preflight(notionalUsd) {
   if (!(contracts > 0)) problems.push(`computed perp size ${contracts} contracts rounds to zero — raise CARRY_NOTIONAL_USD`);
   if (spreadBp > 20) problems.push(`spot spread ${spreadBp.toFixed(1)}bp is wide — crossing it would eat the carry`);
 
-  return { ask, bid, spreadBp, usdtSpot, usdtPerp, btcSize, contracts, perpMarginNeeded, problems };
+  if (hedgeResidualBtc > HEDGE_STEP_BTC / 2) {
+    problems.push(`legs not commensurate: ${hedgeResidualBtc.toFixed(6)} BTC would be unhedged`);
+  }
+  return { ask, bid, spreadBp, usdtSpot, usdtPerp, btcSize, contracts, perpMarginNeeded, hedgeResidualBtc, problems };
 }
 
 async function open() {
@@ -99,6 +111,7 @@ async function open() {
   const pf = await preflight(NOTIONAL_USD);
   log(`spot ask $${pf.ask.toFixed(2)} · spread ${pf.spreadBp.toFixed(1)}bp`);
   log(`plan: BUY ${pf.btcSize} BTC spot (~$${(pf.btcSize * pf.ask).toFixed(2)}) + SHORT ${pf.contracts} perp contracts (~$${pf.perpMarginNeeded.toFixed(2)} margin)`);
+  log(`hedge: ${pf.contracts} × ${PERP_CONTRACT_BTC} = ${(pf.contracts * PERP_CONTRACT_BTC).toFixed(5)} BTC vs ${pf.btcSize} BTC spot — unhedged residual ${pf.hedgeResidualBtc.toFixed(6)} BTC`);
   log(`wallets: spot $${pf.usdtSpot.toFixed(2)} USDT · futures $${pf.usdtPerp.toFixed(2)} available`);
 
   if (pf.problems.length) {
