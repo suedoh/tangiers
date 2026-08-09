@@ -36,7 +36,9 @@ not shipped.
 | 20 | Cross-sectional carry (2 fee models) | 2 | 2026-08-04 round 8a |
 | 21 | Swing: trailing-stop grid ×5 + symmetric always-long ×3 | 8 | 2026-08-04 round 8b |
 | 22 | BloFin-native carry (3 fee cases × 3 holds) | 9 | 2026-08-04 round 9 |
-| **Σ** | **hypothesis cells tested to date** | **292** | |
+| 23 | Open interest — 4 quadrants × 2 directions + 2 percentile cells | 10 | 2026-08-09 round 10a |
+| 24 | TSMOM — 5 lookbacks × 2 holds | 10 | 2026-08-09 round 10b |
+| **Σ** | **hypothesis cells tested to date** | **303** | |
 
 Descriptive/diagnostic measurements (accounting reconciliations, calibration Brier/ECE,
 autocorrelation, walk-forward buckets, random-direction nulls, the random-entry MC
@@ -778,3 +780,72 @@ more conservative, which is the expected direction for correctness fixes.
 That requires the execution layer and operator authorisation — it is not something the paper
 engine can discover on its own, and claiming otherwise would be the same over-promise this log
 exists to prevent.
+
+## Round 10 — the two genuine gaps: open interest, and long-horizon momentum (2026-08-09)
+
+Operator asked whether volume / OI / CVD plus "what research proves" could work. Split honestly:
+**volume** (`volZ`,`tvol`,`tbuy`) and **CVD/taker-imbalance** (`imb`,`imbZ`) were tested in round 2
+and refuted at +1.2pp — order flow was that round's headline failure. **Open interest had never
+been tested**, and long-horizon TSMOM had only been scored at holds far shorter than where the
+published effect lives. Both gaps closed here.
+
+### 10a — Open interest ([oi-test.js](../scripts/research/oi-test.js)) — REFUTED
+
+Binance caps `openInterestHist` at 30 days; got 744 hourly points / 31.0 days. Pre-registered the
+textbook four-quadrant reading plus both OI-percentile extremes, **both directions of every cell
+declared before running** — 10 cells.
+
+Base rate up-first 56.19% (BTC rose in the window), break-even 55.0% at k=2.
+**Cells whose Wilson lower bound clears break-even: 0/10.**
+
+The decisive detail: for every "→ long" cell the hit rate **equals its always-long rate by
+construction** (Q1 58.49/58.49, Q4 59.34/59.34). The quadrants select *when* to be long, not
+*which way* to go — they carry no directional information. Best contrast against the
+unconditional base rate is +4.94pp on Q2 with n=160, well inside noise. Same shape as CVD.
+
+*(Two reporting bugs were found and fixed mid-run before any number was believed: `wilson()`
+returns `[p, lo, hi]` and was destructured as `[lo, hi]`, printing inverted intervals; and the
+lift column compared each cell against a quantity identical to itself, printing +0.00pp
+throughout. Broken statistics are how this project got a +965R ledger — they do not get reported.)*
+
+**Sample ceiling, stated before the result: 31 days cannot satisfy spec 07.1 regardless of
+outcome.** Nothing here would have been a green light even had it passed.
+
+### 10b — Time-series momentum ([tsmom-test.js](../scripts/research/tsmom-test.js)) — a real
+### property, on a sample far too small to size
+
+Rounds 1–6 tested momentum only as bar features with 24–480h barriers. The documented TSMOM result
+(Moskowitz/Ooi/Pedersen 2012) is a **1–12 month lookback with monthly holds** — never scored here,
+and the region where an 8bp round trip stops mattering. Long-only when the past-N-month return is
+positive, flat otherwise; benchmark is **buy-and-hold**, not zero.
+
+The raw grid looked like the first real find in 292 cells: **7 of 10 cells beat buy-and-hold, all
+7 with bootstrap CIs excluding zero**, topping out at 9mo/1wk = **60.0% CAGR vs 36.2%** (+23.8pp),
+Sharpe 1.18. Then the four standard kill-tests ([tsmom-kill.js](../scripts/research/tsmom-kill.js)):
+
+| test | result |
+|---|---|
+| **Parameter stability** | ⚠️ **6 sign flips** across adjacent lookbacks (1mo +10.6, 2mo −11.7, 3mo −12.1, 4mo +10.2, 5mo −11.2 … 9mo **+23.8**, 10mo −0.9, 11mo +18.1). A real effect does not invert between neighbouring parameters. |
+| **Walk-forward** | ✓ survives, but shrinks **18×**: first half picks 8mo at +59.9pp in-sample → **+3.3pp** out of sample. Classic overfit signature. |
+| **Regime** | ✓ **the genuinely real part.** 2022: rule +9%/yr vs B&H **−79%**. 2026: rule −11% vs B&H **−57%**. It wins in down years by going *flat*. In up years it matches or trails (2023: 52% vs 108%). |
+| **Independent bets** | 🔴 **11 position changes** at 9mo/1wk across 6.9 years; **5** at 12mo/1mo. The result rests on ~11 decisions, not 320 rows. |
+
+**Verdict: the phenomenon is real, the parameterisation is not, and the sample cannot support a
+size.** What the regime table actually shows is trend-following's documented property — it does not
+predict direction, it *exits* during downtrends, cutting max drawdown from −76.7% to −48.6%. That
+is risk reduction, not a high-probability trade generator. Eleven independent decisions cannot
+distinguish an 18×-shrinking edge from luck, and the 6 sign flips say the specific lookback is
+fitted.
+
+| Date | Hypothesis | n | Result | Verdict |
+|---|---|---|---|---|
+| 2026-08-09 | Open interest carries directional information | 646 rows / 31d | 0/10 cells clear break-even; "→long" cells identical to always-long by construction | **Refuted** |
+| 2026-08-09 | TSMOM at 1–12mo lookbacks beats buy-and-hold | 71–354 obs, **11 independent** | +23.8pp in-sample → +3.3pp OOS; 6 sign flips; edge concentrated in down years via being flat | **Not actionable — real property, fitted parameters, ~11 bets** |
+
+**FDR bookkeeping.** New cells: 10 (OI) + 10 (TSMOM grid) = **20**. **Cumulative family: 303 cells.**
+
+**What this leaves.** Every OHLCV-derived and positioning-derived family is now tested: momentum,
+volatility, volume, VWAP, order flow/CVD, funding (as predictor and as carry), open interest,
+cross-sectional carry, and long-horizon trend. The single untested family remains order-book
+microstructure, and round 9's build already showed its barrier must be ≥0.80% of price to clear
+costs at all. Corpus matures 2026-08-25.
