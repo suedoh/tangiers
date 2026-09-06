@@ -50,3 +50,6 @@ data/orderbook/
 # Carry engine (paper) — runtime state + ledger
 .carry-state.json
 carry-trades.json
+
+# Research: fetched market-data caches are large and regenerable (fetch.js).
+notes/flow-research/**/klines-*.json
