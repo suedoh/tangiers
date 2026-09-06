@@ -287,6 +287,10 @@ Catalog of docs-vs-truth discoveries from Phases A–B.6:
 | Position-mode value | `'net'` / `'hedge'` | `'net_mode'` / `'long_short_mode'` |
 | Cancel TPSL body | single object | **array** `[{instId, tpslId}]` |
 | Apply demo money | docs omit `accountType` | **required** — without it returns misleading 152001 |
+| Ticker / order book | `/market/ticker`, `/market/book` | **plural** `/market/tickers`, `/market/books` — singular returns the Cloudflare landing page, *not* 152404 |
+| Market-data payloads | single object | **array** in `data`, even for one `instId` |
+| Ticker fields | OKX-style `bidPx`/`askPx` | `bidPrice`/`askPrice`/`bidSize`/`askSize` |
+| Book levels | OKX 4-tuple | **2-tuple** `[price, size]` |
 
 When extending the BloFin integration: write a quick probe script first, never trust the path verbatim from the docs.
 
@@ -307,7 +311,19 @@ H5, H6) at every 1h BTCUSDT bar close and posts them to `#blofin-recon` prefixed
   prefix. Never touches `trades`, `blofin_orders`, `.autotrade-disabled.json`, or
   `scripts/trigger-check.js`.
 - Circuit breaker `.orderflow-experiment-disabled.json` exists from day one; nothing trips it yet.
-- `make orderflow-status` · `make orderflow-logs` · `make orderflow-probe`.
+- **Paper book** (2026-09-06): one simulated $3,000 account trades a *composite* of the nine —
+  majority direction, ≥2 voters and ≥0.60 agreement — with a full lifecycle (ATR stop, +2R target,
+  6-bar time stop, mark-to-market). Not backtested; nine refuted components in a trenchcoat. Every
+  doc carries `mode: "paper"`; collections `orderflow_experiment_paper_{trades,equity}`.
+- **BloFin market reads** (2026-09-06): `getTicker`/`getOrderBook`/`getMarkPrice`/`getFundingRate`
+  added to `lib/blofin.js` (probed first — see the docs-are-wrong table). Each cycle snapshots
+  BloFin's own ticker/book/mark/funding into `orderflow_experiment_blofin_market`, and the paper fill
+  uses `max(BloFin half-spread, pre-registered 2bp)` instead of a Binance proxy. **Read-only**: the
+  paper layer touches no write endpoint, and the demo balance is recorded for reference only, never
+  sizing a trade. Blocked ~83% of the time by the host's VPN egress 403 — set
+  `BLOFIN_BIND_INTERFACE=en0` (new, off by default) or drop the VPN.
+- `make orderflow-status` · `make orderflow-logs` · `make orderflow-probe` ·
+  `node scripts/research/orderflow-engine.js --blofin-probe`.
 
 Detail — port-parity proof, the two audit defects designed out (A4 sizing, A6 fill-based ledger),
 and exactly what enabling trading would require:

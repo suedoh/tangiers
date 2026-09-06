@@ -127,3 +127,117 @@ It observes; it does not decide. Accumulating forward bars is not evidence and m
 for it — any future cell tested off this data counts toward the same cumulative BH-FDR family as the
 rest of the hunt ([rebuild/research-log.md](../rebuild/research-log.md)). The engine posts the
 2026-09-06 verdict under every bar for exactly that reason.
+
+---
+
+# Addendum — paper book + BloFin read integration (same day, second pass)
+
+## Paper layer
+
+One simulated account, seeded at **$3,000**, trading a *composite* of the nine readings rather than
+nine toy strategies on one balance. Only hypotheses that are both triggered and directional vote;
+quiet and n/a ones abstain. Entry requires **≥2 voters and ≥0.60 agreement** — so a 2-vote bar must
+be 2-0, a 3-vote bar 2-1, a 4-vote bar 3-1, and split decisions are rejected rather than settled by a
+coin-flip tiebreak. Those are activity-rate choices measured off the trigger distribution of the
+trailing 1,421 live bars (`minN=2` → 16.8% of bars, ~1 entry per 6), **not** fitted parameters:
+nothing was selected on outcomes, because no outcomes existed.
+
+Full lifecycle per position — modelled fill, `1.5 × ATR14` stop, `+2R` target, 6-bar time stop,
+per-bar mark-to-market, realised P&L. One position at a time, mirroring BloFin net mode. Both stop
+and target touched inside one bar resolves as the **stop** (no intrabar path; pessimistic, and
+stated). Sizing uses the same config knobs as the real path against the paper balance, with one
+deliberate difference: where `maybeTrade()` posts a visible skip on a margin-cap breach, the paper
+book scales down and records `sizeCappedByMargin` — a real account going silent is audit defect A4;
+a paper account going silent just shows the owner nothing.
+
+**The composite has not been backtested.** It is nine individually-refuted components in a
+trenchcoat. Provenance lives on every stored document as `mode: "paper"`, in the code's honesty note,
+and here — deliberately *not* in the Discord copy, which reads as plain trade alerts by request.
+Collections `orderflow_experiment_paper_{trades,equity}`, never `..._orders`.
+
+## BloFin read integration
+
+The engine computed everything from Binance while claiming to emulate a BloFin automation. That is a
+Binance backtest wearing a BloFin label, and this project has already measured the two venues
+disagreeing — the carry research put BloFin funding at 6.22%/yr against Binance's 11.67%/yr, ~13pp
+apart and at one point opposite in sign. So the venue is now read directly.
+
+**Probed before written**, per the docs-are-wrong rule. Findings:
+
+| | Truth (probed 2026-09-06, demo) |
+|---|---|
+| Path | `tickers` and `books` are **plural**. Singular `/market/ticker`, `/market/book` return the Cloudflare landing page — *not* 152404, so a wrong path is indistinguishable from an IP block |
+| Shape | every endpoint returns an **array** in `data`, even for a single `instId` |
+| Ticker fields | `bidPrice`/`askPrice`/`bidSize`/`askSize`/`last`/`ts` — **not** OKX's `bidPx`/`askPx` |
+| Book levels | 2-tuples `[price, size]` — **not** OKX's 4-tuple `[price, size, liquidated, orders]` |
+
+Added to `scripts/lib/blofin.js`: `getTicker`, `getOrderBook`, `getMarkPrice`, `getFundingRate` —
+all unsigned GETs. Mark price is read separately from `last` because every SL this project places
+triggers on `mark`, so mark is the price that decides whether a stop fires.
+
+`blofinSnapshot()` runs once per cycle and persists to a new **`orderflow_experiment_blofin_market`**
+collection (one row per 1h bar) plus a summary on the signals doc. It records ticker, L2 top of book,
+mark/index, funding (annualised), and — reference only — the demo account's available margin.
+
+**Fill model.** Applied slippage is `max(BloFin's measured half-spread, the pre-registered 2bp)`.
+Taking the max means the real book can only make the simulation *more* expensive, never cheaper: a
+venue quoting 0.013bp at the touch would otherwise hand the paper account a cost model far kinder
+than the one the 7-year family was scored on, and the P&L would stop being comparable. Every trade
+records `entrySlipBp/exitSlipBp` and their source (`blofin-book` | `model-floor`).
+
+**Basis measured honestly.** The first cut compared BloFin's live tick against the 1h bar close and
+called the +11.5bp result a basis; it was mostly elapsed time. `blofinSnapshot()` now reads Binance's
+live `bookTicker` in the same breath, so `venueBasisBps` is mid-vs-mid at one instant (−0.03bp
+observed) and the bar-close comparison is kept separately as `driftFromBarCloseBps`, named so nobody
+reads it as a venue gap.
+
+## The boundary
+
+Read-only, enforced by construction and grep-verifiable: the only `placeOrder`/`placeTPSL` call sites
+in the file are inside `maybeTrade()`, above the PAPER LAYER banner. The paper layer calls
+`getTicker`/`getOrderBook`/`getMarkPrice`/`getFundingRate`/`getBalance` and nothing else. The demo
+balance is recorded for comparison and **never sizes a paper trade** — sizing runs off the
+independent $3,000 notional in `state.paper` and would be byte-identical if the balance call returned
+nothing. `orderflow_experiment_orders` remains at 0 documents.
+
+## Defect found in the dormant order path
+
+`maybeTrade()` read available margin as `bal?.details?.find(...) ?? bal?.available`. `getBalance()`
+returns a **flat array** of currency rows, so that resolved to `0` and would have failed *every* size
+against $0.00 available — reintroducing audit defect A4 (zero orders, silently) inside the very
+function whose docblock claims to have designed it out. Fixed to the canonical idiom used by
+`blofin-autotrade.js:530` and `watchdog.js:521`. Fail-safe direction, but it would have guaranteed
+zero orders forever the day the gate opened.
+
+## Blocker: the host's VPN egress
+
+BloFin market reads succeed **2/12 over the default route** and **12/12 bound to `en0`**, measured
+minutes apart on 2026-09-06 — the ProtonVPN/Cloudflare 403 from the 2026-07-10 and 2026-08-03
+incidents, now far worse than the 32.3% recorded then. `blofinSnapshot()` retries 3× and then records
+`ok:false` with the reason, so a gap in this dataset is always visible *as a gap*; but at ~17%
+per-call availability the BloFin arm will be mostly null until the egress is fixed.
+
+`scripts/lib/blofin.js` now supports `BLOFIN_BIND_INTERFACE` (`localAddress` bind, unresolvable
+interface degrades to the default route). It is **OFF by default and unset in `.env`** — turning it
+on changes transport for recon, the kill switch, the watchdog and autotrade too, which is the
+account owner's call, not this change's. Setting `BLOFIN_BIND_INTERFACE=en0` is the one-line fix.
+
+## Verified end to end, 2026-09-06 18:10–18:12 UTC
+
+Bar `17:00`, BTCUSDT $79,708 — all nine quiet. Mongo `1h-1788714000000` carries 9 readings *and*
+the BloFin snapshot (last $79,800, spread 0.013bp, mark $79,800.7, funding +4.47%/yr, demo available
+$2,999.998); `bf-1h-1788714000000` written to the new collection; three Discord posts landed in
+`#blofin-recon` with the BloFin line present. A forced round trip exercised the full lifecycle
+(`--paper-force=long` → `--paper-close`, −$4.29 = exactly the pre-registered 14bp on $3,061 notional).
+That trade is retained in Mongo flagged `forced: true`, and the book was reset to $3,000 / 0 trades
+afterwards — a smoke test is not a decision the composite made and does not belong in the forward
+track.
+
+## Also worth knowing
+
+`pm2 orderflow-engine` was found **stalled**: the 30s poll loop stopped completing cycles at
+17:05 UTC after a burst of `cycle error: fetch failed`, missed the 17:00 bar, and sat idle for 55+
+minutes with the process alive, 0% CPU and zero outbound HTTPS. The `fetch failed` lines themselves
+were transient (Binance answers fine from this host), but the engine did not recover from them.
+Nothing watches this process — `ops/watchdog.js` self-heals `book-recorder` but has no orderflow
+check, and the `--status` STALE threshold at 90 minutes has no caller.

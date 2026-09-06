@@ -28,14 +28,43 @@
  *   3. A correctly-built execution path that is ready but off, rather than a
  *      hastily-bolted-on one written under pressure the day something clears.
  *
+ * THE PAPER LAYER (added 2026-09-06, see PAPER LAYER banner further down)
+ * Alongside the readings, a single simulated account trades a *composite* of
+ * the nine — majority direction among whichever are triggered — with a full
+ * position lifecycle: modelled fill, ATR stop, +2R target, time stop, per-bar
+ * mark-to-market, realised P&L. It runs unconditionally and is INDEPENDENT of
+ * the trading gate below.
+ *   That composite has NOT been backtested. It is nine refuted components in a
+ *   trenchcoat, built to be watched, not believed. Storage carries `mode:
+ *   "paper"` on every document so the record can never be mistaken for fills.
+ *
+ * BLOFIN MARKET DATA (added 2026-09-06, same day, second pass)
+ * The paper layer crosses BloFin's OWN book: each cycle takes a read-only
+ * snapshot of BloFin's ticker, L2 book, mark/index price and funding rate, and
+ * the paper fill uses BloFin's measured half-spread rather than a Binance-shaped
+ * 2bp guess. Rationale: this project has already measured BloFin's funding at
+ * 6.22%/yr against Binance's 11.67%/yr — never reuse Binance's number for a
+ * BloFin position. Every snapshot is persisted so the venue gap is analysable
+ * later instead of assumed away.
+ *   READ-ONLY, ENFORCED BY CONSTRUCTION. The paper layer calls only
+ *   getTicker / getOrderBook / getMarkPrice / getFundingRate / getBalance —
+ *   all GETs. It never calls placeOrder, placeTPSL, cancelOrder, cancelTPSL,
+ *   setLeverage, setPositionMode or applyDemoMoney. The demo balance is
+ *   recorded for reference and never sizes a paper trade, which runs against
+ *   the independent $3,000 paper notional. Every write endpoint belongs to
+ *   maybeTrade(), which is separate and still gated shut.
+ *
  * ISOLATION — this process shares nothing mutable with the live BTC pipeline
  *   script      scripts/research/orderflow-engine.js   (new, pm2 'orderflow-engine')
  *   collections orderflow_experiment_{signals,orders,state}   (never `trades`/`blofin_orders`)
+ *   paper       orderflow_experiment_paper_{trades,equity}    (never `..._orders`)
+ *   venue       orderflow_experiment_blofin_market             (read-only market snapshots)
  *   state       .orderflow-experiment-state.json
  *   config      .orderflow-experiment-config.json
  *   breaker     .orderflow-experiment-disabled.json
  *   orders      clientOrderId prefix `ofexp-`
- *   data        Binance public REST only — no TradingView, no CDP, no lock
+ *   data        Binance public REST for features; BloFin read-only for venue
+ *               truth — no TradingView, no CDP, no lock
  * It reads scripts/lib/{db,blofin,discord}.js and modifies none of them. It
  * does not read or write .autotrade-disabled.json, trades.json, or any file
  * belonging to scripts/trigger-check.js.
@@ -56,6 +85,9 @@
  *   node scripts/research/orderflow-engine.js --once     # one cycle, then exit
  *   node scripts/research/orderflow-engine.js --probe    # end-to-end self-check
  *   node scripts/research/orderflow-engine.js --status
+ *   node scripts/research/orderflow-engine.js --once --paper-force=short  # verify the paper mechanism
+ *   node scripts/research/orderflow-engine.js --once --paper-close        # close the paper position
+ *   node scripts/research/orderflow-engine.js --blofin-probe              # read-only venue probe
  */
 
 const fs   = require('fs');
@@ -577,7 +609,14 @@ async function maybeTrade(reading, ctx, cfg) {
   const ctVal   = Number(inst?.contractValue || 0.001);
   const lotSize = Number(inst?.lotSize || 0.1);
   const minSize = Number(inst?.minSize || 0.1);
-  const available = Number(bal?.details?.find(d => d.currency === 'USDT')?.available ?? bal?.available ?? 0);
+  // getBalance() returns a flat ARRAY of currency rows — probed 2026-09-06:
+  // [{currency:'USDT', balance, available, frozen, bonus}]. An earlier
+  // `bal?.details?.find(...) ?? bal?.available` read neither shape, resolved to
+  // 0, and would have failed EVERY size against $0.00 available margin — i.e.
+  // reintroduced audit defect A4 (zero orders, silently) in the very function
+  // whose docblock claims to have designed it out. Idiom matches
+  // scripts/lib/blofin-autotrade.js:530 and scripts/ops/watchdog.js:521.
+  const available = Number((Array.isArray(bal) ? bal : []).find(b => b.currency === 'USDT')?.available ?? 0);
 
   const rawContracts = sizeBtc / ctVal;
   const contracts = Math.floor(rawContracts / lotSize) * lotSize;
@@ -678,6 +717,588 @@ async function maybeTrade(reading, ctx, cfg) {
   return { status: 'placed', detail: clientOrderId, doc };
 }
 
+// ─── PAPER LAYER ─────────────────────────────────────────────────────────────
+// A parallel, always-on simulation of one account trading a composite of the
+// nine readings. It cannot move a coin: nothing below this banner calls
+// blofin.placeOrder / placeTPSL / cancelOrder / cancelTPSL / setLeverage /
+// setPositionMode / applyDemoMoney — or any BloFin write endpoint at all.
+//
+// It DOES read BloFin (added later the same day, see BLOFIN MARKET DATA in the
+// file header): ticker, L2 book, mark/index, funding rate, and the demo
+// balance. All GETs. The market reads feed the fill model — a simulation that
+// prices its fills off Binance while claiming to emulate BloFin is a Binance
+// backtest wearing a BloFin label, and this project has measured the two
+// venues disagreeing by 13pp on funding. The balance read is REFERENCE ONLY:
+// paper sizing runs off state.paper's independent $3,000 notional and would be
+// byte-identical if the balance call returned nothing.
+//
+// RELATIONSHIP TO THE ORDER PATH ABOVE
+// None. maybeTrade(), cfg.tradingEnabled and cfg.hypothesis govern real orders
+// and are untouched by this layer; the paper book runs whether that gate is
+// open or shut, and flipping it would not change a single line here.
+//
+// ── HONESTY NOTE, AND WHERE IT LIVES ───────────────────────────────────────
+// The composite defined in compositeSignal() HAS NOT BEEN BACKTESTED. It is
+// assembled from nine components that were individually REFUTED on 7 years of
+// history (2026-09-06 pre-registered family: "CLEARED: none"), two of them
+// FDR-significant in the OPPOSITE direction to the one they predict. Combining
+// refuted rules does not produce an edge, and no claim is made here that it
+// does. This layer exists so the account owner can watch a full position
+// lifecycle run forward on live data — it is an observation instrument, not an
+// asserted strategy, and its P&L is not evidence of anything.
+//
+// That honesty lives in this comment, in the refactor note, and in the `mode:
+// "paper"` provenance tag on every stored document — deliberately NOT in the
+// Discord copy, which the owner asked to read as plain trade alerts.
+
+/** Paper account seed. Not the BloFin balance — never read from, never written to. */
+const PAPER_START_EQUITY = 3000;
+
+// Cost model, taken from the backtest's pre-registration (§ "Costs pre-registered
+// at 14bp round trip (5bp taker/side + 2bp slippage/side)"). Kept as its two
+// components rather than one lump so the stored `feesUsd` means fees and the
+// fill price means a filled price:
+//   slippage → moves the FILL adversely on both legs (2bp each)
+//   fee      → a separate USD debit on both legs (5bp of notional each)
+// 2 x (5 + 2) = 14bp round trip, identical to what the family was scored on.
+const PAPER_SLIP_BP = 2;
+const PAPER_FEE_BP  = 5;
+
+// ── BloFin market data (read-only) ──────────────────────────────────────────
+// Added 2026-09-06. Everything above this line is computed from Binance; the
+// venue the orders would actually go to is BloFin, and this project has already
+// been burned once by assuming the two agree — the carry research measured
+// BloFin funding at 6.22%/yr against Binance's 11.67%/yr, ~13pp apart and at
+// one point opposite in sign. So the paper book now crosses BloFin's OWN book,
+// and every cycle records BloFin's ticker/book/mark/funding next to the
+// hypothesis readings so "did BloFin's market differ?" is answerable from the
+// stored dataset rather than re-litigated.
+//
+// READ-ONLY BY CONSTRUCTION. This layer calls exactly four public market
+// endpoints plus getBalance(), all GETs. It never calls placeOrder, placeTPSL,
+// cancelOrder, cancelTPSL, setLeverage, setPositionMode or applyDemoMoney —
+// those belong to maybeTrade(), which remains gated shut and separate.
+//
+// The demo balance is recorded FOR REFERENCE ONLY. Paper sizing runs off the
+// independent $3,000 paper notional in state.paper and reads nothing from the
+// exchange; if the balance read fails the paper book is unaffected.
+const BLOFIN_BOOK_LEVELS = 5;
+const BLOFIN_TRIES       = 3;   // the host's egress 403s intermittently — see blofinSnapshot()
+
+// Composite gate. Chosen from the trigger distribution measured on the trailing
+// 1,421 live bars (59 days) at build time:
+//   n triggered per bar: 0 → 548, 1 → 551, 2 → 250, 3 → 63, 4 → 9
+//   minN=1, agree>=0.60 →  790 bars (55.6%) — a single rule is not a composite
+//   minN=2, agree>=0.60 →  239 bars (16.8%) — ~1 entry per 6 bars   ← chosen
+//   minN=3, agree>=0.60 →   71 bars ( 5.0%) — ~1 entry per 20 bars
+// At >=0.60 a 2-vote bar must be 2-0 (1/2 = 0.50 fails), a 3-vote bar 2-1, a
+// 4-vote bar 3-1 — so split decisions are rejected rather than broken by a
+// coin-flip tiebreak. These are activity-rate choices, not fitted parameters;
+// nothing here was selected on outcomes, because no outcomes existed yet.
+const PAPER_MIN_TRIGGERED = 2;
+const PAPER_MIN_AGREEMENT = 0.60;
+
+// Exit model. Single stop + single target + time stop, i.e. the v1 that the
+// brief allows, not the live system's 3-rung TP ladder. Reason: the ladder's
+// value is in partial fills and rung-burning against a real order book, and
+// with no book to fill against, simulating it would add machinery whose
+// realism it cannot actually deliver. The ladder's *spirit* — a structural
+// stop, a defined R target, and a hard time-out — is kept.
+const PAPER_TP_R = 2.0;              // target at +2R; stop is 1R by construction
+
+// BloFin BTC-USDT granularity, hard-coded rather than fetched, so this layer has
+// no exchange dependency at all: contractValue 0.001 BTC x lotSize 0.1 contracts.
+const PAPER_LOT_BTC = 0.0001;
+
+/**
+ * One read-only snapshot of BloFin's own market, taken at the top of each cycle.
+ *
+ * Fails soft in every branch: a null snapshot degrades the paper book to the
+ * pre-registered 2bp slippage model and the cycle continues. It never throws
+ * into the readings pipeline, which was here first and does not depend on it.
+ *
+ * WHY THE RETRIES: this host's default route is intermittently a ProtonVPN
+ * tunnel whose exit IP Cloudflare rejects, returning `http 403 <!DOCTYPE html>`
+ * on signed and unsigned requests alike (see refactors/ + the 2026-07-10 and
+ * 2026-08-03 incidents). Measured 2026-09-06 at build time: 1/6 success over
+ * the tunnel, 6/6 over en0 in the same minute. Retrying lifts per-cycle
+ * coverage; the real fix is operational (split-tunnel, or BLOFIN_BIND_INTERFACE
+ * =en0 in .env, which lib/blofin.js now supports and which is OFF by default).
+ * When all attempts fail the snapshot records `ok:false` and the reason, so a
+ * gap in this dataset is always visible as a gap rather than as silence.
+ */
+async function blofinSnapshot() {
+  const snap = {
+    at: new Date(), instId: INST_ID, env: process.env.BLOFIN_ENV || 'demo',
+    ok: false, error: null, attempts: 0,
+    last: null, bid: null, ask: null, mid: null, bidSize: null, askSize: null,
+    spread: null, spreadBps: null, halfSpreadBps: null,
+    bookBid: null, bookAsk: null, bookSpreadBps: null, bookTs: null,
+    markPrice: null, indexPrice: null,
+    fundingRate: null, fundingIntervalHours: null, fundingAprPct: null,
+    vol24h: null, high24h: null, low24h: null, tickerTs: null,
+    // Binance's LIVE top of book, read in the same breath. A venue basis has to
+    // compare two quotes taken at the same instant; comparing BloFin's live tick
+    // against the 1h bar close (up to an hour stale) measures elapsed time, not
+    // the venue gap, and would have written a junk number into the dataset.
+    binanceBid: null, binanceAsk: null, binanceMid: null, binanceSpreadBps: null,
+    basisBps: null, binanceQuoteError: null,
+    account: { available: null, balance: null, frozen: null, error: null },
+  };
+
+  for (let i = 0; i < BLOFIN_TRIES; i++) {
+    snap.attempts = i + 1;
+    try {
+      const [tk, bk, mp, fr] = await Promise.all([
+        blofin.getTicker(INST_ID),
+        blofin.getOrderBook(INST_ID, BLOFIN_BOOK_LEVELS),
+        blofin.getMarkPrice(INST_ID),
+        blofin.getFundingRate(INST_ID),
+      ]);
+      if (!tk) throw new Error('ticker returned no row');
+
+      snap.last    = Number(tk.last);
+      snap.bid     = Number(tk.bidPrice);
+      snap.ask     = Number(tk.askPrice);
+      snap.bidSize = Number(tk.bidSize);
+      snap.askSize = Number(tk.askSize);
+      snap.vol24h  = Number(tk.vol24h);
+      snap.high24h = Number(tk.high24h);
+      snap.low24h  = Number(tk.low24h);
+      snap.tickerTs = Number(tk.ts);
+      if (snap.bid > 0 && snap.ask > 0) {
+        snap.mid           = (snap.bid + snap.ask) / 2;
+        snap.spread        = snap.ask - snap.bid;
+        snap.spreadBps     = (snap.spread / snap.mid) * 10_000;
+        snap.halfSpreadBps = snap.spreadBps / 2;
+      }
+      if (bk?.asks?.length && bk?.bids?.length) {
+        snap.bookAsk = Number(bk.asks[0][0]);
+        snap.bookBid = Number(bk.bids[0][0]);
+        snap.bookTs  = Number(bk.ts);
+        const bmid = (snap.bookAsk + snap.bookBid) / 2;
+        if (bmid > 0) snap.bookSpreadBps = ((snap.bookAsk - snap.bookBid) / bmid) * 10_000;
+      }
+      if (mp) { snap.markPrice = Number(mp.markPrice); snap.indexPrice = Number(mp.indexPrice); }
+      if (fr) {
+        snap.fundingRate = Number(fr.fundingRate);
+        snap.fundingIntervalHours = Number(fr.fundingInterval) || 8;
+        // Annualised for comparability with the Binance figure the carry work used.
+        snap.fundingAprPct = snap.fundingRate * (24 / snap.fundingIntervalHours) * 365 * 100;
+      }
+      snap.ok = true;
+      break;
+    } catch (e) {
+      snap.error = e.message;
+      if (i < BLOFIN_TRIES - 1) await sleep(1500 * (i + 1));
+    }
+  }
+
+  // Binance's live quote for the same instant, so `basisBps` is a venue
+  // difference rather than a clock difference. Its own try: Binance being slow
+  // must not void a BloFin snapshot we already hold.
+  try {
+    const bt = await j(`${BASE}/fapi/v1/ticker/bookTicker?symbol=${SYMBOL}`, 2);
+    snap.binanceBid = Number(bt.bidPrice);
+    snap.binanceAsk = Number(bt.askPrice);
+    if (snap.binanceBid > 0 && snap.binanceAsk > 0) {
+      snap.binanceMid = (snap.binanceBid + snap.binanceAsk) / 2;
+      snap.binanceSpreadBps = ((snap.binanceAsk - snap.binanceBid) / snap.binanceMid) * 10_000;
+      if (snap.ok && snap.mid > 0) {
+        snap.basisBps = ((snap.mid - snap.binanceMid) / snap.binanceMid) * 10_000;
+      }
+    }
+  } catch (e) { snap.binanceQuoteError = e.message; }
+
+  // Reference only — never sizes anything. Separate try so a balance failure
+  // cannot cost us the market snapshot we already have.
+  try {
+    const rows = await blofin.getBalance('futures');
+    const usdt = (Array.isArray(rows) ? rows : []).find(r => r.currency === 'USDT');
+    if (usdt) {
+      snap.account.available = Number(usdt.available);
+      snap.account.balance   = Number(usdt.balance);
+      snap.account.frozen    = Number(usdt.frozen);
+    } else {
+      snap.account.error = 'no USDT row';
+    }
+  } catch (e) { snap.account.error = e.message; }
+
+  log(snap.ok
+    ? `blofin: last ${snap.last} bid ${snap.bid} ask ${snap.ask} spread ${snap.spreadBps?.toFixed(3)}bp mark ${snap.markPrice} funding ${snap.fundingAprPct?.toFixed(2)}%/yr · basis vs binance ${snap.basisBps == null ? 'n/a' : snap.basisBps.toFixed(2) + 'bp'} · demo avail ${snap.account.available ?? 'n/a'}`
+    : `blofin: UNAVAILABLE after ${snap.attempts} attempts — ${snap.error}`);
+  return snap;
+}
+
+/**
+ * Slippage in bp to apply to a paper fill, and where the number came from.
+ *
+ * Rule: `max(BloFin's measured half-spread, the pre-registered 2bp)`.
+ *   - Taking the max means BloFin's real book can only ever make the simulation
+ *     MORE expensive, never cheaper. A venue quoting a 0.02bp top-of-book would
+ *     otherwise silently hand the paper account a cost model far kinder than
+ *     the one the 7-year family was scored on, and the P&L would stop being
+ *     comparable to that backtest.
+ *   - Crossing the spread is the honest floor of a market order's cost, not its
+ *     whole cost — top-of-book depth is not walked here. Sizes are ~0.02 BTC
+ *     against a book quoting whole BTC at the touch, so impact beyond level 1
+ *     is not the binding term; if sizing ever grows this needs revisiting.
+ */
+function slipBpFor(bf) {
+  const measured = bf?.ok && Number.isFinite(bf.halfSpreadBps) && bf.halfSpreadBps >= 0
+    ? bf.halfSpreadBps : null;
+  if (measured == null) return { bp: PAPER_SLIP_BP, source: 'model', measuredBp: null };
+  const bp = Math.max(measured, PAPER_SLIP_BP);
+  return { bp, source: bp === measured ? 'blofin-book' : 'model-floor', measuredBp: measured };
+}
+
+/**
+ * Collapse the nine readings into ONE directional decision for ONE account.
+ *
+ * Nine uncorrelated toy strategies on one balance is not what an automation
+ * looks like, so the readings vote instead. Only hypotheses that are both
+ * triggered and directional this bar get a vote; quiet and n/a ones abstain
+ * rather than counting as disagreement.
+ *
+ * Scoring follows the shape scripts/poly/btc-5/trigger-check.js already uses on
+ * the Polymarket instrument (score the directions separately, take the winner,
+ * require a threshold) — the pattern, not its thresholds, which are tuned for a
+ * 5-minute binary market and would be meaningless here.
+ */
+function compositeSignal(readings) {
+  const voters = readings.filter(r => r.triggered && (r.side === 'long' || r.side === 'short'));
+  const longVotes  = voters.filter(r => r.side === 'long').length;
+  const shortVotes = voters.filter(r => r.side === 'short').length;
+  const n = voters.length;
+
+  const majority  = longVotes === shortVotes ? null : (longVotes > shortVotes ? 'long' : 'short');
+  const votes     = Math.max(longVotes, shortVotes);
+  const agreement = n > 0 ? votes / n : 0;
+  const pass      = !!majority && n >= PAPER_MIN_TRIGGERED && agreement >= PAPER_MIN_AGREEMENT;
+
+  return {
+    side: pass ? majority : null,
+    nTriggered: n, longVotes, shortVotes, votes,
+    agreement: Number(agreement.toFixed(3)),
+    total: readings.length,
+    drivers: voters.map(r => `${r.id}:${r.side}`),
+    majorityDrivers: majority ? voters.filter(r => r.side === majority).map(r => r.id) : [],
+  };
+}
+
+/** Lazily initialise the paper book on `state`. Persisted by saveState() like everything else. */
+function paperBook() {
+  if (!state.paper) {
+    state.paper = {
+      startEquity: PAPER_START_EQUITY, equity: PAPER_START_EQUITY,
+      realizedPnl: 0, trades: 0, wins: 0, losses: 0,
+      open: null, lastBarProcessed: null, startedAt: Date.now(),
+    };
+  }
+  return state.paper;
+}
+
+const money = v => `$${Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const px    = v => `$${Number(v).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+
+/**
+ * Adverse slippage on a fill: a buy pays up, a sell gets hit down. `bp` comes
+ * from slipBpFor() — BloFin's measured half-spread when the venue answered,
+ * the pre-registered 2bp floor when it did not.
+ */
+function slipped(price, action, bp = PAPER_SLIP_BP) {
+  const s = bp / 10_000;
+  return action === 'buy' ? price * (1 + s) : price * (1 - s);
+}
+
+/**
+ * The venue difference this project refuses to assume away: BloFin mid vs
+ * Binance mid, both live, both sampled inside the same snapshot. Computed in
+ * blofinSnapshot(); this is just the accessor.
+ */
+const venueBasisBps = bf => (bf?.ok && Number.isFinite(bf.basisBps)) ? bf.basisBps : null;
+
+/**
+ * BloFin's live last against the Binance BAR CLOSE the signal was computed
+ * from. Explicitly NOT a basis — it is dominated by however long ago the bar
+ * closed, so reading it as a venue gap would be wrong. It is recorded because
+ * it IS the drift a paper entry priced at the bar close actually eats, which is
+ * a real and separate cost question.
+ */
+function driftFromBarCloseBps(binanceClose, bf) {
+  if (!bf?.ok || !(bf.last > 0) || !(binanceClose > 0)) return null;
+  return ((bf.last - binanceClose) / binanceClose) * 10_000;
+}
+
+/**
+ * Open a paper position at the close of the just-closed bar.
+ *
+ * Sizing uses the SAME config knobs as the real path (riskPerTradePct,
+ * stopAtrMult, leverage, marginUtilCap) but against the paper balance. One
+ * deliberate difference from maybeTrade(): where the real path posts a visible
+ * SKIP when required margin breaches marginUtilCap, the paper book scales the
+ * size DOWN to the largest that fits and records `sizeCappedByMargin`. A real
+ * account going silent is a defect worth shouting about (audit A4); a paper
+ * account going silent just stops showing the owner anything.
+ */
+async function paperOpen(book, comp, ctx, cfg, forcedSide, bf) {
+  const side = forcedSide || comp.side;
+  const stopDist = cfg.stopAtrMult * ctx.atr;
+  if (!(stopDist > 0)) { log('paper: no ATR — cannot size to a stop'); return null; }
+
+  const riskUsd = book.equity * (cfg.riskPerTradePct / 100);
+  let sizeBtc = riskUsd / stopDist;
+
+  // Margin cap, evaluated against the paper balance.
+  const maxMargin = book.equity * cfg.marginUtilCap;
+  const maxSizeBtc = (maxMargin * cfg.leverage) / ctx.close;
+  const capped = sizeBtc > maxSizeBtc;
+  if (capped) sizeBtc = maxSizeBtc;
+
+  sizeBtc = Math.floor(sizeBtc / PAPER_LOT_BTC) * PAPER_LOT_BTC;
+  if (sizeBtc < PAPER_LOT_BTC) { log(`paper: size ${sizeBtc} below lot ${PAPER_LOT_BTC} — no entry`); return null; }
+  sizeBtc = Number(sizeBtc.toFixed(4));
+
+  // Fill modelled against BloFin's own book, not a Binance-shaped guess.
+  const slip = slipBpFor(bf);
+  const entryPrice = slipped(ctx.close, side === 'long' ? 'buy' : 'sell', slip.bp);
+  const notional   = sizeBtc * entryPrice;
+  const entryFee   = notional * (PAPER_FEE_BP / 10_000);
+  const stop   = side === 'long' ? entryPrice - stopDist : entryPrice + stopDist;
+  const target = side === 'long' ? entryPrice + PAPER_TP_R * stopDist : entryPrice - PAPER_TP_R * stopDist;
+
+  book.open = {
+    id: `paper-${ctx.barOpen}-${side}`,
+    side, sizeBtc, entryPrice, entrySignalPrice: ctx.close,
+    entryBarOpen: ctx.barOpen, entryAt: Date.now(),
+    stop, target, stopDist, riskUsd, notional, entryFee,
+    leverage: cfg.leverage, marginUsd: notional / cfg.leverage,
+    holdBars: cfg.holdBars, barsHeld: 0,
+    equityAtEntry: book.equity,
+    sizeCappedByMargin: capped,
+    composite: comp, forced: !!forcedSide,
+    // venue provenance for this fill
+    entrySlipBp: slip.bp, entrySlipSource: slip.source, entryMeasuredHalfSpreadBp: slip.measuredBp,
+    entryBlofin: bf?.ok ? {
+      last: bf.last, bid: bf.bid, ask: bf.ask, mid: bf.mid, spreadBps: bf.spreadBps,
+      markPrice: bf.markPrice, fundingAprPct: bf.fundingAprPct, ts: bf.tickerTs,
+    } : null,
+    entryVenueBasisBps: venueBasisBps(bf),
+    entryDriftFromBarCloseBps: driftFromBarCloseBps(ctx.close, bf),
+  };
+
+  await post(side === 'long' ? 'long' : 'short', [
+    `${MARK} · ${side === 'long' ? '📈' : '📉'} **OPENED ${side.toUpperCase()}**`,
+    ``,
+    // A forced entry has no composite behind it — saying "composite 0/9" would
+    // be a false attribution on the one post most likely to be read as a signal.
+    `opened ${side.toUpperCase()} ${sizeBtc.toFixed(4)} BTC @ ${px(entryPrice)} (${forcedSide ? '--paper-force, mechanism test' : `composite ${comp.votes}/${comp.total} ${side === 'long' ? 'bullish' : 'bearish'}`})`,
+    `**Stop** ${px(stop)} · **Target** ${px(target)} (+${PAPER_TP_R.toFixed(1)}R) · **Time stop** ${cfg.holdBars} bars`,
+    `**Risk** ${money(riskUsd)} (${cfg.riskPerTradePct}%) · **Notional** ${money(notional)} · **Margin** ${money(notional / cfg.leverage)} @ ${cfg.leverage}x`,
+    `**Driving** ${comp.majorityDrivers.join(', ') || '—'}${comp.nTriggered > comp.votes ? ` (against ${comp.nTriggered - comp.votes})` : ''}`,
+    bf?.ok
+      ? `**BloFin** bid ${px(bf.bid)} / ask ${px(bf.ask)} · spread ${bf.spreadBps.toFixed(2)}bp · mark ${px(bf.markPrice)} · slip ${slip.bp.toFixed(2)}bp (${slip.source})`
+      : `**BloFin** book unavailable — slip ${slip.bp.toFixed(2)}bp (model)`,
+    `**Equity** ${money(book.equity)}`,
+  ].join('\n'));
+
+  log(`paper OPEN ${side} ${sizeBtc} BTC @ ${entryPrice.toFixed(1)} stop ${stop.toFixed(1)} target ${target.toFixed(1)}`);
+  return book.open;
+}
+
+/** Close the open paper position, write the trade doc, post the alert. */
+async function paperClose(book, exitRef, reason, ctx, bf) {
+  const p = book.open;
+  const exitSlip = slipBpFor(bf);
+  const exitPrice = slipped(exitRef, p.side === 'long' ? 'sell' : 'buy', exitSlip.bp);
+  const exitNotional = p.sizeBtc * exitPrice;
+  const exitFee = exitNotional * (PAPER_FEE_BP / 10_000);
+  const fees = p.entryFee + exitFee;
+
+  const gross = p.side === 'long'
+    ? (exitPrice - p.entryPrice) * p.sizeBtc
+    : (p.entryPrice - exitPrice) * p.sizeBtc;
+  const pnl = gross - fees;
+  const pnlR   = p.riskUsd > 0 ? pnl / p.riskUsd : 0;
+  const pnlPct = p.equityAtEntry > 0 ? (pnl / p.equityAtEntry) * 100 : 0;
+
+  book.equity += pnl;
+  book.realizedPnl += pnl;
+  book.trades += 1;
+  if (pnl >= 0) book.wins += 1; else book.losses += 1;
+
+  const doc = {
+    _id: p.id,
+    mode: 'paper',                 // provenance tag — see the honesty note above
+    engine: 'orderflow-composite', engineVersion: 1,
+    symbol: SYMBOL, instId: INST_ID,
+    side: p.side, sizeBtc: p.sizeBtc,
+    entryPrice: p.entryPrice, entrySignalPrice: p.entrySignalPrice,
+    entryBarOpen: p.entryBarOpen, entryAt: new Date(p.entryAt),
+    exitPrice, exitRef, exitBarOpen: ctx.barOpen, exitAt: new Date(),
+    exitReason: reason, barsHeld: p.barsHeld,
+    stop: p.stop, target: p.target, stopDist: p.stopDist,
+    riskUsd: p.riskUsd, notional: p.notional, leverage: p.leverage,
+    marginUsd: p.marginUsd, sizeCappedByMargin: p.sizeCappedByMargin,
+    grossPnlUsd: gross, feesUsd: fees,
+    entryFeeUsd: p.entryFee, exitFeeUsd: exitFee,
+    // Slippage is now per-leg and venue-sourced. `slippageModelBp` is the
+    // pre-registered 2bp floor kept for comparability with the 7-year backtest;
+    // the applied numbers are max(BloFin half-spread, floor) — see slipBpFor().
+    slippageModelBp: PAPER_SLIP_BP, feeBpPerLeg: PAPER_FEE_BP,
+    entrySlipBp: p.entrySlipBp ?? PAPER_SLIP_BP, entrySlipSource: p.entrySlipSource ?? 'model',
+    exitSlipBp: exitSlip.bp, exitSlipSource: exitSlip.source,
+    entryBlofin: p.entryBlofin ?? null,
+    exitBlofin: bf?.ok ? {
+      last: bf.last, bid: bf.bid, ask: bf.ask, mid: bf.mid, spreadBps: bf.spreadBps,
+      markPrice: bf.markPrice, fundingAprPct: bf.fundingAprPct, ts: bf.tickerTs,
+    } : null,
+    entryVenueBasisBps: p.entryVenueBasisBps ?? null, exitVenueBasisBps: venueBasisBps(bf),
+    entryDriftFromBarCloseBps: p.entryDriftFromBarCloseBps ?? null,
+    exitDriftFromBarCloseBps: driftFromBarCloseBps(ctx.close, bf),
+    realizedPnlUsd: pnl, pnlR, pnlPct,
+    equityBefore: p.equityAtEntry, equityAfter: book.equity,
+    // which hypotheses were driving it
+    composite: p.composite, drivers: p.composite?.drivers ?? [],
+    majorityDrivers: p.composite?.majorityDrivers ?? [],
+    forced: !!p.forced,
+    createdAt: new Date(),
+  };
+  try { (await paperTrades()).replaceOne({ _id: doc._id }, doc, { upsert: true }); }
+  catch (e) { log(`paper trade write failed: ${e.message}`); }
+
+  const reasonLabel = { stop: 'stop', target: 'target', time: `time stop (${p.holdBars} bars)`, manual: 'manual close' }[reason] || reason;
+  await post(pnl >= 0 ? 'long' : 'short', [
+    `${MARK} · ${pnl >= 0 ? '✅' : '🔻'} **CLOSED ${p.side.toUpperCase()}**`,
+    ``,
+    `closed ${pnl >= 0 ? '+' : '−'}${money(Math.abs(pnl))} (${pnl >= 0 ? '+' : '−'}${Math.abs(pnlPct).toFixed(2)}%), running P&L: ${book.realizedPnl >= 0 ? '+' : '−'}${money(Math.abs(book.realizedPnl))}`,
+    `**Exit** ${reasonLabel} @ ${px(exitPrice)} · held ${p.barsHeld} bar${p.barsHeld === 1 ? '' : 's'} · ${pnlR >= 0 ? '+' : '−'}${Math.abs(pnlR).toFixed(2)}R`,
+    `**Entry** ${px(p.entryPrice)} · ${p.sizeBtc.toFixed(4)} BTC · fees ${money(fees)}`,
+    bf?.ok
+      ? `**BloFin** bid ${px(bf.bid)} / ask ${px(bf.ask)} · spread ${bf.spreadBps.toFixed(2)}bp · exit slip ${exitSlip.bp.toFixed(2)}bp (${exitSlip.source})`
+      : `**BloFin** book unavailable — exit slip ${exitSlip.bp.toFixed(2)}bp (model)`,
+    `**Equity** ${money(book.equity)} · ${book.trades} trade${book.trades === 1 ? '' : 's'} · ${book.wins}W/${book.losses}L`,
+  ].join('\n'));
+
+  log(`paper CLOSE ${p.side} ${reason} @ ${exitPrice.toFixed(1)} pnl ${pnl.toFixed(2)} (${pnlR.toFixed(2)}R) equity ${book.equity.toFixed(2)}`);
+  book.open = null;
+  return doc;
+}
+
+/** Unrealised P&L of the open position at a given mark, net of both legs' fees. */
+function paperUnrealised(p, mark) {
+  if (!p) return 0;
+  const gross = p.side === 'long'
+    ? (mark - p.entryPrice) * p.sizeBtc
+    : (p.entryPrice - mark) * p.sizeBtc;
+  return gross - p.entryFee - (p.sizeBtc * mark * (PAPER_FEE_BP / 10_000));
+}
+
+/**
+ * One paper bar: manage the open position against the bar that just closed,
+ * then consider a new entry at its close. Exactly one position at a time —
+ * mirroring BloFin's net position mode, where a fresh opposite entry would
+ * silently close the existing one against its cost basis rather than hedge it
+ * (CLAUDE.md, execution layer, one-direction book guard).
+ */
+async function paperCycle(readings, ctx, cfg, bf, opts = {}) {
+  const book = paperBook();
+  const comp = compositeSignal(readings);
+
+  // Re-running the same bar (--probe / --once --force) must not double-count
+  // barsHeld or re-enter. An explicit paper-force is the one intentional override.
+  const replay = book.lastBarProcessed === ctx.barOpen;
+  if (replay && !opts.forceSide && !opts.forceClose) {
+    return { comp, book, skipped: 'bar already processed' };
+  }
+
+  let closed = null;
+  if (book.open && !replay) book.open.barsHeld += 1;
+
+  // ── manage the open position ───────────────────────────────────────────────
+  if (book.open) {
+    const p = book.open;
+    if (opts.forceClose) {
+      closed = await paperClose(book, ctx.close, 'manual', ctx, bf);
+    } else if (!replay) {
+      const stopHit = p.side === 'long' ? ctx.low <= p.stop : ctx.high >= p.stop;
+      const tpHit   = p.side === 'long' ? ctx.high >= p.target : ctx.low <= p.target;
+      // Both touched inside one bar and we have no intrabar path: assume the
+      // stop first. Pessimistic by construction, and stated rather than hidden.
+      if (stopHit)        closed = await paperClose(book, p.stop, 'stop', ctx, bf);
+      else if (tpHit)     closed = await paperClose(book, p.target, 'target', ctx, bf);
+      else if (p.barsHeld >= p.holdBars) closed = await paperClose(book, ctx.close, 'time', ctx, bf);
+    }
+  }
+
+  // ── consider an entry ──────────────────────────────────────────────────────
+  let opened = null;
+  if (!book.open && (opts.forceSide || comp.side)) {
+    opened = await paperOpen(book, comp, ctx, cfg, opts.forceSide, bf);
+  }
+
+  // ── mark to market, one equity point per bar ───────────────────────────────
+  const unrealised = paperUnrealised(book.open, ctx.close);
+  const equityMark = book.equity + unrealised;
+  const eqDoc = {
+    _id: `eq-1h-${ctx.barOpen}`,
+    mode: 'paper',
+    engine: 'orderflow-composite',
+    symbol: SYMBOL, barOpen: ctx.barOpen, barOpenIso: new Date(ctx.barOpen).toISOString(),
+    close: ctx.close,
+    equity: equityMark, realisedEquity: book.equity,
+    realizedPnlUsd: book.realizedPnl, unrealizedPnlUsd: unrealised,
+    startEquity: book.startEquity,
+    returnPct: book.startEquity > 0 ? ((equityMark - book.startEquity) / book.startEquity) * 100 : 0,
+    trades: book.trades, wins: book.wins, losses: book.losses,
+    position: book.open ? {
+      side: book.open.side, sizeBtc: book.open.sizeBtc, entryPrice: book.open.entryPrice,
+      stop: book.open.stop, target: book.open.target, barsHeld: book.open.barsHeld,
+    } : null,
+    composite: {
+      side: comp.side, votes: comp.votes, nTriggered: comp.nTriggered,
+      longVotes: comp.longVotes, shortVotes: comp.shortVotes,
+      agreement: comp.agreement, drivers: comp.drivers,
+    },
+    // Venue truth at the mark. `close` above is Binance; these are BloFin's own
+    // numbers for the same instant, kept side by side so the two can be diffed
+    // rather than assumed equal.
+    blofin: bf ? {
+      ok: bf.ok, last: bf.last, bid: bf.bid, ask: bf.ask, mid: bf.mid,
+      spreadBps: bf.spreadBps, markPrice: bf.markPrice, indexPrice: bf.indexPrice,
+      fundingRate: bf.fundingRate, fundingAprPct: bf.fundingAprPct,
+      binanceMid: bf.binanceMid, venueBasisBps: venueBasisBps(bf),
+      driftFromBarCloseBps: driftFromBarCloseBps(ctx.close, bf), error: bf.error,
+    } : null,
+    createdAt: new Date(),
+  };
+  try { (await paperEquity()).replaceOne({ _id: eqDoc._id }, eqDoc, { upsert: true }); }
+  catch (e) { log(`paper equity write failed: ${e.message}`); }
+
+  book.lastBarProcessed = ctx.barOpen;
+  return { comp, book, opened, closed, unrealised, equityMark };
+}
+
+/** One-line book status for the per-bar post. No hedging words by design. */
+function renderBook(paper) {
+  if (!paper) return null;
+  const b = paper.book;
+  const c = paper.comp;
+  const eq = `**Equity** ${money(paper.equityMark ?? b.equity)} · ${b.realizedPnl >= 0 ? '+' : '−'}${money(Math.abs(b.realizedPnl))} realised · ${b.trades}T ${b.wins}W/${b.losses}L`;
+  if (b.open) {
+    const p = b.open;
+    const u = paper.unrealised ?? 0;
+    return [
+      `**Open** ${p.side.toUpperCase()} ${p.sizeBtc.toFixed(4)} BTC @ ${px(p.entryPrice)} · ${u >= 0 ? '+' : '−'}${money(Math.abs(u))} · bar ${p.barsHeld}/${p.holdBars} · stop ${px(p.stop)} · target ${px(p.target)}`,
+      eq,
+    ].join('\n');
+  }
+  return [
+    `**Flat** · composite ${c.side ? `${c.votes}/${c.total} ${c.side === 'long' ? 'bullish' : 'bearish'}` : `${c.nTriggered} triggered, no ${PAPER_MIN_TRIGGERED}+ majority`}`,
+    eq,
+  ].join('\n');
+}
+
 /** Resolve the actual fill by clientOrderId. Order history carries it; fills-history does not. */
 async function resolveFill(clientOrderId, tries = 6) {
   for (let i = 0; i < tries; i++) {
@@ -699,9 +1320,24 @@ const signals = () => db.connect().then(d => d.collection('orderflow_experiment_
 const orders  = () => db.connect().then(d => d.collection('orderflow_experiment_orders'));
 const expState = () => db.connect().then(d => d.collection('orderflow_experiment_state'));
 
+// Paper layer — separate collections on purpose. `orderflow_experiment_orders`
+// is reserved for the dormant real-order path and must never receive a
+// simulated fill; an analyst joining these two later would otherwise be unable
+// to tell an exchange fill from a modelled one. Every doc written here carries
+// `mode: "paper"`.
+const paperTrades = () => db.connect().then(d => d.collection('orderflow_experiment_paper_trades'));
+const paperEquity = () => db.connect().then(d => d.collection('orderflow_experiment_paper_equity'));
+
+// BloFin's own market, one row per 1h bar. Kept as its own collection rather
+// than only as a field on the signals doc so the venue-comparison question
+// ("how far does BloFin drift from Binance, and when?") can be asked without
+// dragging 9 hypothesis readings and a feature block along with every row.
+// Read-only data: nothing in here was produced by an order.
+const blofinMarket = () => db.connect().then(d => d.collection('orderflow_experiment_blofin_market'));
+
 // ─── the cycle ───────────────────────────────────────────────────────────────
 
-async function cycle({ force = false } = {}) {
+async function cycle({ force = false, paperForceSide = null, paperForceClose = false } = {}) {
   const cfg = loadConfig();
 
   const k1 = await klines('1h', BARS_1H);
@@ -725,7 +1361,7 @@ async function cycle({ force = false } = {}) {
 
   const t = F.n - 1;
   const readings = readAll(F, VB, F4, oiArr);
-  const ctx = { barOpen, close: F.C[t], atr: F.atr[t] };
+  const ctx = { barOpen, close: F.C[t], atr: F.atr[t], high: F.H[t], low: F.L[t] };
 
   // Order path. With the gate shut every reading returns 'observed'; the
   // per-bar post below still shows exactly which ones WOULD have fired, so a
@@ -735,6 +1371,51 @@ async function cycle({ force = false } = {}) {
     if (!rd.triggered) continue;
     const res = await maybeTrade(rd, ctx, cfg);
     actions.push({ id: rd.id, ...res });
+  }
+
+  // BloFin's own market, read-only. Fails soft: a null/!ok snapshot degrades
+  // the paper fill model to the pre-registered 2bp and records the gap.
+  let bf = null;
+  try { bf = await blofinSnapshot(); }
+  catch (e) { log(`blofin snapshot threw (paper falls back to model slippage): ${e.message}`); }
+
+  // Paper layer — always on, independent of cfg.tradingEnabled, and incapable
+  // of reaching the exchange with a WRITE. Wrapped so a paper fault can never
+  // take down the readings pipeline that was here first.
+  let paper = null;
+  try {
+    paper = await paperCycle(readings, ctx, cfg, bf, { forceSide: paperForceSide, forceClose: paperForceClose });
+  } catch (e) {
+    log(`paper layer error (readings unaffected): ${e.stack || e.message}`);
+  }
+
+  if (bf) {
+    const mktDoc = {
+      _id: `bf-1h-${barOpen}`,
+      barOpen, barOpenIso: new Date(barOpen).toISOString(),
+      instId: INST_ID, env: bf.env, ok: bf.ok, attempts: bf.attempts, error: bf.error,
+      last: bf.last, bid: bf.bid, ask: bf.ask, mid: bf.mid,
+      bidSize: bf.bidSize, askSize: bf.askSize,
+      spread: bf.spread, spreadBps: bf.spreadBps, halfSpreadBps: bf.halfSpreadBps,
+      bookBid: bf.bookBid, bookAsk: bf.bookAsk, bookSpreadBps: bf.bookSpreadBps, bookTs: bf.bookTs,
+      markPrice: bf.markPrice, indexPrice: bf.indexPrice,
+      fundingRate: bf.fundingRate, fundingIntervalHours: bf.fundingIntervalHours,
+      fundingAprPct: bf.fundingAprPct,
+      vol24h: bf.vol24h, high24h: bf.high24h, low24h: bf.low24h, tickerTs: bf.tickerTs,
+      // Binance side. `binanceBid/Ask/Mid` are the live quote sampled inside the
+      // same snapshot — that pairing is what makes venueBasisBps a basis.
+      // `binanceClose` is the 1h bar the signal was computed from, and the drift
+      // against it is a lag measure, deliberately named so nobody reads it as basis.
+      binanceBid: bf.binanceBid, binanceAsk: bf.binanceAsk, binanceMid: bf.binanceMid,
+      binanceSpreadBps: bf.binanceSpreadBps, binanceQuoteError: bf.binanceQuoteError,
+      venueBasisBps: venueBasisBps(bf),
+      binanceClose: F.C[t], driftFromBarCloseBps: driftFromBarCloseBps(F.C[t], bf),
+      // Reference only — the paper book never sizes off this.
+      demoAccount: bf.account,
+      readOnly: true, createdAt: new Date(),
+    };
+    try { (await blofinMarket()).replaceOne({ _id: mktDoc._id }, mktDoc, { upsert: true }); }
+    catch (e) { log(`blofin market doc write failed: ${e.message}`); }
   }
 
   const fired = readings.filter(r => r.triggered);
@@ -752,12 +1433,31 @@ async function cycle({ force = false } = {}) {
     readings, anyTriggered: fired.length > 0, nTriggered: fired.length,
     tradingEnabled: cfg.tradingEnabled, liveHypothesis: cfg.hypothesis,
     breaker: breakerStatus(), actions,
-    engineVersion: 1, createdAt: new Date(),
+    // Composite decision + paper book snapshot. Recorded on the signals doc so
+    // the bar's readings and the decision taken from them stay joined.
+    composite: paper ? paper.comp : null,
+    paper: paper ? {
+      mode: 'paper', equity: paper.equityMark, realizedPnl: paper.book.realizedPnl,
+      openSide: paper.book.open?.side ?? null, opened: !!paper.opened, closed: !!paper.closed,
+    } : null,
+    // BloFin's own market at this bar, read-only. Joined here so a single
+    // signals row carries both the Binance-derived readings and the venue truth
+    // they would have been executed against; the full row lives in
+    // orderflow_experiment_blofin_market.
+    blofin: bf ? {
+      ok: bf.ok, error: bf.error, last: bf.last, bid: bf.bid, ask: bf.ask,
+      spreadBps: bf.spreadBps, markPrice: bf.markPrice, indexPrice: bf.indexPrice,
+      fundingRate: bf.fundingRate, fundingAprPct: bf.fundingAprPct,
+      binanceMid: bf.binanceMid, venueBasisBps: venueBasisBps(bf),
+      driftFromBarCloseBps: driftFromBarCloseBps(F.C[t], bf),
+      demoAvailable: bf.account.available,
+    } : null,
+    engineVersion: 2, createdAt: new Date(),
   };
   const sig = await signals();
   await sig.replaceOne({ _id: doc._id }, doc, { upsert: true });
 
-  await post(fired.length ? 'info' : 'info', renderBar(doc, cfg));
+  await post(fired.length ? 'info' : 'info', renderBar(doc, cfg, paper, bf));
 
   state.lastBarPosted = barOpen;
   state.barsProcessed = (state.barsProcessed || 0) + 1;
@@ -766,10 +1466,10 @@ async function cycle({ force = false } = {}) {
   saveState();
   try { (await expState()).replaceOne({ _id: 'runtime' }, { _id: 'runtime', ...state }, { upsert: true }); } catch {}
 
-  return { barOpen, fired: fired.map(f => f.id), doc };
+  return { barOpen, fired: fired.map(f => f.id), doc, paper, blofin: bf };
 }
 
-function renderBar(doc, cfg) {
+function renderBar(doc, cfg, paper, bf) {
   const f = doc.features;
   const pct = v => v == null ? ' — ' : `P${Math.round(v)}`;
   const rows = doc.readings.map(r => {
@@ -786,9 +1486,15 @@ function renderBar(doc, cfg) {
     ...rows,
     ``,
     fired.length
-      ? `**${fired.length} would fire** — ${fired.map(r => `${r.id} ${r.side}`).join(', ')}. Not sent: ${cfg.tradingEnabled ? `live hypothesis is ${cfg.hypothesis || 'unset'}` : 'trading gate closed'}.`
+      ? `**${fired.length} triggered** — ${fired.map(r => `${r.id} ${r.side}`).join(', ')}. No exchange order: ${cfg.tradingEnabled ? `live hypothesis is ${cfg.hypothesis || 'unset'}` : 'trading gate closed'}.`
       : `No hypothesis triggered.`,
-    `_Observation only. All eight were refuted or came back null on 7y of history (2026-09-06 pre-registered family: cleared none)._`,
+    // Book line. Deliberately free of hedging words — the provenance tag lives
+    // on the stored documents (`mode: "paper"`), per the honesty note in code.
+    ...(renderBook(paper) ? ['', renderBook(paper)] : []),
+    ...(bf ? [bf.ok
+      ? `**BloFin** ${px(bf.last)} · bid ${px(bf.bid)} / ask ${px(bf.ask)} · spread ${bf.spreadBps.toFixed(3)}bp · mark ${px(bf.markPrice)} · funding ${bf.fundingAprPct >= 0 ? '+' : '−'}${Math.abs(bf.fundingAprPct).toFixed(2)}%/yr · basis vs Binance ${venueBasisBps(bf) == null ? 'n/a' : `${venueBasisBps(bf) >= 0 ? '+' : '−'}${Math.abs(venueBasisBps(bf)).toFixed(2)}bp`} · demo avail ${bf.account.available == null ? 'n/a' : money(bf.account.available)}`
+      : `**BloFin** market read unavailable (${bf.attempts} attempts) — \`${String(bf.error).slice(0, 90)}\``] : []),
+    `_Readings above are the 2026-09-06 pre-registered family, which cleared none of the eight on 7y of history._`,
   ].join('\n');
 }
 
@@ -797,10 +1503,13 @@ async function heartbeat() {
   state.lastHeartbeatAt = Date.now();
   saveState();
   const up = ((Date.now() - state.startedAt) / 3600_000).toFixed(1);
+  const b = paperBook();
+  const ret = b.startEquity > 0 ? ((b.equity - b.startEquity) / b.startEquity) * 100 : 0;
   await post('info', [
     `${MARK} · 💓 heartbeat`,
     `Up ${up}h · ${state.barsProcessed || 0} bars scored · ${state.triggersSeen || 0} hypothesis triggers observed`,
     `Trading gate: **${loadConfig().tradingEnabled ? 'OPEN' : 'closed'}** · orders placed ${state.ordersPlaced || 0} · skipped ${state.ordersSkipped || 0}`,
+    `**Equity** ${money(b.equity)} (${ret >= 0 ? '+' : '−'}${Math.abs(ret).toFixed(2)}% from ${money(b.startEquity)}) · ${b.trades} trades · ${b.wins}W/${b.losses}L${b.open ? ` · open ${b.open.side.toUpperCase()} ${b.open.sizeBtc.toFixed(4)} BTC` : ' · flat'}`,
   ].join('\n'));
 }
 
@@ -834,16 +1543,50 @@ async function main() {
     const s = readJson(STATE_FILE, null);
     if (!s) { console.error('no state yet'); process.exit(1); }
     console.log(JSON.stringify({ ...s, config: loadConfig(), breaker: breakerStatus() }, null, 2));
+    const p = s.paper;
+    if (p) {
+      const ret = p.startEquity > 0 ? ((p.equity - p.startEquity) / p.startEquity) * 100 : 0;
+      console.log(`\npaper book — equity ${money(p.equity)} (${ret >= 0 ? '+' : '−'}${Math.abs(ret).toFixed(2)}%) · ` +
+        `${p.trades} trades ${p.wins}W/${p.losses}L · ` +
+        (p.open ? `OPEN ${p.open.side.toUpperCase()} ${p.open.sizeBtc} BTC @ ${px(p.open.entryPrice)} (bar ${p.open.barsHeld}/${p.open.holdBars})` : 'flat'));
+    }
     const age = (Date.now() - (s.updatedAt || 0)) / 60000;
     console.log(`\nlast cycle ${age.toFixed(0)} min ago — ${age < 90 ? 'HEALTHY' : 'STALE'}`);
     process.exit(age < 90 ? 0 : 1);
   }
 
+  // Read-only venue probe. Confirms the BloFin market paths still answer and
+  // prints the raw shapes, so a future 403/shape change is diagnosed in one
+  // command instead of by reading a null in Mongo three days later.
+  if (argv.includes('--blofin-probe')) {
+    const bf = await blofinSnapshot();
+    console.log(JSON.stringify(bf, null, 2));
+    process.exit(bf.ok ? 0 : 1);
+  }
+
   if (argv.includes('--probe')) { await probe(); process.exit(0); }
 
   if (argv.includes('--once')) {
-    const r = await cycle({ force: argv.includes('--force') });
-    log(JSON.stringify(r.skipped ? r : { barOpen: r.barOpen, fired: r.fired }));
+    // --paper-force=long|short and --paper-close are mechanism-verification
+    // levers for the PAPER book only. They cannot reach the exchange: neither
+    // touches maybeTrade(), cfg.tradingEnabled or cfg.hypothesis.
+    const fArg = argv.find(a => a.startsWith('--paper-force='));
+    const paperForceSide = fArg ? fArg.split('=')[1] : null;
+    if (paperForceSide && !['long', 'short'].includes(paperForceSide)) {
+      console.error('--paper-force must be long or short'); process.exit(1);
+    }
+    const r = await cycle({
+      force: argv.includes('--force') || !!paperForceSide || argv.includes('--paper-close'),
+      paperForceSide,
+      paperForceClose: argv.includes('--paper-close'),
+    });
+    log(JSON.stringify(r.skipped ? r : {
+      barOpen: r.barOpen, fired: r.fired,
+      composite: r.paper?.comp?.side ?? null,
+      opened: r.paper?.opened?.id ?? null,
+      closed: r.paper?.closed?._id ?? null,
+      equity: r.paper?.book?.equity ?? null,
+    }));
     await db.disconnect();
     process.exit(0);
   }
@@ -878,9 +1621,24 @@ module.exports = {
   buildFeatures, volumeBucketVpin, hypotheses1h, hypothesis5, readAll,
   trailingPctile, trailingMedian, ema, klines, openInterestHist,
   HYPOTHESIS_IDS, W, VPW, VPIN_N,
+  // paper layer
+  compositeSignal, paperUnrealised, slipped, slipBpFor,
+  venueBasisBps, driftFromBarCloseBps,
+  PAPER_START_EQUITY, PAPER_MIN_TRIGGERED, PAPER_MIN_AGREEMENT,
+  PAPER_SLIP_BP, PAPER_FEE_BP, PAPER_TP_R,
+  // blofin read-only venue layer
+  blofinSnapshot,
 };
 
 if (require.main === module) {
-  for (const s of ['SIGINT', 'SIGTERM']) process.on(s, () => { log(`${s} — exiting`); saveState(); process.exit(0); });
+  // Exit WITHOUT writing state. The daemon's in-memory `state` is a snapshot
+  // taken at module load; anything written to the file since (a `--once` run,
+  // a `--paper-force` verification, a hand edit) is NOT in it. Saving on the
+  // way out therefore overwrites newer on-disk state with older memory —
+  // observed 2026-09-06, when a `pm2 restart` destroyed a freshly-seeded paper
+  // book on exit. Nothing is lost by skipping it: cycle() already saves at the
+  // end of every completed cycle and on every error, so the file is never more
+  // than one cycle behind.
+  for (const s of ['SIGINT', 'SIGTERM']) process.on(s, () => { log(`${s} — exiting (state left as-is on disk)`); process.exit(0); });
   main().catch(e => { log(`fatal: ${e.stack || e.message}`); process.exit(1); });
 }

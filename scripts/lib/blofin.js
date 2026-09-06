@@ -52,6 +52,28 @@ function sign(method, requestPath, body, secret) {
   return { sig, timestamp, nonce };
 }
 
+/**
+ * Resolve an interface name (e.g. 'en0') to its non-internal IPv4 address, for
+ * `localAddress` binding. Returns undefined when unset or unresolvable, and the
+ * caller then behaves exactly as before — an absent/renamed interface degrades
+ * to the default route rather than breaking every BloFin call.
+ *
+ * Why this exists: this host's default route is periodically a ProtonVPN tunnel
+ * whose exit IP Cloudflare blocks, which surfaces as `blofin http 403:
+ * <!DOCTYPE html>` on signed AND unsigned, demo AND prod requests. Measured
+ * 2026-09-06: 1/6 success over the tunnel, 6/6 over en0 in the same minute.
+ * OFF BY DEFAULT — set BLOFIN_BIND_INTERFACE=en0 in .env to opt in.
+ */
+function bindLocalAddress() {
+  const ifname = process.env.BLOFIN_BIND_INTERFACE;
+  if (!ifname) return undefined;
+  try {
+    const nets = require('os').networkInterfaces()[ifname] || [];
+    const v4 = nets.find(n => n.family === 'IPv4' && !n.internal);
+    return v4 ? v4.address : undefined;
+  } catch { return undefined; }
+}
+
 function _request(method, path, { query, body, signed = true, timeoutMs = 10000 } = {}) {
   // Build the query string AFTER filtering empties so a callsite passing
   // `{ instId: undefined }` doesn't leave a trailing `?` in the signed path.
@@ -85,7 +107,11 @@ function _request(method, path, { query, body, signed = true, timeoutMs = 10000 
     // timeout'. Proven 2026-06-25: default → timeout, family:4 → 200 in 1.5s.
     // dns.setDefaultResultOrder('ipv4first') alone is NOT enough — autoSelect
     // still attempts v6. (Docker/curl unaffected — different network paths.)
-    const req = https.request(url, { method, headers, family: 4, autoSelectFamily: false }, res => {
+    const localAddress = bindLocalAddress();
+    const req = https.request(url, {
+      method, headers, family: 4, autoSelectFamily: false,
+      ...(localAddress ? { localAddress } : {}),
+    }, res => {
       let data = '';
       res.on('data', c => (data += c));
       res.on('end', () => {
@@ -122,6 +148,69 @@ function _request(method, path, { query, body, signed = true, timeoutMs = 10000 
 /** Symbol/instrument metadata. instId optional — omit to list all. */
 async function getInstruments(instId) {
   return _request('GET', '/api/v1/market/instruments', { query: { instId }, signed: false });
+}
+
+// ─── Public market data (no auth) ────────────────────────────────────────────
+//
+// PROBED 2026-09-06 against demo-trading-openapi.blofin.com, en0-bound, before
+// any of these were written — per the project rule that BloFin's docs are wrong
+// until a probe says otherwise. Recorded verdicts:
+//
+//   path      `tickers` and `books` are PLURAL. Singular `/market/ticker` and
+//             `/market/book` both return the Cloudflare landing page, not 152404,
+//             so a wrong path here is indistinguishable from the VPN-egress 403 —
+//             check the path before blaming the network.
+//   shape     every one of these returns an ARRAY in `data`, even for a single
+//             instId. Callers below unwrap to the first row.
+//   fields    ticker is `bidPrice`/`askPrice`/`bidSize`/`askSize`/`last`/`ts` —
+//             NOT OKX's `bidPx`/`askPx`, which is the vocabulary the docs' OKX
+//             lineage suggests.
+//   book      levels are 2-tuples `[price, size]`, NOT OKX's 4-tuple
+//             `[price, size, liquidated, orders]`.
+//
+// Verbatim probe responses (BTC-USDT, demo, 2026-09-06T18:02Z):
+//   tickers      {"instId":"BTC-USDT","last":"79718.4","askPrice":"79731",
+//                 "bidPrice":"79730.8","high24h":...,"vol24h":...,"ts":"1788717722107"}
+//   books&size=5 {"asks":[["79731","1940000000000"],...],
+//                 "bids":[["79730.8","4000000000"],...],"ts":"1788717760928"}
+//   mark-price   {"instId":"BTC-USDT","indexPrice":"79766.7","markPrice":"79731.1","ts":...}
+//   funding-rate {"instId":"BTC-USDT","fundingRate":"0.000038104468186336",
+//                 "fundingTime":"1788739200000","fundingInterval":"8"}
+
+/** Best bid/ask + 24h stats for one instrument. Returns the single row, not the array. */
+async function getTicker(instId) {
+  const rows = await _request('GET', '/api/v1/market/tickers', { query: { instId }, signed: false });
+  return (Array.isArray(rows) ? rows : [])[0] || null;
+}
+
+/**
+ * L2 order book. `size` is levels per side (5 is plenty for a spread read).
+ * Returns `{ asks, bids, ts }` where each level is `[price, size]`.
+ */
+async function getOrderBook(instId, size = 5) {
+  const rows = await _request('GET', '/api/v1/market/books', { query: { instId, size }, signed: false });
+  return (Array.isArray(rows) ? rows : [])[0] || null;
+}
+
+/**
+ * Mark and index price. Worth reading separately from the ticker's `last`:
+ * every SL this project places uses `slTriggerPriceType: 'mark'`, so mark — not
+ * last — is the price that decides whether a stop fires.
+ */
+async function getMarkPrice(instId) {
+  const rows = await _request('GET', '/api/v1/market/mark-price', { query: { instId }, signed: false });
+  return (Array.isArray(rows) ? rows : [])[0] || null;
+}
+
+/**
+ * Current funding rate and its interval. Recorded because BloFin's funding is
+ * NOT Binance's: the carry research measured 6.22%/yr here against 11.67%/yr on
+ * Binance, ~13pp apart and at one point opposite in sign. Never reuse Binance's
+ * number for a BloFin position.
+ */
+async function getFundingRate(instId) {
+  const rows = await _request('GET', '/api/v1/market/funding-rate', { query: { instId }, signed: false });
+  return (Array.isArray(rows) ? rows : [])[0] || null;
 }
 
 // ─── Private reads ───────────────────────────────────────────────────────────
@@ -394,6 +483,10 @@ module.exports = {
   isDemo,
   sign,
   getInstruments,
+  getTicker,
+  getOrderBook,
+  getMarkPrice,
+  getFundingRate,
   getBalance,
   getPositions,
   setPositionMode,
