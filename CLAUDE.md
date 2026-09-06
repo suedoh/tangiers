@@ -292,6 +292,29 @@ When extending the BloFin integration: write a quick probe script first, never t
 
 ---
 
+## Order-Flow Experiment Engine — parallel, isolated, observe-only (2026-09-06)
+
+`scripts/research/orderflow-engine.js`, pm2 **`orderflow-engine`**. A second, fully separate engine
+that recomputes the eight pre-registered order-flow hypotheses (H1, H1′, H2, H2redo, H3, H4a, H4b,
+H5, H6) at every 1h BTCUSDT bar close and posts them to `#blofin-recon` prefixed
+`🧪 ORDER-FLOW EXPERIMENT`. Binance public REST only — no TradingView, no CDP, no lock.
+
+- **It places no orders.** The 7-year pre-registered backtest cleared none of the eight (two are
+  FDR-significant in the *opposite* direction), so `.orderflow-experiment-config.json` ships with
+  `tradingEnabled: false`. The execution path is built and gated, not absent.
+- **Shares nothing mutable with the live BTC signal.** Own collections
+  (`orderflow_experiment_{signals,orders,state}`), own state/config/breaker files, `ofexp-` order
+  prefix. Never touches `trades`, `blofin_orders`, `.autotrade-disabled.json`, or
+  `scripts/trigger-check.js`.
+- Circuit breaker `.orderflow-experiment-disabled.json` exists from day one; nothing trips it yet.
+- `make orderflow-status` · `make orderflow-logs` · `make orderflow-probe`.
+
+Detail — port-parity proof, the two audit defects designed out (A4 sizing, A6 fill-based ledger),
+and exactly what enabling trading would require:
+[refactors/2026-09-06-orderflow-experiment-engine.md](refactors/2026-09-06-orderflow-experiment-engine.md).
+
+---
+
 ## CDP Architecture
 
 All scripts connect to **TradingView Desktop** via Chrome DevTools Protocol on `localhost:9222`. No external market data APIs. No Anthropic API in the automated pipeline (only BZ news context classification).

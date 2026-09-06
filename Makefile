@@ -120,6 +120,15 @@ book-status: ## Order-book recorder: freshness, coverage, liq-stream check
 book-logs: ## Tail the order-book recorder log (Ctrl+C to stop)
 	@pm2 logs book-recorder --lines 50
 
+orderflow-status: ## Order-flow experiment engine: freshness, trading gate, breaker
+	@$(NODE) $(TRADING)/scripts/research/orderflow-engine.js --status
+
+orderflow-logs: ## Tail the order-flow experiment engine log (Ctrl+C to stop)
+	@pm2 logs orderflow-engine --lines 50
+
+orderflow-probe: ## End-to-end self-check: Binance → 9 readings → Mongo → Discord
+	@$(NODE) $(TRADING)/scripts/research/orderflow-engine.js --probe
+
 book-report: ## Post the order-book corpus weekly report to Discord now
 	@$(NODE) $(TRADING)/scripts/research/book-report.js
 

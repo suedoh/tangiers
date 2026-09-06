@@ -53,3 +53,8 @@ carry-trades.json
 
 # Research: fetched market-data caches are large and regenerable (fetch.js).
 notes/flow-research/**/klines-*.json
+
+# Order-flow experiment engine (2026-09-06) — isolated observation engine
+.orderflow-experiment-state.json
+.orderflow-experiment-config.json
+.orderflow-experiment-disabled.json
