@@ -23,9 +23,13 @@
  *             ~90s; a survivor has completed its work and hung on an open
  *             libuv handle. 158 trigger-check + 5 discord-bot processes leaked
  *             for two weeks (2026-07-26) with every other class green.
- *   bookRecorder — the spec-07 order-book corpus recorder is still writing.
- *             Its data cannot be backfilled, so silent death is permanent loss.
- *             Skipped when the recorder was never installed on this machine.
+ *   bookRecorder — the spec-07 order-book corpus recorder is still writing,
+ *             AND the rows it writes contain book data. Its data cannot be
+ *             backfilled, so silent death is permanent loss. Self-heals with a
+ *             bounded `pm2 restart` (3 per 6h) — detection alone was proved
+ *             insufficient on 2026-08-14, when 144 correct alerts over 12 days
+ *             changed nothing and 23 days of corpus were lost. Skipped when the
+ *             recorder was never installed on this machine.
  *   discordBot — the bot has actually REACHED Discord recently, not merely run.
  *             Inbound traffic failing is invisible: outbound alerts use curl and
  *             kept working through a multi-week bot outage.
@@ -64,6 +68,24 @@ const RECON_LOG       = path.join(ROOT, 'logs', 'blofin-recon.log');
 const SPOOL_FILE      = path.join(ROOT, '.blofin-spool.ndjson');
 const DOCKER_BIN      = fs.existsSync('/usr/local/bin/docker') ? '/usr/local/bin/docker' : 'docker';
 
+// pm2 is NOT on the cron PATH (`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`)
+// — it lives under nvm. `execFileSync('pm2', …)` from cron therefore ENOENTs,
+// which would make the auto-restart below silently never happen: exactly the
+// class of failure this whole check exists to end. Resolve it explicitly, the
+// same way DOCKER_BIN is resolved, and glob nvm rather than pinning a version.
+const PM2_BIN = (() => {
+  const fixed = ['/opt/homebrew/bin/pm2', '/usr/local/bin/pm2'];
+  for (const p of fixed) if (fs.existsSync(p)) return p;
+  const nvm = path.join(process.env.HOME || '', '.nvm', 'versions', 'node');
+  try {
+    for (const v of fs.readdirSync(nvm).sort().reverse()) {
+      const p = path.join(nvm, v, 'bin', 'pm2');
+      if (fs.existsSync(p)) return p;
+    }
+  } catch { /* no nvm on this machine */ }
+  return null;   // no pm2 ⇒ alert only, never a silent no-op
+})();
+
 const STRIKES_TO_ALERT   = 2;               // 2 × 5-min cron = 10 min of confirmed failure
 const ALERT_COOLDOWN_MS  = 2 * 60 * 60 * 1000;
 const RECON_STALE_MIN    = 20;              // recon cadence is 3 min
@@ -84,6 +106,26 @@ const RECON_ERR_RE = /reconcile errors: [1-9]|resolve errors: [1-9]|^unexpected:
 const SPOOL_STALE_MIN    = 15;
 const BOOK_STATE         = path.join(ROOT, '.book-recorder-state.json');
 const BOOK_STALE_MIN     = 15;              // recorder writes one row per minute
+const BOOK_DIR           = path.join(ROOT, 'data', 'orderbook');
+// The corpus file is the independent witness. writeRow() appends to the day
+// file and THEN rewrites the state file; a state file that keeps advancing
+// while the .ndjson does not means the append side is failing (disk, perms,
+// path) and every "fresh" row is going nowhere.
+const BOOK_FILE_STALE_MIN = 15;
+// Content health. A row is written by ANY inbound frame, so the liquidation
+// feed alone (~25 msg/min, market-wide) is enough to keep minute rows flowing
+// while the depth/tick feeds are dead — fresh rows, zero book data. Freshness
+// cannot see that; only the row contents can. 10 consecutive empty minutes is
+// far beyond the 1–8 isolated empties the 19-day corpus actually contains.
+const BOOK_EMPTY_RUN     = 10;
+const BOOK_TAIL_BYTES    = 16_384;          // ≈40 rows
+// Bounded self-heal. 3 restarts per 6h fixes the observed failure (a stuck
+// reconnect loop: one `pm2 restart` cleared it on 2026-09-06) without
+// hammering a recorder that is broken for a reason restarting cannot fix
+// (Binance IP block, disk full). Past the cap the class stops restarting and
+// stays loud, which is the state that needs hands.
+const BOOK_RESTART_MAX      = 3;
+const BOOK_RESTART_WINDOW_MS = 6 * 60 * 60 * 1000;
 const BOT_HEALTH         = path.join(ROOT, '.discord-bot-health.json');
 const BOT_STALE_MIN      = 20;              // bot polls every minute
 
@@ -306,23 +348,138 @@ function checkZombieProcs() {
 // bookRecorder: the spec-07 round-2 corpus is accumulating live and cannot be
 // backfilled — Binance serves no order-book history. A recorder that dies
 // silently costs days of irreplaceable data, which is the same failure shape as
-// the 158 hung crons and the 24h margin lock: nobody was watching. Skips
-// entirely when the recorder was never installed (no state file).
-function checkBookRecorder() {
-  if (!fs.existsSync(BOOK_STATE)) return { ok: true };   // not installed here
+// the 158 hung crons and the 24h margin lock: nobody was watching.
+//
+// 2026-09-06 — WHY THIS GREW A SELF-HEAL. The recorder stopped writing at
+// 2026-08-14T04:01Z and did not write again until a hand restarted it on
+// 2026-09-06: 23 days, ~33,600 minutes of unbackfillable corpus, gone.
+// Detection was never the problem. The freshness check above caught it in 24
+// minutes (strike 1 at 04:20Z, alert at 04:25Z) and then posted 144 alerts to
+// #blofin-recon, every 2h, for twelve days. Only 6 failed to send; ~138 landed
+// and were read by nobody. pm2 showed `online` the whole time — the process was
+// alive in a reconnect loop, so nothing looked wrong at a glance.
+//
+// The missing link was remediation, not detection. Docker has had a self-heal
+// since day one (`open -g -a Docker`); the recorder had a sentence of advice in
+// an embed. It now restarts itself on the same pattern, because one
+// `pm2 restart book-recorder` is what eventually fixed it.
+//
+// Two failure modes are covered, and they are not the same shape:
+//   stale — no rows at all (dead process, or the observed reconnect loop).
+//           Cross-checked against the newest .ndjson mtime so a state file that
+//           advances while the corpus file does not cannot read as healthy.
+//   empty — rows still arriving but structurally empty. Any inbound frame
+//           writes a minute row, so the market-wide liquidation feed alone is
+//           enough to keep rows flowing with the depth and tick feeds dead.
+//           Freshness reads that as perfectly healthy; it is a silent write of
+//           worthless rows. Same shape as the 2026-07-27 liq-route bug, which
+//           produced a day of rows with liqN structurally 0.
+//
+// Pure so test/watchdog-book.test.js can drive it; skips entirely when the
+// recorder was never installed (no state file).
+function evaluateBookRecorder({ state, fileAgeMin, newestFile, tailRows }, { nowMs = Date.now() } = {}) {
+  const s = state;
+  const rows   = Array.isArray(tailRows) ? tailRows : [];
+  const ageMin = (nowMs - s.lastRowAt) / 60_000;
+  const stats  = `${s.rowsWritten} rows, ${s.reconnects} reconnects`;
+
+  if (!Number.isFinite(ageMin)) {
+    return { ok: false, stale: true, detail: 'book recorder state has no usable lastRowAt' };
+  }
+
+  if (ageMin > BOOK_STALE_MIN) {
+    return { ok: false, stale: true,
+      detail: `order-book recorder last wrote ${ageMin.toFixed(0)} min ago (writes every minute; ${stats})` };
+  }
+
+  // State fresh but the corpus file is not: the append side is failing.
+  if (Number.isFinite(fileAgeMin) && fileAgeMin > BOOK_FILE_STALE_MIN) {
+    return { ok: false, stale: true,
+      detail: `recorder state is fresh (${ageMin.toFixed(0)} min) but ${newestFile || 'the newest day file'} `
+            + `has not been written for ${fileAgeMin.toFixed(0)} min — rows are not reaching disk` };
+  }
+
+  // Content health: a sustained run of empty minutes at the tail.
+  const tail = rows.slice(-BOOK_EMPTY_RUN);
+  const isEmpty = r => r && (r.gap === true || !r.samples);
+  if (tail.length >= BOOK_EMPTY_RUN && tail.every(isEmpty)) {
+    const gaps = tail.filter(r => r.gap === true).length;
+    return { ok: false, empty: true,
+      detail: `recorder is writing but the last ${tail.length} minutes carry no book data `
+            + `(${gaps} explicit gap rows, samples=0 throughout; ${stats}) `
+            + `— depth/tick feeds are down while rows keep flowing` };
+  }
+
+  return { ok: true };
+}
+
+// Bounded `pm2 restart book-recorder`, mirroring checkDocker's self-heal.
+// Returns a sentence describing what happened, appended to the alert detail so
+// the embed says whether hands are still needed.
+function healBookRecorder(state, nowMs) {
+  if (!state.bookRestarts) state.bookRestarts = [];
+  state.bookRestarts = state.bookRestarts.filter(t => nowMs - t < BOOK_RESTART_WINDOW_MS);
+
+  const hrs = BOOK_RESTART_WINDOW_MS / 3_600_000;
+  if (state.bookRestarts.length >= BOOK_RESTART_MAX) {
+    return ` — ${state.bookRestarts.length} auto-restart(s) in the last ${hrs}h did NOT fix it; `
+         + `restarting has stopped. Needs hands: \`pm2 logs book-recorder\`.`;
+  }
+  if (!PM2_BIN) {
+    return ' — pm2 binary not found; cannot auto-restart. Run `pm2 restart book-recorder`.';
+  }
   try {
-    const s = JSON.parse(fs.readFileSync(BOOK_STATE, 'utf8'));
-    const ageMin = (Date.now() - s.lastRowAt) / 60_000;
-    if (ageMin > BOOK_STALE_MIN) {
-      return { ok: false,
-        detail: `order-book recorder last wrote ${ageMin.toFixed(0)} min ago `
-              + `(writes every minute; ${s.rowsWritten} rows, ${s.reconnects} reconnects) `
-              + `— pm2 restart book-recorder` };
-    }
-    return { ok: true };
+    execFileSync(PM2_BIN, ['restart', 'book-recorder'], { stdio: 'pipe', timeout: 30_000 });
+    state.bookRestarts.push(nowMs);
+    // Persist the ledger NOW, not at the end of main(): if anything downstream
+    // throws before writeState(), an unrecorded attempt would let the cap be
+    // exceeded and turn the self-heal into a restart loop.
+    writeState(state);
+    log('book recorder stale/empty — `pm2 restart book-recorder` issued');
+    return ` — auto-restart issued (attempt ${state.bookRestarts.length}/${BOOK_RESTART_MAX} in ${hrs}h); re-checks next cycle.`;
+  } catch (e) {
+    state.bookRestarts.push(nowMs);
+    writeState(state);
+    return ` — auto-restart FAILED: ${String(e.message).split('\n')[0]}. Run \`pm2 restart book-recorder\`.`;
+  }
+}
+
+function checkBookRecorder(state) {
+  if (!fs.existsSync(BOOK_STATE)) return { ok: true };   // not installed here
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(BOOK_STATE, 'utf8'));
   } catch (e) {
     return { ok: false, detail: `book recorder state unreadable: ${e.message}` };
   }
+
+  // Newest day file: mtime as the independent witness, tail as the content probe.
+  let fileAgeMin = null, newestFile = null, tailRows = [];
+  try {
+    const newest = fs.readdirSync(BOOK_DIR)
+      .filter(f => f.endsWith('.ndjson'))
+      .map(f => ({ f, m: fs.statSync(path.join(BOOK_DIR, f)).mtimeMs }))
+      .sort((a, b) => b.m - a.m)[0];
+    if (newest) {
+      newestFile = newest.f;
+      fileAgeMin = (Date.now() - newest.m) / 60_000;
+      const p   = path.join(BOOK_DIR, newest.f);
+      const fd  = fs.openSync(p, 'r');
+      const sz  = fs.fstatSync(fd).size;
+      const len = Math.min(BOOK_TAIL_BYTES, sz);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, sz - len);
+      fs.closeSync(fd);
+      // Drop the leading partial line when the read started mid-row.
+      const lines = buf.toString('utf8').split('\n').filter(Boolean);
+      if (len < sz) lines.shift();
+      for (const l of lines) { try { tailRows.push(JSON.parse(l)); } catch { /* skip */ } }
+    }
+  } catch { /* fall back to state-only evaluation */ }
+
+  const r = evaluateBookRecorder({ state: parsed, fileAgeMin, newestFile, tailRows });
+  if (r.ok) return r;
+  return { ...r, detail: r.detail + healBookRecorder(state, Date.now()) };
 }
 
 // discordBot: the command interface (!analyze, !took, reactions) is read-only
@@ -400,18 +557,21 @@ async function post(type, body) {
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function main() {
+  // Read state BEFORE the checks: checkBookRecorder records its auto-restart
+  // attempts into it, and writeState() at the end persists them.
+  const state = readState();
+
   const results = {
     docker:    checkDocker(),
     mongo:     await checkMongo(),
     recon:     checkReconFresh(),
     spool:     checkSpool(),
     zombieProcs: checkZombieProcs(),
-    bookRecorder: checkBookRecorder(),
+    bookRecorder: checkBookRecorder(state),
     discordBot: checkDiscordBot(),
     marginLow: await checkMarginLow(),
   };
 
-  const state = readState();
   if (!state.strikes)     state.strikes = {};
   if (!state.alerting)    state.alerting = {};
   if (!state.lastAlertAt) state.lastAlertAt = {};
@@ -486,7 +646,10 @@ async function main() {
 
 // Pure evaluator exported for test/watchdog-recon.test.js. The cron entrypoint
 // below is gated so requiring this module never runs a health sweep.
-module.exports = { evaluateReconLog, RECON_WINDOW_PASSES, RECON_MAX_ERR_IN_WINDOW };
+module.exports = {
+  evaluateReconLog, RECON_WINDOW_PASSES, RECON_MAX_ERR_IN_WINDOW,
+  evaluateBookRecorder, BOOK_STALE_MIN, BOOK_FILE_STALE_MIN, BOOK_EMPTY_RUN,
+};
 
 if (require.main === module) {
   main().catch(e => { console.error('[watchdog] fatal:', e.message); process.exit(1); });
