@@ -228,7 +228,7 @@ BloFin's `stopLossTriggerPrice` field on entry orders gets **cancelled by the ex
 | Cadence | What runs | Where |
 |---|---|---|
 | Every 3 min | `recon-once.js` — flushes degraded-mode spool, heals state, resolves fills, checks protection invariant | **host crontab** (moved from container 2026-07-02 — container egress drew Cloudflare 403s) |
-| Every 5 min | `ops/watchdog.js` — Docker/Mongo/recon-freshness/spool health; auto-restarts Docker; alerts `#blofin-recon` | host crontab |
+| Every 5 min | `ops/watchdog.js` — Docker/Mongo/recon-freshness/spool health; alerts `#blofin-recon`; relaunches Docker only with `WATCHDOG_DOCKER_AUTORESTART=true` (off since 2026-11-09) | host crontab |
 | Daily 17:00 ET (≈21:00 UTC) | `daily-pnl-report.js` — account snapshot + open positions + today's activity → `#blofin-recon` | host crontab |
 
 **Protection invariant:** every recon cycle calls `findUnprotectedPositions()` — any open exchange position without an active SL triggers a red 🚨 error post in `#blofin-recon` (same alert palette as recon errors). This is the safety net if Phase B.6 verification ever fails to fire. A recon that *cannot run at all* (Mongo down, API blocked) now also posts a red alert (rate-limited 30 min) instead of failing silently.

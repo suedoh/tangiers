@@ -11,8 +11,10 @@
  *
  * Runs every 5 min on the HOST crontab (never in Docker — it watches Docker).
  * Checks, in order:
- *   docker  — daemon reachable. On failure, attempts a background restart
- *             (`open -g -a Docker`) immediately; alert follows on 2nd strike.
+ *   docker  — daemon reachable; alert follows on 2nd strike. With
+ *             WATCHDOG_DOCKER_AUTORESTART=true a failure also background-launches
+ *             Docker Desktop (`open -g -a Docker`). Off by default since
+ *             2026-11-09: quitting Docker on purpose kept being undone within 5 min.
  *   mongo   — connect to 127.0.0.1:27017 (5s timeout, via lib/db.js).
  *   recon   — logs/blofin-recon.log mtime < RECON_STALE_MIN. Recon runs
  *             every 3 min; 2 consecutive stale reads (10 min apart) cannot
@@ -67,6 +69,7 @@ const STATE_FILE      = path.join(ROOT, '.watchdog-state.json');
 const RECON_LOG       = path.join(ROOT, 'logs', 'blofin-recon.log');
 const SPOOL_FILE      = path.join(ROOT, '.blofin-spool.ndjson');
 const DOCKER_BIN      = fs.existsSync('/usr/local/bin/docker') ? '/usr/local/bin/docker' : 'docker';
+const DOCKER_AUTORESTART = process.env.WATCHDOG_DOCKER_AUTORESTART === 'true';
 
 // pm2 is NOT on the cron PATH (`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`)
 // — it lives under nvm. `execFileSync('pm2', …)` from cron therefore ENOENTs,
@@ -183,9 +186,9 @@ function checkDocker() {
     if (!out) throw new Error('daemon returned empty server version');
     return { ok: true };
   } catch (e) {
+    if (!DOCKER_AUTORESTART) return { ok: false, detail: 'daemon unreachable (auto-restart off: WATCHDOG_DOCKER_AUTORESTART)' };
     // Self-heal attempt: background-launch Docker Desktop. Harmless if it is
-    // mid-startup; containers return via restart:unless-stopped. Comment the
-    // next block out if auto-restart is ever unwanted.
+    // mid-startup; containers return via restart:unless-stopped.
     try {
       execFileSync('/usr/bin/open', ['-g', '-a', 'Docker'], { stdio: 'pipe', timeout: 10_000 });
       log('docker daemon down — restart attempted via `open -g -a Docker`');
@@ -608,7 +611,7 @@ async function main() {
       ``,
       ...infraFailing.map(f => `❌ **${f.name}** — ${f.detail}`),
       ``,
-      `**Action** \`docker compose up -d\` from ~/trading if the auto-restart hasn't recovered it. Re-alerts every ${ALERT_COOLDOWN_MS / 3600000}h while broken.`,
+      `**Action** \`docker compose up -d\` from ~/trading${DOCKER_AUTORESTART ? " if the auto-restart hasn't recovered it" : ''}. Re-alerts every ${ALERT_COOLDOWN_MS / 3600000}h while broken.`,
     ].join('\n');
     await post('error', body);
     for (const f of infraFailing) {
