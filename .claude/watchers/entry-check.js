@@ -20,16 +20,23 @@ const fmt = n => Math.round(n).toLocaleString('en-US');
 const ema = (c, n) => { const k = 2 / (n + 1); let e = c[0]; for (const v of c) e = v * k + e * (1 - k); return e; };
 const trend = k => { const c = k.map(x => +x[4]), p = c.at(-1), a = ema(c, 20), b = ema(c, 50); return p > a && a > b ? 'up' : p < a && a < b ? 'down' : 'mixed'; };
 
-// The levels where orders cluster, low to high, near-duplicates dropped (shared with the tape watcher)
-async function keyLevels(k1d) {
+// The day's lines before near-duplicates are merged: the fixed levels, then the 14-day volume profile, the 200-day line
+// and yesterday's range, all as of the last daily close (00:00 UTC, 7 PM EST), so they hold still for the whole day.
+// A profile computed to the minute rolls its window an hour at a time: on Nov 11 its VAL drifted 74,050 -> 73,807 ->
+// 73,599 in three hours and a line the learner was watching vanished from the chart.
+async function rawLevels(k1d) {
   const now = Date.now();
   k1d ??= (await j('/fapi/v1/klines?symbol=BTCUSDT&interval=1d&limit=500')).filter(x => +x[6] + 10_000 < now);
-  const bars = mkt.completedBars(await mkt.fetchKlines({ symbol: 'BTCUSDT', interval: cfg.interval, startTime: now - cfg.windowDays * DAY, endTime: now }), cfg.interval, now);
-  const vp = mkt.buildVolumeProfile(bars, { rowSize: cfg.rowSize }), pd = k1d.at(-1);
-  const all = [...FIXED, [vp.val, 'the bottom of the busy zone (VAL)'], [vp.poc, 'the busiest price (POC)'], [vp.vah, 'the top of the busy zone (VAH)'],
+  const pd = k1d.at(-1), close = +pd[6] + 1;
+  const bars = mkt.completedBars(await mkt.fetchKlines({ symbol: 'BTCUSDT', interval: cfg.interval, startTime: close - cfg.windowDays * DAY, endTime: close }), cfg.interval, close);
+  const vp = mkt.buildVolumeProfile(bars, { rowSize: cfg.rowSize });
+  return [...FIXED, [vp.val, 'the bottom of the busy zone (VAL)'], [vp.poc, 'the busiest price (POC)'], [vp.vah, 'the top of the busy zone (VAH)'],
     [ema(k1d.map(x => +x[4]), 200), 'the 200-day line'], [+pd[2], "yesterday's high"], [+pd[3], "yesterday's low"]];
-  return all.filter(([L], i) => !all.slice(0, i).some(([M]) => Math.abs(M / L - 1) < 0.0015)).sort((a, b) => a[0] - b[0]);
 }
+// Lines closer than 0.15% read as one, named by the first listed (the fixed levels come first); sorted low to high
+const mergeLevels = all => all.filter(([L], i) => !all.slice(0, i).some(([M]) => Math.abs(M / L - 1) < 0.0015)).sort((a, b) => a[0] - b[0]);
+// The levels where orders cluster, low to high (shared with the coach and the older watchers)
+const keyLevels = async k1d => mergeLevels(await rawLevels(k1d));
 
 async function entryCheck({ window = '15m' } = {}) {
   const now = Date.now(), closed = k => k.filter(x => +x[6] + 10_000 < now);
@@ -79,4 +86,4 @@ if (require.main === module) {
     console.log(`ENTRY ${r.short.line}`);
   }).catch(e => { console.log('FAILED:', e.message); process.exit(1); });
 }
-module.exports = { entryCheck, keyLevels, trend };
+module.exports = { entryCheck, keyLevels, rawLevels, mergeLevels, trend };

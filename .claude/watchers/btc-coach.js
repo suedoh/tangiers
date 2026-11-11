@@ -21,10 +21,11 @@
 //   Replay uses today's key levels, so a level made later in the day can show up early.)
 const fs = require('fs');
 const path = require('path');
-const { keyLevels, trend } = require(path.join(__dirname, 'entry-check.js'));
+const { keyLevels, rawLevels, mergeLevels, trend } = require(path.join(__dirname, 'entry-check.js'));
 const { syncChart } = require(path.join(__dirname, 'chart-draw.js'));
 
-const MIN = 60_000, M5 = 300_000, M15 = 900_000, H = 3_600_000, H4 = 4 * H;
+const MIN = 60_000, M5 = 300_000, M15 = 900_000, H = 3_600_000, H4 = 4 * H, DAY = 24 * H;
+const MOVED_NEAR = 0.03; // the map tells of moved lines within 3% of price; further out they are not on the learner's chart
 const TOUCH = 0.0005, PAD = 0.0005, GAP = 0.001, BREAK = 0.001, COST = 2 * (0.0006 + 0.0002);
 const TIME_STOP = { '1h': 48 * H, '15m': 12 * H }; // the limits the odds were measured with
 const ZONE = 0.0008, REARM = 0.003, ZONE_GAP = 2 * H, ZONE_ANY_GAP = 30 * MIN; // at 0.15% a $335 box was all "zone"
@@ -167,7 +168,8 @@ function passedLine(passed) {
 function mapMessage(m, levels, T, s) {
   const price = m.h1.at(-1).c, b = boxOf(levels, price), w0 = T - H4, h4 = m.h1.filter(x => x.t >= w0);
   const key = [m.td, m.t4, b.floor?.[0], b.ceil?.[0]].join('|'), prev = s?.map;
-  if (s && prev?.key === key && estHour(T) !== 7) return [];
+  const moved = (s?.moved?.lines || []).filter(x => [x.from, x.to].some(L => Math.abs(L / price - 1) < MOVED_NEAR));
+  if (s && prev?.key === key && estHour(T) !== 7 && !moved.length) return [];
   const cvd = h4.reduce((a, x) => a + x.d, 0), move = price - h4[0].o, oiPct = (m.oiAt(T) / m.oiAt(w0) - 1) * 100;
   const read = m.td === 'down' && m.t4 === 'down' ? 'sellers own the big picture'
     : m.td === 'up' && m.t4 === 'up' ? 'buyers own the big picture' : 'the big picture is split, so there is no clear side';
@@ -175,10 +177,13 @@ function mapMessage(m, levels, T, s) {
   if (prev && (prev.td !== m.td || prev.t4 !== m.t4)) changed.push(`the trend is now daily ${m.td}, 4h ${m.t4} (was daily ${prev.td}, 4h ${prev.t4})`);
   if (prev && (prev.floor !== b.floor?.[0] || prev.ceil !== b.ceil?.[0]) && b.floor && b.ceil && prev.floor && prev.ceil)
     changed.push(`the box moved ${b.floor[0] > prev.floor ? 'up' : 'down'} from ${fmt(prev.floor)}-${fmt(prev.ceil)} to ${fmt(b.floor[0])}-${fmt(b.ceil[0])}`);
-  if (s) s.map = { key, T, td: m.td, t4: m.t4, floor: b.floor?.[0], ceil: b.ceil?.[0] };
+  const movedLine = moved.length ? [`LINES MOVED at the ${est(s.moved.T)} daily close (your chart is already redrawn): ` +
+    `${list(moved.map(x => `${x.name} from ${fmt(x.from)} to ${fmt(x.to)}${x.onto ? ` (now on top of ${x.onto[1]}, ${fmt(x.onto[0])}: one line marks both)` : ''}`))}.`] : [];
+  if (s) { s.map = { key, T, td: m.td, t4: m.t4, floor: b.floor?.[0], ceil: b.ceil?.[0] }; delete s.moved; }
   return [
     `MARKET MAP ${est(T)} (open your daily, 4h and 1h charts)`,
-    ...(changed.length ? [`Changed since the ${est(prev.T)} map: ${changed.join('; ')}.`] : prev ? ['Nothing changed since the last map: same trend, same box.'] : []),
+    ...(changed.length ? [`Changed since the ${est(prev.T)} map: ${changed.join('; ')}.`] : prev && !moved.length ? ['Nothing changed since the last map: same trend, same box.'] : []),
+    ...movedLine,
     `1) TREND, big picture first: daily ${TREND[m.td]}, 4h ${TREND[m.t4]}, 1h ${TREND[m.t1]}. Down means lower highs and lower lows with price under its average lines; when the daily and 4h agree, that's the side the bigger players are on: ${read}.`,
     `2) STRUCTURE, the lines to draw: price ${fmt(price)} sits between the floor ${b.floor ? `${fmt(b.floor[0])} (${b.floor[1]})` : 'none'} and the ceiling ${b.ceil ? `${fmt(b.ceil[0])} (${b.ceil[1]})` : 'none'}. ` +
       `Next ones out: ${b.floor2 ? `${fmt(b.floor2[0])} below` : 'nothing below'}, ${b.ceil2 ? `${fmt(b.ceil2[0])} above` : 'nothing above'}.`,
@@ -262,10 +267,27 @@ function score(alerts) {
   return `${by('A')}; ${by('B')}; ${alerts.length - closed.length} open`;
 }
 
+// ── The day's lines: fixed from one daily close (7 PM EST) to the next, then refreshed; the next map says what moved ──
+async function loadLevels(T, s) {
+  if (s.raw && s.levels && Math.floor(s.levelsAt / DAY) === Math.floor(T / DAY)) return;
+  const raw = await rawLevels(), levels = mergeLevels(raw);
+  if (s.raw) {
+    const was = new Map(s.raw.map(([L, name]) => [name, L])), lines = [];
+    for (const [L, name] of raw) {
+      const from = was.get(name);
+      if (from == null || Math.abs(L / from - 1) < 0.0005) continue; // fixed levels, and drifts under $40, are not news
+      const kept = levels.find(([M]) => Math.abs(M / L - 1) < 0.0015);
+      lines.push({ name, from, to: L, onto: kept && kept[1] !== name ? kept : null });
+    }
+    if (lines.length) s.moved = { T: Math.floor(T / DAY) * DAY, lines };
+  }
+  Object.assign(s, { raw, levels, levelsAt: T });
+}
+
 // ── The 1h close at T, or the heads-up 5 minutes before it (T = 5 minutes before the close) ──────────────────────────
 async function step(T, s, alerts, { headsUp = false } = {}) {
   const out = [];
-  if (!s.levels || T - (s.levelsAt || 0) > H) { s.levels = await keyLevels(); s.levelsAt = T; }
+  await loadLevels(T, s);
   const levels = s.levels;
   if (headsUp) {
     // The forming candle as if it closed now: speak only if that would change the map or complete a setup
@@ -301,7 +323,7 @@ async function step(T, s, alerts, { headsUp = false } = {}) {
 
 // ── The 15m close at T: Grade A setups only ──────────────────────────────────────────────────────────────────────
 async function step15(T, s, alerts) {
-  if (!s.levels) { s.levels = await keyLevels(); s.levelsAt = T; }
+  await loadLevels(T, s);
   const [m, k] = await Promise.all([market(T), j(`/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=20&endTime=${T - 1}`)]);
   const bars = k.map(bar).filter(b => b.ct <= T), c = bars.at(-1), out = [];
   if (!c || c.ct !== T) return out;
@@ -321,7 +343,7 @@ async function step15(T, s, alerts) {
 
 // ── Setup zone: price is about to reach the box's floor or ceiling, so a setup may form in the next 15m candles ──────
 async function zone(T, s) {
-  if (!s.levels) { s.levels = await keyLevels(); s.levelsAt = T; }
+  await loadLevels(T, s);
   const [tick, k, oi] = await Promise.all([j('/fapi/v1/ticker/price?symbol=BTCUSDT'), j('/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=1'),
     j('/futures/data/openInterestHist?symbol=BTCUSDT&period=5m&limit=6')]);
   const price = +tick.price, b = boxOf(s.levels, price), f = bar(k[0]), out = [];
@@ -403,4 +425,5 @@ async function main() {
   };
   loop();
 }
-main().catch(e => { console.log('FAILED:', e.message); process.exit(1); });
+if (require.main === module) main().catch(e => { console.log('FAILED:', e.message); process.exit(1); });
+module.exports = { mapMessage, market, loadLevels };
